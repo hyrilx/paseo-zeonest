@@ -12,8 +12,11 @@ export const listDashboardWorkspaces = defineRpc({
 });
 export const resolveDashboard = defineRpc({
   name: "zeonest.billion-context.resolve",
-  input: z.object({ workspaceId: id, agentId: id.optional() }),
-  output: z.object({ url: z.string(), workspaceId: id }),
+  input: z.object({ workspaceId: id, agentId: id.optional(), instanceOrigin: z.string().max(2048).optional() }),
+  output: z.union([
+    z.object({ url: z.string(), workspaceId: id }),
+    z.object({ instances: z.array(z.string()).min(2).max(16), workspaceId: id }),
+  ]),
 });
 export const screenId = "billion-context-dashboard";
 export function dashboardUrl(origin: string, sessionId?: string): string {

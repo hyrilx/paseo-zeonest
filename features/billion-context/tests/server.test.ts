@@ -1,25 +1,31 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer, type RequestListener } from "node:http";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { dashboardUrl } from "../shared/contracts";
 import { preferencesSchema } from "../shared/settings";
 import { listAgents, listWorkspaces, resolveTarget } from "../server/service";
-import { readStatus } from "../server/http";
+import { readManifest, readStatus } from "../server/http";
+import { discoverOrigins } from "../server/discovery";
 import { readPreferences } from "../server/configuration";
 import contribute from "../server/index";
+import contributeRpc from "../server/rpc";
 import contributeSettings from "../server/settings";
 
 test("origins reject credentials, paths, injection and unsafe schemes; URLs encode actual IDs", () => {
   const defaults = preferencesSchema.parse({});
-  assert.equal(defaults.serverOrigin, "http://127.0.0.1:8787");
+  assert.equal(defaults.serverOrigin, "");
+  assert.equal(preferencesSchema.parse({ serverOrigin: "   ", browserOrigin: " " }).serverOrigin, "");
   assert.equal(defaults.browserOrigin, "");
   for (const value of ["javascript:alert(1)", "file:///x", "http://u:secret@host", "http://host/__bili/", "http://host?x=1", "http://host#x", "http://host:0", "http://host:65536", "http://[::::]:1234", "http://999.999.999.999", "http://host\n.bad"]) {
     assert.equal(preferencesSchema.safeParse({ serverOrigin: value }).success, false, value);
   }
   assert.equal(preferencesSchema.parse({ serverOrigin: " https://host.test:443/// " }).serverOrigin, "https://host.test:443");
   assert.equal(preferencesSchema.parse({ serverOrigin: "http://[::1]:8787" }).serverOrigin, "http://[::1]:8787");
-  assert.equal(dashboardUrl(defaults.serverOrigin), "http://127.0.0.1:8787/__bili/");
+  assert.equal(dashboardUrl("http://127.0.0.1:8787"), "http://127.0.0.1:8787/__bili/");
   assert.equal(dashboardUrl("https://dashboard", "actual /?#会话"), "https://dashboard/__bili/#/session/actual%20%2F%3F%23%E4%BC%9A%E8%AF%9D");
 });
 function fixture() {
@@ -29,7 +35,7 @@ function fixture() {
   const handle = { refresh: async () => current ? { agent: current } : null };
   const paseo = { agents: { ref: () => handle }, workspaces: { ref: () => ({ refresh: async () => workspace }) } } as unknown as PluginHandlerContext["paseo"];
   const controller = new AbortController();
-  const preferences = preferencesSchema.parse({ browserOrigin: "https://client.test" });
+  const preferences = preferencesSchema.parse({ serverOrigin: "http://127.0.0.1:8787", browserOrigin: "https://client.test" });
   return { agent, workspace, handle, paseo, controller, preferences, change(value: any) { current = value; } };
 }
 test("detail uses provider identity then returned billion-context identity, not Paseo UUID", async () => {
@@ -75,6 +81,91 @@ test("identity changes and cleanup during lookup discard the result", async () =
     }));
   }
 });
+const manifest = { ok: true, proxy: "billion-context", version: "0.1.215" };
+const origins = ["http://127.0.0.1:9001", "http://127.0.0.1:9002", "http://127.0.0.1:9003"];
+test("auto overview validates manifests, ignores stale ports and never sends a conversation ID", async () => {
+  const f = fixture(); const probed: string[] = [];
+  const result = await resolveTarget(f.paseo, { workspaceId: "w" }, preferencesSchema.parse({}), f.controller.signal,
+    async () => assert.fail("overview must not read status"), async () => origins,
+    async (origin, _signal, timeout) => {
+      probed.push(origin); assert.equal(timeout, 500);
+      if (origin === origins[0]) throw new Error("old process exited");
+      return origin === origins[1] ? manifest : { ok: true, proxy: "another-app", version: "1" };
+    });
+  assert.deepEqual(probed, origins);
+  assert.equal(result.url, origins[1] + "/__bili/");
+});
+test("auto detail checks manifest before identity lookup and only returns exact session matches", async () => {
+  const f = fixture(); const calls: unknown[] = [];
+  const result = await resolveTarget(f.paseo, { workspaceId: "w", agentId: "a" }, preferencesSchema.parse({}), f.controller.signal,
+    async (origin, conversationId, _signal, timeout) => {
+      calls.push({ origin, conversationId, timeout });
+      return origin === origins[1] ? { ok: true, sessionId: "canonical/bili" } : { ok: true, sessionId: "wrong", fallback: true };
+    }, async () => origins, async (origin) => origin === origins[0] ? { ok: true, proxy: "foreign", version: "1" } : manifest);
+  assert.deepEqual(calls, origins.slice(1).map((origin) => ({ origin, conversationId: "provider-id", timeout: 1000 })));
+  assert.equal(result.url, origins[1] + "/__bili/#/session/canonical%2Fbili");
+});
+test("multiple exact matches require choice; selection repeats discovery, manifest and exact session validation", async () => {
+  const f = fixture(); const preferences = preferencesSchema.parse({ browserOrigin: "https://client.test:{port}" });
+  const input = { workspaceId: "w", agentId: "a" };
+  const lookup: typeof readStatus = async (_origin, _id, _signal, timeout) => {
+    assert.ok(timeout === 1000 || timeout === 5000); return { ok: true, sessionId: "same/bili" };
+  };
+  const choices = await resolveTarget(f.paseo, input, preferences, f.controller.signal, lookup, async () => origins, async () => manifest);
+  assert.deepEqual(choices, { instances: origins, workspaceId: "w" }); assert.equal(choices.url, undefined);
+  const selected = await resolveTarget(f.paseo, { ...input, instanceOrigin: origins[1] }, preferences, f.controller.signal,
+    async (origin, id, _signal, timeout) => { assert.equal(origin, origins[1]); assert.equal(id, "provider-id"); assert.equal(timeout, 5000); return { ok: true, sessionId: "same/bili" }; },
+    async () => origins, async (origin) => { assert.equal(origin, origins[1]); return manifest; });
+  assert.equal(selected.url, "https://client.test:9002/__bili/#/session/same%2Fbili");
+  await assert.rejects(resolveTarget(f.paseo, { ...input, instanceOrigin: origins[1] }, preferences, f.controller.signal,
+    async () => assert.fail("stale choice must not get identity"), async () => [origins[0]!], async () => assert.fail()), /实例记录已改变/);
+  await assert.rejects(resolveTarget(f.paseo, { ...input, instanceOrigin: "http://attacker.test" }, preferences, f.controller.signal,
+    async () => assert.fail(), async () => origins, async () => assert.fail()), /实例记录已改变/);
+});
+test("manual origins retain precedence and do not read files or probe other services", async () => {
+  const f = fixture();
+  const result = await resolveTarget(f.paseo, { workspaceId: "w" }, f.preferences, f.controller.signal,
+    async () => assert.fail(), async () => assert.fail("manual does not discover"), async () => assert.fail("manual is explicitly trusted"));
+  assert.equal(result.url, "https://client.test/__bili/");
+});
+test("auto failure and shutdown never fall back to another conversation", async () => {
+  for (const mode of ["empty", "null-session", "fallback", "failed-manifest", "stopped"]) {
+    const f = fixture();
+    await assert.rejects(resolveTarget(f.paseo, { workspaceId: "w", agentId: "a" }, preferencesSchema.parse({}), f.controller.signal,
+      async () => { if (mode === "stopped") f.controller.abort(); return { ok: true, sessionId: mode === "null-session" ? null : "wrong", fallback: mode === "fallback" }; },
+      async () => mode === "empty" ? [] : origins, async () => mode === "failed-manifest" ? {} : manifest),
+    mode === "stopped" ? /已停止/ : /不会打开最近会话/);
+  }
+});
+test("auto discovery has at most four concurrent probes and ignores results after identity changes", async () => {
+  const f = fixture(); let concurrent = 0, peak = 0;
+  const candidates = Array.from({ length: 16 }, (_, index) => `http://127.0.0.1:${9100 + index}`);
+  const result = await resolveTarget(f.paseo, { workspaceId: "w" }, preferencesSchema.parse({}), f.controller.signal,
+    async () => assert.fail(), async () => candidates, async () => {
+      concurrent++; peak = Math.max(peak, concurrent);
+      await new Promise((yes) => setTimeout(yes, 2)); concurrent--; return manifest;
+    });
+  assert.equal(peak, 4); assert.deepEqual(result.instances, candidates);
+  await assert.rejects(resolveTarget(f.paseo, { workspaceId: "w", agentId: "a" }, preferencesSchema.parse({}), f.controller.signal,
+    async () => { f.change({ ...f.agent, persistence: { sessionId: "new-session" } }); return { ok: true, sessionId: "old" }; },
+    async () => [origins[0]!], async () => manifest), /当前会话已改变/);
+});
+test("client port templates validate only the port slot and expand after the instance is resolved", async () => {
+  for (const browserOrigin of ["http://client.test:{port}", "https://[::1]:{port}", "https://localhost:{port}///"]) {
+    assert.ok(preferencesSchema.safeParse({ browserOrigin }).success, browserOrigin);
+  }
+  for (const browserOrigin of ["http://{host}:{port}", "http://{port}.test", "http://host:{unknown}", "http://host:{port}/path", "http://host:12{port}", "http://host:{port}?x=1", "http://u:p@host:{port}", "http://host:{port}:{port}", "javascript:{port}"]) {
+    assert.equal(preferencesSchema.safeParse({ browserOrigin }).success, false, browserOrigin);
+  }
+  assert.equal(preferencesSchema.safeParse({ serverOrigin: "http://localhost:{port}" }).success, false);
+  for (const [serverOrigin, expectedPort] of [["http://localhost:5678", "5678"], ["http://localhost", "80"], ["https://localhost", "443"]]) {
+    const f = fixture();
+    const preferences = preferencesSchema.parse({ serverOrigin, browserOrigin: "https://client.test:{port}" });
+    const value = await resolveTarget(f.paseo, { workspaceId: "w" }, preferences, f.controller.signal);
+    assert.equal(value.url, `https://client.test:${expectedPort}/__bili/`);
+    assert.equal(preferences.browserOrigin, "https://client.test:{port}");
+  }
+});
 test("lists paginate fully and filter archived/internal entries; stopped lists never start IO", async () => {
   const cursors: unknown[] = [];
   const paseo: any = { agents: { list: async ({ page }: any) => {
@@ -97,6 +188,31 @@ async function server(t: { after(fn: () => Promise<void>): void }, handler: Requ
   const address = instance.address(); assert.ok(address && typeof address === "object");
   return "http://127.0.0.1:" + address.port;
 }
+test("inline startup log through real manifest/status HTTP produces a templated exact session link", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "zeonest-billion-inline-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const requests: string[] = [];
+  const origin = await server(t, (req, res) => {
+    requests.push(req.url!);
+    if (req.url === "/__bili/plugin/manifest") res.end(JSON.stringify(manifest));
+    else if (req.url === "/__bili/plugin/status?conversationId=provider-id") res.end(JSON.stringify({ ok: true, sessionId: "actual/bili" }));
+    else { res.writeHead(404); res.end(); }
+  });
+  await writeFile(join(root, "bili.log"), `[inline] web UI listening on ${origin} (loopback only)\n`);
+  const f = fixture();
+  const value = await resolveTarget(f.paseo, { workspaceId: "w", agentId: "a" }, preferencesSchema.parse({ browserOrigin: "https://client.test:{port}" }),
+    f.controller.signal, readStatus, (signal) => discoverOrigins(signal, root));
+  assert.equal(value.url, "https://client.test:" + origin.split(":").at(-1) + "/__bili/#/session/actual%2Fbili");
+  assert.deepEqual(requests, ["/__bili/plugin/manifest", "/__bili/plugin/status?conversationId=provider-id"]);
+});
+test("manifest probing sends no session ID, cookies or authorization", async (t) => {
+  const origin = await server(t, (req, res) => {
+    assert.equal(req.url, "/__bili/plugin/manifest");
+    assert.equal(req.headers.authorization, undefined); assert.equal(req.headers.cookie, undefined);
+    res.end(JSON.stringify(manifest));
+  });
+  assert.deepEqual(await readManifest(origin, new AbortController().signal), manifest);
+});
 test("HTTP sends only exact conversation query and no latest fallback or authorization", async (t) => {
   const origin = await server(t, (req, res) => {
     assert.equal(req.url, "/__bili/plugin/status?conversationId=provider+%2F%3F%23");
@@ -119,7 +235,7 @@ test("HTTP failures, redirects, oversized/invalid responses and deadlines are bo
   mode = "redirect"; await assert.rejects(run(), /HTTP 302/); assert.equal(redirected, 1);
   mode = "bad"; await assert.rejects(run(), /有效 JSON/);
   mode = "large"; await assert.rejects(run());
-  mode = "timeout"; await assert.rejects(run(), /5 秒/);
+  mode = "timeout"; await assert.rejects(run(), /请求时限/);
 });
 test("abort stops an active dashboard request", async (t) => {
   const origin = await server(t, () => {});
@@ -134,9 +250,20 @@ test("settings register while disabled; business handlers guard cleanup", async 
     handle: (contract: { name: string }, callback: Function) => handlers.set(contract.name, callback) } as unknown as PluginServerContext;
   const stopSettings = contributeSettings(context);
   assert.ok(definition); assert.equal(handlers.size, 0);
-  assert.equal((await readPreferences()).serverOrigin, "http://127.0.0.1:8787");
-  const stop = contribute(context); assert.equal(handlers.size, 3); stop(); stop();
+  assert.equal((await readPreferences()).serverOrigin, "");
+  const stopRpc = contributeRpc(context);
+  const published = new Set(handlers.keys());
+  assert.equal(published.size, 3);
+  const unavailable = { paseo: new Proxy({}, { get() { assert.fail("disabled RPC performed business IO"); } }) };
+  for (const handler of handlers.values()) await assert.rejects(async () => handler({ workspaceId: "w" }, unavailable), /未启用或已停止/);
+  const stop = contribute(context);
+  assert.deepEqual(new Set(handlers.keys()), published);
   const f = fixture();
-  await assert.rejects(handlers.get("zeonest.billion-context.resolve")!({ workspaceId: "w" }, { paseo: f.paseo }), /已停止/);
-  stopSettings(); await assert.rejects(readPreferences(), /尚未就绪/);
+  assert.deepEqual(await handlers.get("zeonest.billion-context.workspaces")!({}, { paseo: { workspaces: { list: async () => ({ entries: [], pageInfo: { hasMore: false } }) } } }), []);
+  stop(); stop();
+  for (const handler of handlers.values()) await assert.rejects(async () => handler({ workspaceId: "w" }, unavailable), /已停止/);
+  // A stale declaration cannot attach to a later activation after its own cleanup.
+  stopRpc(); const stopAgain = contribute(context);
+  await assert.rejects(async () => handlers.get("zeonest.billion-context.agents")!({}, unavailable), /已停止/);
+  stopAgain(); stopSettings(); await assert.rejects(readPreferences(), /尚未就绪/);
 });

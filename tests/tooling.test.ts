@@ -151,6 +151,18 @@ test("optional RPC entries are discovered, typechecked, runtime-isolated and amb
   assert.doesNotMatch(client, /featureRpcContributions/);
 });
 
+test("actual feature RPCs exist in the frozen host catalog while disabled and reject business IO", async (t) => {
+  const root = await fixture(t);
+  await cp(path.join(projectRoot, "features"), path.join(root, "features"), { recursive: true });
+  const server = await integratedServer(root, {});
+  try {
+    for (const method of ["zeonest.billion-context.agents", "zeonest.billion-context.workspaces", "zeonest.billion-context.resolve", "zeonest.pi-status-bridge.list", "zeonest.pi-status-bridge.expand"]) {
+      assert.ok(server.published.has(method), method);
+      await assert.rejects(async () => server.invoke(method), /未启用或已停止/);
+    }
+  } finally { await server.cleanup(); }
+});
+
 const badImports = [
   ["client", 'import "../server/helper";', "server/helper.ts", "export const value = 1;"],
   ["client", 'import type { Value } from "../server/helper";', "server/helper.ts", "export type Value = string;"],

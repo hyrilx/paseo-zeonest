@@ -24,7 +24,7 @@ export function startPills(client: PluginClientContext, intervalMs = 3000) {
           id: "billion-context-" + agentId, workspaceId, agentId,
           button: { title: "查看当前会话的 Billion Context 详情", label: "上下文详情", icon: "ChartPie",
             behavior: { kind: "action", onPress: () => {
-              if (!stopped) client.openScreen({ screenId, params: { workspaceId, agentId } });
+              if (!stopped) client.openScreen({ screenId, params: { workspaceId, agentId, openedAt: String(Date.now()) } });
             } } },
         });
         pills.set(agentId, { registration, workspaceId });

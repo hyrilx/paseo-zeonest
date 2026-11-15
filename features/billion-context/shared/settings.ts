@@ -7,11 +7,15 @@ export function validOrigin(value: string): boolean {
   return !!match && (!match[1] || (Number(match[1]) > 0 && Number(match[1]) <= 65535))
     && z.url().safeParse(value).success;
 }
-const origin = z.string().trim().transform((value) => value.replace(/\/+$/, ""))
-  .refine(validOrigin, "填写 HTTP(S) 源地址，例如 http://127.0.0.1:8787，不含路径或凭据");
+const normalizedOrigin = z.string().trim().transform((value) => value.replace(/\/+$/, ""));
+const origin = normalizedOrigin.refine((value) => !value || validOrigin(value),
+  "填写 HTTP(S) 源地址，例如 http://127.0.0.1:8787，不含路径或凭据");
+const browserOrigin = normalizedOrigin.refine((value) => !value || validOrigin(value)
+  || (value.endsWith(":{port}") && validOrigin(value.replace("{port}", "1234"))),
+  "填写 HTTP(S) 源地址；端口可用 {port}，例如 http://my-host:{port}，不含路径或凭据");
 export const preferencesSchema = z.object({
-  serverOrigin: origin.default("http://127.0.0.1:8787"),
-  browserOrigin: z.union([z.literal(""), origin]).default(""),
+  serverOrigin: origin.default(""),
+  browserOrigin: browserOrigin.default(""),
 });
 export type Preferences = z.infer<typeof preferencesSchema>;
 export const preferences = defineSettings({
