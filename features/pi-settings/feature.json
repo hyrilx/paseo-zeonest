@@ -1,0 +1,11 @@
+{
+  "id": "pi-settings",
+  "name": "Pi 设置",
+  "description": "管理全局与项目的 Pi 模型、技能、插件和 MCP，应用前审阅配置 diff",
+  "version": "0.1.0",
+  "tags": [
+    "pi",
+    "configuration"
+  ],
+  "author": "Zeonest"
+}

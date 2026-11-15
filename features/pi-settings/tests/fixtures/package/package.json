@@ -1,0 +1,8 @@
+{
+  "name": "zeonest-pi-settings-test-fixture",
+  "version": "1.0.0",
+  "pi": { "extensions": ["index.js"] },
+  "scripts": {
+    "preinstall": "node -e \"throw new Error('Lifecycle scripts must remain disabled')\""
+  }
+}
