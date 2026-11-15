@@ -1,0 +1,39 @@
+{
+  "name": "paseo-zeonest",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A statically composed container for personal Paseo extensions.",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "paseo-plugin.json",
+    "OVERVIEW.md",
+    "index.client.tsx",
+    "index.server.ts",
+    "client/",
+    "server/",
+    "shared/"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json --noEmit",
+    "feature:new": "node tools/new-feature.mjs",
+    "features:sync": "node tools/features.mjs",
+    "features:check": "node tools/features.mjs --check",
+    "bundle:check": "node tools/check-bundles.mjs",
+    "test": "tsx --test tests/*.test.ts",
+    "check": "npm run features:check && npm run typecheck && npm test && npm run bundle:check"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.15.4",
+    "@types/node": "^22.19.0",
+    "@types/react": "~19.2.0",
+    "esbuild": "^0.28.2",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "zod": "^4.4.3"
+  }
+}

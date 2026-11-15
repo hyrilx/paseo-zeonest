@@ -1,0 +1,8 @@
+{
+  "id": "zeonest",
+  "name": "Zeonest",
+  "description": "静态聚合 Paseo 扩展功能，统一查阅、开关与配置。",
+  "requirements": {
+    "paseo": ">=0.15.4"
+  }
+}
