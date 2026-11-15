@@ -29,6 +29,7 @@ ID 使用小写 kebab-case，和目录名一致，不能使用保留的 `zeonest
 | `features/<id>/server/index.ts(x)` | 原生 `PluginServerContribution` | 功能启用后的服务端启动 |
 | `features/<id>/client/settings.ts(x)` | 原生 `PluginSettingsScreenContribution` | 无论开关，始终注册配置页 |
 | `features/<id>/server/settings.ts(x)` | 原生 `PluginServerContribution` | 无论开关，始终注册配置所需服务 |
+| `features/<id>/server/rpc.ts(x)` | 原生 `PluginServerContribution` | 同步声明业务 RPC，处理函数自行拒绝未启用/已停止状态 |
 
 至少有一个 `index`。无 UI 的服务端功能不需要客户端入口；纯客户端功能不需要服务端业务入口。设置文件均非必需。
 
@@ -42,6 +43,7 @@ features/prompt-tools/
   client/settings.tsx    # 可选，始终可用的原生配置页
   server/index.ts        # 可关闭的服务端业务贡献
   server/settings.ts     # 可选，始终运行的配置注册
+  server/rpc.ts          # 可选，启动时同步声明业务 RPC；关闭时拒绝执行业务
   shared/                # 可选，两端可用的普通值、schema、契约和类型
   tests/                 # 功能自有测试，递归发现 *.test.ts(x)/js 等
     fixtures/            # 测试数据，不进入运行 bundle/包
@@ -80,6 +82,14 @@ export default function contribute(client: PluginClientContext) {
 ```
 
 服务端入口、RPC、hooks、provider 和其他能力全部使用 Paseo 原生 API。贡献函数同步返回 cleanup，cleanup 可以异步；异步初始化应在函数内部管理，并在关闭后阻止迟到结果产生副作用。
+
+### 服务端业务 RPC
+
+Paseo 0.15.4 在插件同步贡献返回后发布 RPC 名称快照，后续 `server.handle` 不会更新宿主目录。壳读取开关是异步的，因此业务 RPC 必须放在可选的 `server/rpc.ts(x)`，不能等到 `server/index.ts(x)` 启动后再声明。
+
+`rpc` 入口直接接收原生 `PluginServerContext`，同步调用 `server.handle` 并返回原生 cleanup。它只声明处理函数，不读取业务设置、启动监听、注册业务 hooks 或执行请求。功能在自己的 `server/` 内保存启用状态：`index` 启动后才允许 RPC 执行业务；未启用、启动失败、关闭及 cleanup 后均先拒绝调用，任何异步操作也须检查该次运行是否仍有效。关闭功能时 RPC 名称仍存在，业务不执行。
+
+构建自动发现并组合该入口，无需根清单，也不提供额外运行时接口或包装原生 context。配置 RPC 仍属于 `server/settings.ts(x)`，不受业务开关影响。
 
 ## 配置页面
 
@@ -120,7 +130,7 @@ export default {
 - 壳保留配置页 `zeonest-features`、命令 `zeonest-settings`、设置 `zeonest-shell`、RPC `zeonest.shell.runtime`。
 - 每个功能内不跨 `client/` 和 `server/` 导入，`shared/` 不引入 Node、React 或端专用 API/类型。也不通过 type-only、软链接或第三方模块转一道来绕过边界。
 - 第三方库需要显式维护根依赖与 lockfile；可打包的库随本端 bundle 分发。宿主库只使用 0.15.4 支持的模块路径，不导入 `zod/v4` 等未提供的宿主子路径，也不打入第二份宿主运行库。
-- 不在模块顶层产生业务副作用。所有子功能会静态导入，关闭只是不执行其业务贡献。
+- 不在模块顶层产生业务副作用。所有子功能会静态导入，关闭时不执行 `index` 业务贡献；`rpc` 仅声明拒绝关闭状态的处理函数。
 - 关闭后不应继续注册 hooks、观察 agent、启动进程或发送业务请求；把这些行为放在业务入口，而非始终运行的配置入口。
 - 释放自己的计时器、watcher、订阅、句柄、进程和原生注册。不要假设另一个子功能一定启用。
 - React Native UI 使用主题 token，适配 compact；客户端不能使用 Node/DOM 或未打包且未由宿主提供的运行时模块。

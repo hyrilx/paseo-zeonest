@@ -134,6 +134,23 @@ test("ephemeral native contribution tables are typechecked, not just transpiled"
   await assert.rejects(typecheck(root, false), /PluginSettingsScreenContribution/);
 });
 
+test("optional RPC entries are discovered, typechecked, runtime-isolated and ambiguity-checked", async (t) => {
+  const root = await fixture(t);
+  await createFeature(root, metadata(), "server", false);
+  await put(root, "features/alpha/server/rpc.ts", "export default (context: number) => context;");
+  assert.equal((await loadFeatures(root))[0]!.serverRpc, "features/alpha/server/rpc.ts");
+  await assert.rejects(typecheck(root, false), /PluginServerContribution/);
+  await put(root, "features/alpha/server/rpc.ts", 'import "react"; export default () => () => {};');
+  await assert.rejects(buildPlugin(root), /dependency|SDK|React/);
+  await put(root, "features/alpha/server/rpc.ts", "export default () => () => {};");
+  await put(root, "features/alpha/server/rpc.tsx", "export default () => () => {};");
+  await assert.rejects(loadFeatures(root), /Ambiguous/);
+  await rm(path.join(root, "features/alpha/server/rpc.tsx"));
+  await typecheck(root, false); await buildPlugin(root);
+  const client = await readFile(path.join(root, "client/bundle.js"), "utf8");
+  assert.doesNotMatch(client, /featureRpcContributions/);
+});
+
 const badImports = [
   ["client", 'import "../server/helper";', "server/helper.ts", "export const value = 1;"],
   ["client", 'import type { Value } from "../server/helper";', "server/helper.ts", "export type Value = string;"],
@@ -349,9 +366,10 @@ async function integratedServer(root: string, enabled: Record<string, boolean>) 
   await buildPlugin(root);
   const outfile = path.join(root, "test-server.mjs");
   await build({ absWorkingDir: root, entryPoints: ["index.server.ts"], outfile,
-    bundle: true, platform: "node", packages: "external", format: "esm", logLevel: "silent" });
+    bundle: true, platform: "node", packages: "external", format: "esm", logLevel: "silent",
+    banner: { js: 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url);' } });
   const { default: contribute } = await import(pathToFileURL(outfile).href);
-  const handlers = new Map<string, () => unknown>();
+  const handlers = new Map<string, (input?: unknown, context?: unknown) => unknown>();
   const registered: string[] = [];
   let cleanups = 0;
   const fake = {
@@ -363,17 +381,38 @@ async function integratedServer(root: string, enabled: Record<string, boolean>) 
     on: () => () => { cleanups++; },
   } as unknown as PluginServerContext;
   const cleanup = contribute(fake);
+  // Match Paseo 0.15.4: the published method catalog never sees late handles.
+  const published = new Set(handlers.keys());
   const snapshot = await handlers.get("zeonest.shell.runtime")!();
-  return { cleanup, snapshot, registered, handlers, cleanups: () => cleanups };
+  const invoke = (name: string) => {
+    if (!published.has(name)) throw new Error(`Plugin zeonest does not contribute RPC ${name}`);
+    return handlers.get(name)!({}, { paseo: new Proxy({}, { get() { assert.fail("disabled RPC attempted business IO"); } }) });
+  };
+  return { cleanup, snapshot, registered, handlers, published, invoke, cleanups: () => cleanups };
 }
 
-function serverEntry(id: string) {
+function serverEntry() {
+  return `import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { state } from "./state";
+export default function contribute(server: PluginServerContext) {
+  state.enabled = true;
+  const remove = server.on("agent.turn_ended", () => {});
+  return () => { state.enabled = false; remove(); };
+}
+`;
+}
+function rpcEntry(id: string) {
   return `import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { state } from "./state";
 export default function contribute(server: PluginServerContext) {
-  server.handle(defineRpc({ name: "${id}.ping", input: z.object({}), output: z.object({}) }), () => ({}));
-  return server.on("agent.turn_ended", () => {});
+  let closed = false;
+  server.handle(defineRpc({ name: "${id}.ping", input: z.object({}), output: z.object({}) }), () => {
+    if (closed || !state.enabled) throw new Error("disabled");
+    return {};
+  });
+  return () => { closed = true; };
 }
 `;
 }
@@ -382,24 +421,32 @@ test("static integration starts enabled behavior only, keeps disabled settings a
   const root = await fixture(t);
   for (const id of ["alpha", "beta"]) {
     await createFeature(root, metadata(id), "server", true);
-    await put(root, "features/" + id + "/server/index.ts", serverEntry(id));
+    await put(root, "features/" + id + "/server/index.ts", serverEntry());
+    await put(root, "features/" + id + "/server/state.ts", "export const state = { enabled: false };");
+    await put(root, "features/" + id + "/server/rpc.ts", rpcEntry(id));
   }
   const enabled = { alpha: true, beta: false };
   const server = await integratedServer(root, enabled);
   assert.deepEqual(server.snapshot, { enabledIds: ["alpha"], error: null });
-  assert.ok(server.handlers.has("alpha.ping"));
-  assert.equal(server.handlers.has("beta.ping"), false);
+  assert.ok(server.published.has("alpha.ping"));
+  assert.ok(server.published.has("beta.ping"));
+  assert.deepEqual(new Set(server.handlers.keys()), server.published);
+  assert.deepEqual(server.invoke("alpha.ping"), {});
+  assert.throws(() => server.invoke("beta.ping"), /disabled/);
   assert.deepEqual(server.registered, ["zeonest-shell", "alpha-preferences", "beta-preferences"]);
   enabled.alpha = false; enabled.beta = true;
   assert.deepEqual(await server.handlers.get("zeonest.shell.runtime")!(), server.snapshot);
   await server.cleanup(); await server.cleanup();
   assert.equal(server.cleanups(), 1);
+  assert.throws(() => server.invoke("alpha.ping"), /disabled/);
 });
 
 test("startup failure is reported and cleans already started native contributions", async (t) => {
   const root = await fixture(t);
   for (const id of ["alpha", "beta"]) await createFeature(root, metadata(id), "server", false);
-  await put(root, "features/alpha/server/index.ts", serverEntry("alpha"));
+  await put(root, "features/alpha/server/index.ts", serverEntry());
+  await put(root, "features/alpha/server/state.ts", "export const state = { enabled: false };");
+  await put(root, "features/alpha/server/rpc.ts", rpcEntry("alpha"));
   await put(root, "features/beta/server/index.ts", 'export default function contribute() { throw new Error("startup failed"); }');
   const original = console.error;
   console.error = () => {};
@@ -407,6 +454,8 @@ test("startup failure is reported and cleans already started native contribution
     const server = await integratedServer(root, { alpha: true, beta: true });
     assert.deepEqual(server.snapshot, { enabledIds: [], error: "startup failed" });
     assert.equal(server.cleanups(), 1);
+    assert.ok(server.published.has("alpha.ping"));
+    assert.throws(() => server.invoke("alpha.ping"), /disabled/);
     await server.cleanup(); assert.equal(server.cleanups(), 1);
   } finally { console.error = original; }
 });

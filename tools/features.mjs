@@ -63,8 +63,9 @@ export async function loadFeatures(root = projectRoot) {
     const server = await entry(root, id, "server", "index");
     const clientSettings = await entry(root, id, "client", "settings");
     const serverSettings = await entry(root, id, "server", "settings");
+    const serverRpc = await entry(root, id, "server", "rpc");
     if (!client && !server) throw new Error("Feature needs a client or server entry: " + id);
-    features.push({ metadata, client, server, clientSettings, serverSettings });
+    features.push({ metadata, client, server, clientSettings, serverSettings, serverRpc });
   }
   return features;
 }
@@ -80,6 +81,7 @@ export function renderEntry(features, runtime) {
   ];
   const contributions = [];
   const settings = [];
+  const rpcs = [];
   features.forEach((feature, index) => {
     const id = JSON.stringify(feature.metadata.id);
     if (feature[runtime]) {
@@ -90,13 +92,18 @@ export function renderEntry(features, runtime) {
       imports.push(`import settings${index} from ${JSON.stringify("./" + feature[runtime + "Settings"])};`);
       settings.push(runtime === "client" ? `${id}: settings${index}` : `settings${index}`);
     }
+    if (runtime === "server" && feature.serverRpc) {
+      imports.push(`import rpc${index} from ${JSON.stringify("./" + feature.serverRpc)};`);
+      rpcs.push(`rpc${index}`);
+    }
   });
   return imports.join("\n") + "\n"
     + `export const featureCatalog: readonly FeatureMetadata[] = ${JSON.stringify(features.map(({ metadata }) => metadata))};\n`
     + `export const featureContributions: Readonly<Record<string, ${type}Contribution>> = {${contributions.join(",")}};\n`
     + (runtime === "client"
       ? `export const featureSettingsScreens: Readonly<Record<string, PluginSettingsScreenContribution>> = {${settings.join(",")}};\n`
-      : `export const featureSettingsContributions: readonly PluginServerContribution[] = [${settings.join(",")}];\n`)
+      : `export const featureSettingsContributions: readonly PluginServerContribution[] = [${settings.join(",")}];\n`
+        + `export const featureRpcContributions: readonly PluginServerContribution[] = [${rpcs.join(",")}];\n`)
     + `export default function contribute(context: ${type}Context) {\n`
-    + `  return contributeShell(context, featureCatalog, featureContributions, ${runtime === "client" ? "featureSettingsScreens" : "featureSettingsContributions"});\n}\n`;
+    + `  return contributeShell(context, featureCatalog, featureContributions, ${runtime === "client" ? "featureSettingsScreens" : "featureSettingsContributions, featureRpcContributions"});\n}\n`;
 }

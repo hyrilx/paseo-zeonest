@@ -54,6 +54,30 @@ test("client runtime stores are installation-local and subscriptions are removab
   assert.equal(updates, 1);
 });
 
+test("business RPC declarations precede pending settings and stay guarded until activation", async () => {
+  let release!: (value: unknown) => void;
+  let active = false, closed = false;
+  const handlers = new Map<string, Function>();
+  const server = {
+    registerSettings: () => ({ read: () => new Promise((resolve) => { release = resolve; }) }),
+    handle: (contract: { name: string }, callback: Function) => handlers.set(contract.name, callback),
+  } as unknown as PluginServerContext;
+  const cleanup = contributeShell(server, catalog, { one: () => { active = true; return () => { active = false; }; } }, [], [
+    (native) => { assert.equal(native, server); native.handle({ name: "test.business" } as never, () => {
+      if (!active || closed) throw new Error("disabled"); return {};
+    }); return () => { closed = true; }; },
+  ]);
+  const published = new Set(handlers.keys());
+  assert.ok(published.has("test.business"));
+  assert.throws(() => handlers.get("test.business")!(), /disabled/);
+  release({ status: "ready", values: { enabled: { one: true } } });
+  assert.deepEqual(await handlers.get("zeonest.shell.runtime")!(), { enabledIds: ["one"], error: null });
+  assert.deepEqual(new Set(handlers.keys()), published);
+  assert.deepEqual(handlers.get("test.business")!(), {});
+  await cleanup(); await cleanup();
+  assert.throws(() => handlers.get("test.business")!(), /disabled/);
+});
+
 function fakeServer(read: () => Promise<unknown>) {
   let handler: (() => Promise<unknown>) | undefined;
   const server = {

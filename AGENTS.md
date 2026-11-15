@@ -14,6 +14,7 @@
 - 壳只负责展示元信息、保存开关、组合原生贡献与路由配置入口。
 - 不增加子功能基类、容器上下文、统一业务配置 schema、事件总线、权限抽象或生命周期 SDK。
 - 子功能直接接收原生 `PluginClientContext` / `PluginServerContext`，返回 Paseo 原生 cleanup。
+- 服务端业务 RPC 在可选 `server/rpc.ts(x)` 中同步声明，功能内部拒绝未启用或已停止时的业务调用；业务 hooks/监听仍在 `server/index.ts(x)`。0.15.4 的 RPC 名称目录不接受异步开关读取后的迟到注册。
 - 启停通过整个插件重载生效。不实现热注入、依赖解析、远程发现或独立子功能分发。
 - 手写功能全部放在 `features/<id>/`（六项 feature.json、README、client/server/shared、tests/fixtures），壳放在 `shell/client`、`shell/server`、`shell/shared`。无需求的可选目录不强制创建。
 - 每个源码归属内保持本端/shared 边界，包含 type-only 和传递依赖；shared 不引入 Node、React 或端专用 SDK/类型。功能不得依赖其他功能或壳内部 helper，运行代码不得依赖测试/fixtures 或仓库根 `tools/`；运行端内部的业务 `tools/` 子目录不受此目录名限制。

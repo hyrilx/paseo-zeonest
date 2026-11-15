@@ -17,7 +17,7 @@ shell/{client,server,shared}
           ├── client/bundle.js ← index.client.tsx
           └── server/bundle.js ← index.server.ts
 
-服务端 bundle → registerSettings → 读取开关一次 → 启动已选服务端贡献
+服务端 bundle → 同步注册 settings/RPC → 读取开关一次 → 启动已选服务端贡献
                                       │
                                 启动快照 RPC
                                       │
@@ -31,6 +31,8 @@ Paseo v0.15.4 的编译器只认可插件根的 `client/`、`server/`、`shared/
 `client/`、`server/` 完全由构建工具管理，产物及其原生类型声明均忽略提交；不要在这些目录写源码。SDK、React、React Native、TanStack Query 和 Zod 等 0.15.4 宿主库保持 external，普通第三方库随本端打包。运行时没有扫描、远程发现、动态注入或任意功能模块加载器，功能与壳整体分发。
 
 源码归属由构建工具在打包前严格检查：包含 type-only、类型查询、再导出、类型引用和传递依赖。每个功能及壳内部均遵循本端/shared 规则；功能不得依赖其他功能或壳内部实现，运行代码不得依赖测试/fixtures 或仓库根 `tools/`，但本端业务 `tools/` 子目录可以正常使用。shared 不依赖 Node、React 或端专用 SDK。shared 的第三方实现图另作共享归属检查，不能通过打包擦除导入来绕过。宿主实际消费的入口图和 external 还要在打包后再检查。
+
+Paseo 0.15.4 的服务端宿主在同步贡献返回后固定 RPC 名称目录。配置贡献与可选的 `server/rpc.ts(x)` 因而在读取开关前同步执行；`rpc` 只声明原生处理函数，功能内部在调用前检查自身是否已启用，关闭时拒绝业务 IO。业务 hooks、进程和监听仍只在启用后的 `server/index.ts(x)` 启动。两种入口均为原生 `PluginServerContribution`，构建自动组合，不包装 context 或增加业务生命周期接口。
 
 功能的运行期模块不得在顶层做文件写入、注册、启动计时器等副作用。静态导入会评估所有模块，包括关闭功能；行为应放在原生贡献函数内。这属于可关闭模块的必要语义，不要求任何特定业务架构。
 

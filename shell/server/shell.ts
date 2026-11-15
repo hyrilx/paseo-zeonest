@@ -12,6 +12,7 @@ export function contributeShell(
   featureCatalog: readonly FeatureMetadata[],
   featureContributions: Readonly<Record<string, PluginServerContribution>>,
   featureSettingsContributions: readonly PluginServerContribution[],
+  featureRpcContributions: readonly PluginServerContribution[] = [],
 ) {
   const lifetime = createLifetime();
   const reloader = createPluginReloader();
@@ -19,9 +20,16 @@ export function contributeShell(
   const settings = server.registerSettings(shellSettings);
   let snapshot: { enabledIds: string[]; error: string | null } = { enabledIds: [], error: null };
 
-  // Settings stay available while the corresponding behavior is disabled.
-  for (const contribute of featureSettingsContributions) {
-    lifetime.add(contribute(server));
+  // The host snapshots RPC names when this synchronous entry returns.
+  // Declarations stay present; each feature guards its own disabled behavior.
+  try {
+    for (const contribute of [...featureSettingsContributions, ...featureRpcContributions]) {
+      lifetime.add(contribute(server));
+    }
+  } catch (error) {
+    reloader.dispose();
+    void lifetime.dispose().catch((cleanupError) => console.error("[zeonest] Cleanup failed", cleanupError));
+    throw error;
   }
 
   // Entries must return cleanup synchronously. Defer host-backed reads, not the entry.
