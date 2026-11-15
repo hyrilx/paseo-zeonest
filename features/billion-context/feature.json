@@ -1,0 +1,11 @@
+{
+  "id": "billion-context",
+  "name": "Billion Context",
+  "description": "打开上下文压缩 dashboard 总览和当前会话详情",
+  "version": "0.1.0",
+  "tags": [
+    "context",
+    "dashboard"
+  ],
+  "author": "Zeonest"
+}
