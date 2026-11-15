@@ -8,16 +8,24 @@ import { pendingFeatureIds } from "../shared/selection";
 import { shellSettings } from "../shared/settings";
 import type { RuntimeState } from "./runtime-store";
 
+export interface ReloadState {
+  status: "idle" | "running" | "error" | "unknown";
+  message: string | null;
+}
+
 interface Props extends PluginSurfaceProps {
+  reloadState: ReloadState;
+  reloadPlugin(): void;
   runtime: RuntimeState;
   featureCatalog: readonly FeatureMetadata[];
   featureSettingsScreens: Readonly<Record<string, PluginSettingsScreenContribution>>;
   openSettings(id: string): void;
 }
 
-export function FeatureManager({ theme, layout, runtime, openSettings, featureCatalog, featureSettingsScreens }: Props) {
+export function FeatureManager({ theme, layout, runtime, openSettings, featureCatalog, featureSettingsScreens, reloadState, reloadPlugin }: Props) {
   const settings = useSettings(shellSettings);
   const colors = theme.colors;
+  const reloading = reloadState.status === "running";
   const pending = settings.status === "ready" && runtime.status === "ready"
     ? pendingFeatureIds(featureCatalog, settings.values.enabled, runtime.enabledIds) : [];
   const muted = { color: colors.foregroundMuted, fontSize: 13, lineHeight: 20 };
@@ -28,7 +36,7 @@ export function FeatureManager({ theme, layout, runtime, openSettings, featureCa
       <View style={{ gap: 8 }}>
         <Text style={{ color: colors.foreground, fontSize: 22, fontWeight: "600" }}>功能集</Text>
         <Text style={muted}>查阅、开关和配置随 Zeonest 一起分发的子功能。</Text>
-        <Text style={muted}>开关保存后，请在 Paseo 的插件菜单中重新加载 Zeonest，所有连接的客户端将统一应用。子功能自己的设置以各自页面说明为准。</Text>
+        <Text style={muted}>开关保存后，点击下方「重新加载插件」，所有连接的客户端将统一应用。子功能自己的设置以各自页面说明为准。</Text>
       </View>
 
       {settings.status === "loading" && <Text style={muted}>正在读取已保存的开关…</Text>}
@@ -39,7 +47,7 @@ export function FeatureManager({ theme, layout, runtime, openSettings, featureCa
               onPress={() => { void settings.reload(); }} />
             {settings.status === "invalid" && <SettingsAction label="恢复所有子功能为关闭"
               hint="仅重置壳的开关，不改动子功能配置。" actionLabel="重置开关"
-              disabled={settings.saving} onPress={() => { void settings.reset(); }} />}
+              disabled={settings.saving || reloading} onPress={() => { if (!reloading) void settings.reset(); }} />}
           </SettingsCard>
         </SettingsSection>
       )}
@@ -57,6 +65,18 @@ export function FeatureManager({ theme, layout, runtime, openSettings, featureCa
           {pending.length} 项开关已保存，等待重新加载插件生效。
         </Text>
       )}
+
+      <SettingsSection title="插件操作">
+        <SettingsCard>
+          <SettingsAction label="重新加载插件" actionLabel={reloading ? "正在重新加载…" : "重新加载"}
+            hint="重新加载整个 Zeonest，应用已保存的开关；所有连接客户端都会更新。需要宿主可执行 paseo CLI。"
+            disabled={settings.saving || reloading}
+            onPress={() => { if (!settings.saving && !reloading) reloadPlugin(); }} />
+        </SettingsCard>
+        {reloadState.message && <Text style={{ ...muted,
+          color: reloadState.status === "error" ? colors.statusDanger : colors.statusWarning,
+        }}>{reloadState.message}</Text>}
+      </SettingsSection>
 
       {featureCatalog.length === 0 ? (
         <SettingsSection title="尚未集成子功能">
@@ -80,9 +100,9 @@ export function FeatureManager({ theme, layout, runtime, openSettings, featureCa
                 </View>
               </SettingsRow>
               <SettingsSwitch label="启用子功能" hint="开关保存后重新加载插件生效。"
-                value={enabled} disabled={settings.status !== "ready" || settings.saving}
+                value={enabled} disabled={settings.status !== "ready" || settings.saving || reloading}
                 onValueChange={(value) => {
-                  if (settings.status !== "ready" || settings.saving) return;
+                  if (settings.status !== "ready" || settings.saving || reloading) return;
                   void settings.save({
                     ...settings.values, enabled: { ...settings.values.enabled, [feature.id]: value },
                   }, settings.revision);

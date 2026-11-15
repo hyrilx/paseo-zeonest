@@ -58,7 +58,7 @@ function fakeServer(read: () => Promise<unknown>) {
   let handler: (() => Promise<unknown>) | undefined;
   const server = {
     registerSettings: () => ({ read, subscribe: () => () => {} }),
-    handle: (_contract: unknown, callback: () => Promise<unknown>) => { handler = callback; },
+    handle: (contract: { name: string }, callback: () => Promise<unknown>) => { if (contract.name === "zeonest.shell.runtime") handler = callback; },
   } as unknown as PluginServerContext;
   const cleanup = contributeShell(server, [], {}, []);
   return { cleanup, snapshot: () => handler!() };

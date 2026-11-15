@@ -5,9 +5,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
-import type { ReactElement } from "react";
+import React, { type ReactElement } from "react";
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
+import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
+
 import { projectRoot, loadFeatures, renderEntry } from "../tools/features.mjs";
 import { createFeature } from "../tools/new-feature.mjs";
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 async function uiFixture(t: { after(fn: () => Promise<void>): void }, populated = true) {
   const root = await mkdtemp(path.join(tmpdir(), "zeonest-ui-"));
@@ -75,6 +80,7 @@ const colors = Object.fromEntries([
 const props = {
   theme: { colors }, layout: { compact: false, platform: "web" }, host: { id: "host-a", label: "A" },
   runtime: { status: "ready", enabledIds: [], error: null }, openSettings: (_id: string) => {},
+  reloadState: { status: "idle", message: null }, reloadPlugin: () => {},
 };
 
 function readySettings(overrides = {}) {
@@ -179,18 +185,19 @@ test("conflict errors allow reload and startup failures do not claim a confirmed
   }
 });
 
-function fakeClient() {
+function fakeClient(onReload: () => Promise<{ error: string | null }> = async () => ({ error: null })) {
   const screens: string[] = [];
+  const components = new Map<string, React.ComponentType<PluginSurfaceProps>>();
   const commands: string[] = [];
   const removed: string[] = [];
   let resolve!: (value: { enabledIds: string[]; error: string | null }) => void;
   const ready = new Promise((done) => { resolve = done; });
   const client = {
-    addSettingsScreen: (screen: { id: string }) => { screens.push(screen.id); return () => { removed.push(screen.id); }; },
+    addSettingsScreen: (screen: { id: string; Component: React.ComponentType<PluginSurfaceProps> }) => { screens.push(screen.id); components.set(screen.id, screen.Component); return () => { removed.push(screen.id); }; },
     addCommandCenterItem: (command: { id: string }) => { commands.push(command.id); return () => { removed.push(command.id); }; },
-    openSettings: () => {}, rpc: () => ready,
+    openSettings: () => {}, rpc: (contract: { name: string }) => contract.name === "zeonest.shell.reload" ? onReload() : ready,
   };
-  return { client, screens, commands, removed, resolve };
+  return { client, screens, commands, removed, resolve, components };
 }
 
 test("client starts only the server snapshot and keeps disabled configuration screens registered", async (t) => {
@@ -216,4 +223,80 @@ test("a late client snapshot after teardown cannot resurrect native contribution
   await closed;
   assert.deepEqual(fake.commands, ["zeonest-settings"]);
   assert.deepEqual(fake.removed, ["zeonest-settings", "alpha-settings", "zeonest-features"]);
+});
+
+test("reload action exists even in empty/error states and never runs while saving or reloading", async (t) => {
+  const ui = await uiFixture(t, false);
+  let calls = 0;
+  for (const compact of [false, true]) {
+    for (const settings of [readySettings(), { status: "loading", saving: false }, readySettings({ status: "invalid", error: "invalid" }), readySettings({ saving: true })]) {
+      for (const running of [false, true]) {
+        ui.setSettingsState(settings);
+        const tree = ui.FeatureManager({ ...props, layout: { ...props.layout, compact },
+          reloadState: { status: running ? "running" : "idle", message: null },
+          reloadPlugin: () => { calls++; },
+        });
+        const action = nodes(tree).find((node) => node.props.label === "重新加载插件")!;
+        assert.equal(action.props.disabled, Boolean(settings.saving || running));
+        const before = calls;
+        action.props.onPress();
+        assert.equal(calls, before + (settings.saving || running ? 0 : 1));
+      }
+    }
+  }
+});
+
+async function mountShell(t: { after(fn: () => Promise<void>): void }, onReload: () => Promise<{ error: string | null }>) {
+  const ui = await uiFixture(t);
+  ui.setSettingsState(readySettings());
+  const fake = fakeClient(onReload);
+  const cleanup = ui.default(fake.client);
+  fake.resolve({ enabledIds: [], error: null });
+  const Component = fake.components.get("zeonest-features")!;
+  let root!: ReactTestRenderer;
+  await act(async () => { root = create(React.createElement(Component, props as unknown as PluginSurfaceProps)); });
+  t.after(async () => {
+    await act(async () => root.unmount());
+    await cleanup();
+  });
+  const action = () => root.root.findAll((node) => String(node.type) === "SettingsAction" && node.props.label === "重新加载插件")[0]!;
+  return { root, action, cleanup, ui };
+}
+
+test("real settings hooks coalesce double clicks, lock switches and surface CLI errors for retry", async (t) => {
+  let finish!: (value: { error: string | null }) => void;
+  let calls = 0;
+  const { root, action } = await mountShell(t, () => {
+    calls++;
+    return new Promise((resolve) => { finish = resolve; });
+  });
+  await act(async () => {
+    const press = action().props.onPress;
+    press(); press();
+  });
+  assert.equal(calls, 1);
+  assert.equal(action().props.disabled, true);
+  assert.equal(action().props.actionLabel, "正在重新加载…");
+  assert.ok(root.root.findAll((node) => String(node.type) === "SettingsSwitch").every((node) => node.props.disabled));
+  await act(async () => { finish({ error: "CLI missing" }); });
+  assert.match(JSON.stringify(root.toJSON()), /CLI missing/);
+  assert.equal(action().props.disabled, false);
+  assert.ok(root.root.findAll((node) => String(node.type) === "SettingsSwitch").every((node) => !node.props.disabled));
+  await act(async () => { action().props.onPress(); finish({ error: null }); });
+  assert.equal(calls, 2);
+  assert.match(JSON.stringify(root.toJSON()), /确认本次运行状态/);
+  assert.doesNotMatch(JSON.stringify(root.toJSON()), /重载成功/);
+});
+
+test("self-reload RPC interruption stays unconfirmed and late teardown results are ignored", async (t) => {
+  let reject!: (error: Error) => void;
+  const { root, action, cleanup } = await mountShell(t, () => new Promise((_resolve, fail) => { reject = fail; }));
+  await act(async () => action().props.onPress());
+  await act(async () => reject(new Error("Plugin stopped: zeonest")));
+  assert.match(JSON.stringify(root.toJSON()), /重载结果尚未确认/);
+  assert.doesNotMatch(JSON.stringify(root.toJSON()), /重载成功/);
+  await act(async () => action().props.onPress());
+  await act(async () => { root.unmount(); await cleanup(); });
+  await act(async () => reject(new Error("late disconnect")));
+  assert.equal(root.toJSON(), null);
 });

@@ -33,7 +33,9 @@ paseo plugin ls zeonest
 
 ### 管理功能
 
-点击 Zeonest 配置按钮，或在 Command Center 搜索「Zeonest：管理功能集」。保存开关后，在插件菜单选择「重新加载」使变更生效，或运行：
+点击 Zeonest 配置按钮，或在 Command Center 搜索「Zeonest：管理功能集」。保存开关后，在配置页的「插件操作」中点击「重新加载插件」使变更生效。该操作由服务端调用 Paseo CLI，要求 daemon 的 PATH 中可执行 `paseo`；执行前会核对目标 daemon 的进程 ID，避免重载其他宿主。
+
+自重载可能关闭配置页或中断当前请求；若页面提示结果尚未确认，请查看 Paseo 插件状态和日志，再重新打开配置页。也可继续使用宿主插件菜单的「重新加载」，或运行：
 
 ```bash
 paseo plugin reload zeonest

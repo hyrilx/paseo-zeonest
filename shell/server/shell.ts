@@ -3,6 +3,8 @@ import type { FeatureMetadata } from "../shared/catalog";
 import { createLifetime, errorMessage } from "../shared/lifetime";
 import { enabledFeatureIds } from "../shared/selection";
 import { runtimeRpc } from "../shared/runtime";
+import { reloadRpc } from "../shared/reload";
+import { createPluginReloader } from "./reload";
 import { shellSettings } from "../shared/settings";
 
 export function contributeShell(
@@ -12,6 +14,8 @@ export function contributeShell(
   featureSettingsContributions: readonly PluginServerContribution[],
 ) {
   const lifetime = createLifetime();
+  const reloader = createPluginReloader();
+  server.handle(reloadRpc, () => reloader.reload());
   const settings = server.registerSettings(shellSettings);
   let snapshot: { enabledIds: string[]; error: string | null } = { enabledIds: [], error: null };
 
@@ -43,6 +47,7 @@ export function contributeShell(
 
   return async () => {
     // Mark closed before awaiting the read so delayed startup cannot resurrect features.
+    reloader.dispose();
     await Promise.all([ready, lifetime.dispose()]);
   };
 }
