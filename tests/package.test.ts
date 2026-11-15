@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cp, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { projectRoot } from "../tools/features.mjs";
 import { checkBundles } from "../tools/check-bundles.mjs";
+import { updateReadme } from "../tools/readme.mjs";
 
 test("clean source preparation and a dependency-free packed install use the same manifest safely", { timeout: 120_000 }, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "zeonest-package-"));
@@ -13,11 +14,15 @@ test("clean source preparation and a dependency-free packed install use the same
   for (const file of ["package.json", "package-lock.json", "paseo-plugin.json", "README.md", "OVERVIEW.md", "tools", "shell", "features", "tsconfig.json", "index.client.tsx", "index.server.ts"]) {
     await cp(path.join(projectRoot, file), path.join(root, file), { recursive: true });
   }
+  const readme = path.join(root, "README.md");
+  await writeFile(readme, (await readFile(readme, "utf8")).replace("<!-- zeonest:features:start -->", "<!-- zeonest:features:start -->\nStale catalog"));
   const manifest = JSON.parse(await readFile(path.join(root, "paseo-plugin.json"), "utf8"));
   const env = { ...process.env, NODE_TEST_CONTEXT: undefined, npm_config_offline: "true" };
   // This invokes the real source branch: npm ci --include=dev --ignore-scripts, then build.
   for (const [binary, ...args] of manifest.build) execFileSync(binary, args, { cwd: root, env, stdio: "pipe" });
   await checkBundles(root);
+  assert.equal(await updateReadme(root, { check: true }), false);
+  assert.doesNotMatch(await readFile(readme, "utf8"), /Stale catalog/);
   const packed = JSON.parse(execFileSync("npm", ["pack", "--ignore-scripts", "--json"], { cwd: root, env, encoding: "utf8" }))[0];
   assert.deepEqual(packed.files.map((file: { path: string }) => file.path).sort(), [
     "OVERVIEW.md", "README.md", "client/bundle.d.ts", "client/bundle.js", "index.client.tsx", "index.server.ts",

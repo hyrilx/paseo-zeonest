@@ -13,14 +13,27 @@
 | 命令 | 目的 |
 | --- | --- |
 | `npm run feature:new -- --help` | 查看单目录功能脚手架参数 |
+| `npm run hooks:install` | 每次克隆后启用本仓库的 pre-commit hook，不改全局配置 |
+| `npm run docs:features` | 从 feature.json 更新 README 的功能目录生成区 |
+| `npm run docs:features -- --check` | 仅检查 README 功能目录是否同步，过期时失败且不写入 |
 | `npm run typecheck` | 运行源码、内存组合入口和测试的 TypeScript 检查 |
 | `npm test` | 递归发现根 tests 和各功能 tests 下的测试，跳过 fixtures |
-| `npm run build` | 元信息/入口/类型/源码边界校验，输出双端 bundle，检查原生入口图与 external |
+| `npm run build` | 元信息/入口/类型/源码边界校验，输出双端 bundle，检查原生入口图与 external，更新 README 功能目录 |
 | `npm run bundle:check` | 仅检查已构建的产物 |
 | `npm run check` | 全类型、所有测试及完整双端构建与边界检查 |
 | `npm pack --dry-run --ignore-scripts` | 已构建后审查包内容，不发布 |
 
-构建按功能 ID 稳定排序，校验目录/ID 匹配、六项元信息、SemVer、标签、入口冲突及至少一个业务入口。没有提交后还需人工同步的文件。`client/` 和 `server/` 是保留输出目录，构建时会删除重建；不在里面放手写文件。
+构建按功能 ID 稳定排序，校验目录/ID 匹配、六项元信息、SemVer、标签、入口冲突及至少一个业务入口。没有需人工维护的接线清单。`client/` 和 `server/` 是保留输出目录，构建时会删除重建；不在里面放手写文件。
+
+### README 功能目录与提交 hook
+
+`features/<id>/feature.json` 是六项展示元信息的唯一来源。生成器复用构建扫描与校验，在 README 的 `zeonest:features:start` / `zeonest:features:end` HTML 注释之间生成按 ID 排序的表格，包含名称、ID、描述、版本、标签和作者，并链接到功能 README；只替换生成区。生成结果随源码提交，供仓库页面直接展示，不是运行期接线清单。
+
+每次克隆后运行 `npm run hooks:install`，将本仓库 `core.hooksPath` 设为 `.githooks`。命令会替换本仓库已有的 hooksPath；已有自定义 hook 时先合并。仓库不会通过 npm 生命周期脚本或安装插件自动配置 Git hook。
+
+`pre-commit` 在暂存的功能元数据或 README 变更时运行：将 Git 暂存区检出到临时目录，使用同一生成器更新暂存的 README，并将生成区同步到工作区。未暂存的功能不进入表格；README 手写部分保持各自在暂存区和工作区中的内容，不执行会夹带其他改动的整文件 `git add README.md`。无效元信息或生成区标记会阻止提交，临时目录会清理。仅运行文档生成，不在提交时执行构建、安装依赖或加载插件。
+
+也可以手动运行 `npm run docs:features` 后提交 README。`npm run build`（因此也包括 `npm run check`）会从工作区元数据更新目录，作为开发时的补充；安装时在本地生成不会更新远端仓库。跳过 hook 后用 `npm run docs:features -- --check` 检查是否漏提文档。
 
 源码边界检查覆盖静态 import/export、type-only、import 类型查询、类型引用和传递依赖。运行源码不得导入测试/fixtures、仓库根开发工具、根模块、其他功能或壳内部实现；本端的业务 `tools/` 子目录是普通运行源码，不按目录名拒绝。shared 不引入任何端专用依赖。第三方声明与运行实现均检查，shared 的实现图按共享归属检查；拒绝非静态模块加载及运行源码软链接。SDK 私有/未知路径、未提供的宿主库子路径和 DOM 依赖也会失败。
 

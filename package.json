@@ -20,8 +20,10 @@
   ],
   "scripts": {
     "typecheck": "node tools/typecheck.mjs",
-    "build": "node tools/typecheck.mjs --runtime && node tools/build.mjs && node tools/check-bundles.mjs",
+    "build": "node tools/typecheck.mjs --runtime && node tools/build.mjs && node tools/check-bundles.mjs && node tools/readme.mjs",
     "feature:new": "node tools/new-feature.mjs",
+    "docs:features": "node tools/readme.mjs",
+    "hooks:install": "git config --local core.hooksPath .githooks",
     "bundle:check": "node tools/check-bundles.mjs",
     "test": "node tools/test.mjs",
     "check": "npm run typecheck && npm test && npm run build",

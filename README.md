@@ -2,10 +2,24 @@
 
 Paseo 插件 ID：`zeonest`。这是个人维护的子功能聚合插件，所有功能随同一个插件分发。壳只负责功能目录、开关和配置入口，不提供业务框架。
 
+## 已包含的子功能
+
+以下内容由 `features/*/feature.json` 自动生成；元数据只在 JSON 中维护，不手动修改生成区。
+
+<!-- zeonest:features:start -->
+
+当前包含 **1** 个子功能，默认均关闭；点击名称查看使用说明。
+
+| 名称 / ID | 描述 | 版本 | 标签 | 作者 |
+| --- | --- | --- | --- | --- |
+| [Pi 设置](features/pi-settings/README.md)<br><code>pi-settings</code> | 管理全局与项目的 Pi 模型、技能、插件和 MCP，应用前审阅配置 diff | 0.1.0 | <code>pi</code> <code>configuration</code> | Zeonest |
+
+<!-- zeonest:features:end -->
+
 ## 当前状态
 
 - 锁定 Paseo SDK **0.15.4**，客户端与 daemon 均需 0.15.4+。
-- 初始不包含业务子功能；新增功能默认关闭。
+- 新增子功能默认关闭。
 - 功能列表展示名称、描述、版本、标签、作者及可选配置入口。
 - 开关保存到所选宿主，**整体重新加载插件后生效**。客户端使用本次服务端启动快照，不提前应用待生效的开关。
 - 子功能直接使用原生 Paseo context 和 cleanup，自主管理配置、数据与实现。业务关闭后，其配置入口仍可用。
@@ -16,9 +30,12 @@ Paseo 插件 ID：`zeonest`。这是个人维护的子功能聚合插件，所�
 
 ```bash
 npm ci --ignore-scripts
+npm run hooks:install  # 每次克隆后启用本仓库的 pre-commit hook
 npm run check
 npm pack --dry-run --ignore-scripts
 ```
+
+`hooks:install` 将本仓库的 `core.hooksPath` 设为 `.githooks`，不改全局 Git 配置；已有自定义 hook 时请先合并。提交时自动按暂存区的功能元数据更新并暂存 README 生成区，不带入未暂存的功能或 README 手写改动；生成失败会阻止提交。跳过 hook 时，请手动生成并提交 README。
 
 新增一个子功能：
 
@@ -33,13 +50,15 @@ npm run feature:new -- prompt-tools \
 脚手架只在 `features/prompt-tools/` 创建空贡献、说明及可选配置骨架，不改其他源码、不安装或开启插件。单端功能选择 `--runtime client` 或 `--runtime server`，无配置则省略 `--settings`。继续实现业务和功能测试后运行 `npm run check`。
 
 ```bash
-npm run build          # 扫描、校验、原生类型检查、源级边界检查、双端打包及产物检查
+npm run docs:features  # 从 feature.json 更新 README 功能目录
+npm run docs:features -- --check  # 只检查是否同步，不写文件
+npm run build          # 完整校验、双端构建及产物检查，同时更新 README 功能目录
 npm run typecheck      # 源码、内存静态接线及测试类型
 npm test               # 根 tests 与每个功能 tests 的递归测试发现
 npm run bundle:check   # 检查已构建产物的原生入口图和 external
 ```
 
-接线在构建时形成静态 imports，不维护需提交的生成清单。构建产物不提交。正常新增功能只修改该功能目录；新增第三方依赖等情况仍需维护根依赖与 lockfile。
+接线在构建时形成静态 imports，不维护需提交的生成清单。构建产物不提交。正常新增功能的手写代码只修改该功能目录；README 功能目录由 hook 或构建生成，随功能一起提交。新增第三方依赖等情况仍需维护根依赖与 lockfile。
 
 ## 在 Paseo 中使用
 
