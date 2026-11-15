@@ -1,8 +1,6 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { expandStatus, listStatuses } from "../shared/contracts";
+import { activate } from "./activation";
 import { createBridge } from "./bridge";
-import { readPreferences } from "./configuration";
-import { executeExpansion } from "./actions";
 import { createPreload, observerEnvironment, providerNodeOptions } from "./preload";
 
 export default function contribute(server: PluginServerContext, preload = createPreload()) {
@@ -31,19 +29,7 @@ export default function contribute(server: PluginServerContext, preload = create
     }));
     removers.push(server.addHook("agent.close.after", async ({ agent }) => { bridge.remove(agent.id); }));
     removers.push(server.addHook("agent.archive.after", async ({ agent }) => { bridge.remove(agent.id); }));
-    server.handle(listStatuses, async () => {
-      const preferences = await readPreferences();
-      if (stopped) throw new Error("Pi 状态桥接已停止");
-      return bridge.snapshot(preferences);
-    });
-    server.handle(expandStatus, async (input, context) => {
-      if (stopped) throw new Error("Pi 状态桥接已停止");
-      if (busy.has(input.agentId)) throw new Error("正在处理此会话的展开操作");
-      busy.add(input.agentId);
-      try {
-        return await executeExpansion(input, context, bridge, await readPreferences(), () => !stopped);
-      } finally { busy.delete(input.agentId); }
-    });
+    removers.push(activate({ bridge, busy, alive: () => !stopped }));
   } catch (error) {
     stopped = true;
     for (const remove of removers.reverse()) remove();

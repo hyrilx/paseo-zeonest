@@ -11,6 +11,7 @@ import type { Bridge } from "../server/bridge";
 import { preferencesSchema } from "../shared/settings";
 import { setPreferencesReader } from "../server/configuration";
 import contribute from "../server/index";
+import contributeRpc from "../server/rpc";
 import contributeSettings from "../server/settings";
 
 async function home(t: { after(fn: () => Promise<void>): void }) {
@@ -82,8 +83,15 @@ test("native hooks are business-only, skip non-Pi/history, preserve env and are 
   const hooks = new Map<string, Function>(); const handlers = new Map<string, Function>();
   const server = { addHook: (name: string, callback: Function) => { hooks.set(name, callback); return () => { hooks.delete(name); }; },
     handle: (contract: { name: string }, callback: Function) => handlers.set(contract.name, callback) } as unknown as PluginServerContext;
-  const removeReader = setPreferencesReader(async () => preferencesSchema.parse({}));
+  let reads = 0;
+  const removeReader = setPreferencesReader(async () => { reads++; return preferencesSchema.parse({}); });
+  const stopRpc = contributeRpc(server);
+  const published = new Set(handlers.keys());
+  assert.equal(published.size, 2);
+  for (const handler of handlers.values()) await assert.rejects(async () => handler({ agentId: "a" }, {}), /未启用或已停止/);
+  assert.equal(reads, 0); assert.equal(hooks.size, 0);
   const cleanup = contribute(server, createPreload(await home(t)));
+  assert.deepEqual(new Set(handlers.keys()), published);
   try {
     const base = { agentId: "a", workspaceId: "w", purpose: "interactive", provider: "pi", env: { EXISTING: "keep" } };
     const request = { ...base }; const ctx = { signal: new AbortController().signal, paseo: { config: { get: async () => ({ config: { providers: { pi: { env: { NODE_OPTIONS: "--trace-warnings" } } } } }) } } };
@@ -97,7 +105,8 @@ test("native hooks are business-only, skip non-Pi/history, preserve env and are 
     assert.equal((await handlers.get("zeonest.pi-status-bridge.list")!()).statuses.length, 0);
   } finally { await cleanup!(); removeReader(); }
   assert.equal(hooks.size, 0);
-  await assert.rejects(handlers.get("zeonest.pi-status-bridge.list")!());
+  for (const handler of handlers.values()) await assert.rejects(async () => handler({ agentId: "a" }, {}), /已停止/);
+  stopRpc();
 });
 test("failed preparation, aborts and cleanup during injection leave the original launch environment untouched", async () => {
   for (const mode of ["failure", "aborted", "cleanup", "options", "config-failure"]) {
