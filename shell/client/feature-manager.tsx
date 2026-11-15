@@ -1,20 +1,21 @@
-import { useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
+import { useSettings, type PluginSurfaceProps, type PluginSettingsScreenContribution } from "@getpaseo/plugin/client";
 import {
   SettingsAction, SettingsCard, SettingsRow, SettingsSection, SettingsSwitch,
 } from "@getpaseo/plugin/client/ui";
 import { Text, View } from "react-native";
-import { featureCatalog } from "../shared/catalog.generated";
+import type { FeatureMetadata } from "../shared/catalog";
 import { pendingFeatureIds } from "../shared/selection";
 import { shellSettings } from "../shared/settings";
-import { featureSettingsScreens } from "./features.generated";
 import type { RuntimeState } from "./runtime-store";
 
 interface Props extends PluginSurfaceProps {
   runtime: RuntimeState;
+  featureCatalog: readonly FeatureMetadata[];
+  featureSettingsScreens: Readonly<Record<string, PluginSettingsScreenContribution>>;
   openSettings(id: string): void;
 }
 
-export function FeatureManager({ theme, layout, runtime, openSettings }: Props) {
+export function FeatureManager({ theme, layout, runtime, openSettings, featureCatalog, featureSettingsScreens }: Props) {
   const settings = useSettings(shellSettings);
   const colors = theme.colors;
   const pending = settings.status === "ready" && runtime.status === "ready"
@@ -60,7 +61,7 @@ export function FeatureManager({ theme, layout, runtime, openSettings }: Props) 
       {featureCatalog.length === 0 ? (
         <SettingsSection title="尚未集成子功能">
           <SettingsCard><SettingsRow label="当前容器为空"
-            hint="新增子功能并生成静态清单后，名称、描述、版本、标签、作者和配置入口会出现在这里。" /></SettingsCard>
+            hint="新增子功能并重新构建后，名称、描述、版本、标签、作者和配置入口会出现在这里。" /></SettingsCard>
         </SettingsSection>
       ) : featureCatalog.map((feature) => {
         const enabled = settings.status === "ready" && settings.values.enabled[feature.id] === true;

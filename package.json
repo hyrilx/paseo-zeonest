@@ -12,18 +12,20 @@
     "OVERVIEW.md",
     "index.client.tsx",
     "index.server.ts",
-    "client/",
-    "server/",
-    "shared/"
+    "client/bundle.js",
+    "server/bundle.js",
+    "client/bundle.d.ts",
+    "server/bundle.d.ts",
+    "tools/prepare.mjs"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json --noEmit",
+    "typecheck": "node tools/typecheck.mjs",
+    "build": "node tools/typecheck.mjs --runtime && node tools/build.mjs && node tools/check-bundles.mjs",
     "feature:new": "node tools/new-feature.mjs",
-    "features:sync": "node tools/features.mjs",
-    "features:check": "node tools/features.mjs --check",
     "bundle:check": "node tools/check-bundles.mjs",
-    "test": "tsx --test tests/*.test.ts",
-    "check": "npm run features:check && npm run typecheck && npm test && npm run bundle:check"
+    "test": "node tools/test.mjs",
+    "check": "npm run typecheck && npm test && npm run build",
+    "prepack": "node tools/prepare.mjs"
   },
   "devDependencies": {
     "@getpaseo/plugin": "0.15.4",

@@ -2,53 +2,83 @@
 
 ## 环境与依赖
 
-使用 Node.js 22+、npm 和 Paseo 0.15.4+。执行 `npm ci` 安装开发依赖。
+要求 Node.js 22+、npm 和 Paseo 0.15.4+。执行 `npm ci --ignore-scripts` 安装锁定开发依赖。SDK 固定为 `@getpaseo/plugin@0.15.4`，不能用在线文档里的新 API 替代该版本类型。
 
-Paseo 在运行时提供 SDK、React、React Native、Zod 等宿主库，因此这些放在 `devDependencies`。目前没有额外运行时依赖或构建步骤。服务端功能引入额外运行库时由作者明确加入 `dependencies`，更新 lockfile，并按 Paseo 发布规范处理 Git preparation/npm shrinkwrap；不能假设用户机器有本仓库的开发依赖。
+宿主提供 SDK、React、React Native、TanStack Query 与 Zod，保持 external；用于类型检查的依赖放在 devDependencies。新增普通第三方运行库时明确加入根 dependencies，更新 package-lock.json。可静态打包的库打入相应 bundle，不保留悬空的 npm 导入；如果需要无法打包的原生模块、运行资源或独立安装步骤，应另行决定和验证，不暗中改变安装模型。
 
-主 `tsconfig.json` 不包含 DOM 或 Node 全局类型，避免掩盖客户端误用。测试使用独立 tsconfig 开启 Node 类型。服务端需要 Node API 时显式导入 `node:*`，不要把 Node 全局类型加入客户端编译环境。
+运行源码 tsconfig 包含 `shell/`、`features/`，排除功能 tests/fixtures，不加入 DOM 或 Node 全局类型。测试 tsconfig 覆盖根测试和递归功能测试，允许 Node 类型。服务端用 `node:*` 显式导入。统一类型检查还在内存中加入静态组合入口，检查各功能默认导出确实符合原生 contribution/settings screen 类型，而不是只让 esbuild 擦除类型。
 
 ## 命令
 
 | 命令 | 目的 |
 | --- | --- |
-| `npm run feature:new -- --help` | 查看脚手架参数 |
-| `npm run features:sync` | 验证功能信息并写入三份静态清单 |
-| `npm run features:check` | 检查清单是否过期，适合 CI |
-| `npm run typecheck` | 运行时与测试 TypeScript 检查 |
-| `npm test` | Node test runner + tsx 自动化测试 |
-| `npm run bundle:check` | esbuild 构建两个入口，检查静态依赖图边界 |
-| `npm run check` | 依次执行以上必要检查 |
-| `npm pack --dry-run --ignore-scripts` | 审查整体发布内容，不发布 |
+| `npm run feature:new -- --help` | 查看单目录功能脚手架参数 |
+| `npm run typecheck` | 运行源码、内存组合入口和测试的 TypeScript 检查 |
+| `npm test` | 递归发现根 tests 和各功能 tests 下的测试，跳过 fixtures |
+| `npm run build` | 元信息/入口/类型/源码边界校验，输出双端 bundle，检查原生入口图与 external |
+| `npm run bundle:check` | 仅检查已构建的产物 |
+| `npm run check` | 全类型、所有测试及完整双端构建与边界检查 |
+| `npm pack --dry-run --ignore-scripts` | 已构建后审查包内容，不发布 |
 
-`bundle:check` 是辅助检查，不等价于 Paseo 的实际编译和真机运行。它不修改源码、不安装插件；后续采用新的原生宿主模块时需同步其允许列表，而不是偷偷绕过运行时限制。
+构建按功能 ID 稳定排序，校验目录/ID 匹配、六项元信息、SemVer、标签、入口冲突及至少一个业务入口。没有提交后还需人工同步的文件。`client/` 和 `server/` 是保留输出目录，构建时会删除重建；不在里面放手写文件。
 
-## 自动化覆盖
+源码边界检查覆盖静态 import/export、type-only、import 类型查询、类型引用和传递依赖。运行源码不得导入测试/fixtures、仓库根开发工具、根模块、其他功能或壳内部实现；本端的业务 `tools/` 子目录是普通运行源码，不按目录名拒绝。shared 不引入任何端专用依赖。第三方声明与运行实现均检查，shared 的实现图按共享归属检查；拒绝非静态模块加载及运行源码软链接。SDK 私有/未知路径、未提供的宿主库子路径和 DOM 依赖也会失败。
 
-壳测试关注开关默认值、未知 ID、待生效状态、固定启动快照、异步关闭、失败处理、清理顺序和宿主间状态独立。工具测试关注元信息校验、静态生成、客户端/服务端/双端脚手架、配置接入、重名拒绝和依赖边界。
+本地 `.svg` 静态导入使用既有 esbuild 文本 loader。TypeScript 检查功能内的资源类型声明；源级检查仅对真实存在的本地 SVG 文件采用资源解析分支，仍检查词法/真实路径归属，不把非代码资源交给 TypeScript 模块解析器，也不泛化放行未知或缺失的导入。SVG 文本直接内联进所属 bundle，不引入额外资产构建或运行文件复制流程。
 
-新增子功能还需要自己的行为测试；壳测试不能证明任意子功能正确。
+产物检查只允许原生入口及本端 `bundle.js` 两个模块出现在宿主的本地输入图中。所有本地实现均已打入 bundle，不留下 features/shell/tests 路径导入。宿主库不打包第二份；服务端 Node 内建模块可 external。
+
+## 源码安装与预构建包
+
+Paseo 0.15.4 支持 manifest `build` 的 argv 数组，准备命令与目录归属以固定版本源码为准：
+
+- [manifest](https://github.com/getpaseo/paseo/blob/v0.15.4/packages/server/src/server/plugins/manifest.ts)
+- [准备命令执行](https://github.com/getpaseo/paseo/blob/v0.15.4/packages/server/src/server/plugins/preparation-build.ts)
+- [宿主编译器](https://github.com/getpaseo/paseo/blob/v0.15.4/packages/server/src/server/plugins/compiler-build.ts)
+- [宿主模块](https://github.com/getpaseo/paseo/blob/v0.15.4/packages/server/src/server/plugins/plugin-sdk-specifiers.ts)
+
+仓库的 manifest 声明：
+
+```json
+{ "build": [["node", "tools/prepare.mjs"]] }
+```
+
+同一个小入口处理两种明确的内容：
+
+1. **本地/Git 源码目录**存在 `shell/`：执行 `npm ci --include=dev --ignore-scripts`，再 `npm run build`。因此 Git 不需要提交产物，也不依赖宿主获取源码时可能跳过的 npm 生命周期脚本。明确包含 dev 是因为 TypeScript/esbuild 是构建工具，不是运行依赖。准备过程需要 npm、锁定依赖的缓存或网络，并会重建该源码目录的 node_modules 和双端输出。源码编辑后先手动运行 build，再获准重载。
+2. **预构建包**不含 `shell/`：只校验两个入口与两个 bundle 存在，不安装依赖、不调用缺失的源码工具。该入口自身仅使用 Node 内建模块，随运行包分发。未声明额外运行依赖的当前包不需要 node_modules。
+
+`npm pack` 的 prepack 也使用这个已随包携带的准备入口：源码打包前构建；解包后的包只做完整性校验，不再运行不存在的开发脚本。使用 `--ignore-scripts` 做 dry-run 时必须先 build/check，不能把旧产物当成新版本。
+
+运行包白名单为 manifest、README、OVERVIEW、两个固定入口、两个 bundle 及其原生类型声明，以及 `tools/prepare.mjs`。不包含 shell/features 手写源码、测试、fixtures、其余开发工具、skills 或 docs。不要仅复制不带准备工具的 manifest，也不要手动复制零散源码给宿主编译。新增需要运行期文件读取的资源时必须单独明确打包，不能把测试 fixtures 当运行资源。
+
+## 自动化覆盖与验证记录
+
+根 tests 只放壳、工具及整体集成测试；功能自有测试放在 `features/<id>/tests/`。统一测试命令递归发现，不需要修改测试清单。类型检查和测试发现都排除 fixtures。
+
+覆盖默认关闭、未知 ID、待生效状态、固定服务端快照、客户端不提前应用已保存开关、两端异步关闭、清理顺序/幂等与失败、配置关闭后仍可用、加载/无效/冲突/主题 token 状态，以及空功能集、三类脚手架、元信息/入口错误、内存贡献类型、type-only/传递边界、共享依赖、端隔离、稳定构建和递归测试执行。
+
+包集成测试在临时的干净源码目录执行 manifest 准备（真实 npm ci + build），再 pack/解包；核对精确文件白名单，并在没有 node_modules/源码的包里执行准备和原生入口图检查，缺失 bundle 必须失败。该测试使用本地 npm 缓存离线执行，先运行本项目的 npm ci 以填充缓存。
+
+本次迁移在 macOS、Node 26.12.0 / npm 11.20.0 上执行自动化验证；没有实际安装、启用或重载插件。另直接下载并执行了 v0.15.4 的真实编译器源码，确认当前固定原生入口与双端 bundle 均可编译；这不等同于客户端真机渲染或所有平台验收。Node 22 最低版本与 Windows/Linux 未另行实机测试。
 
 ## 真实 Paseo 验收
 
-仅在获准信任并安装插件后执行。不要为了测试擅自开启全局 `pluginsEnabled`，也不要重启 daemon。
+仅在获准信任并安装插件后执行。不要擅自开启全局 pluginsEnabled，不重启 daemon。
 
-1. 类型与测试通过后安装或重载实际插件 ID。
-2. `paseo plugin ls zeonest` 应为 `running`，检查 `paseo plugin logs zeonest`。
-3. 通过 Settings → Plugins → Zeonest 配置按钮或 Command Center 打开功能集。
-4. 宽屏和 compact/mobile、明暗主题检查文字、布局、长描述、可访问性和空列表。
-5. 启用/关闭一个测试功能，确认保存后显示待生效，重载前行为不变；重载后两端同步更新。
-6. 重载前新连接一个客户端，确认使用服务端运行快照而非提前使用刚保存的开关。
-7. 子功能关闭时仍能进入其配置页面；配置的行为遵循功能自己的说明。
-8. 两客户端同时修改开关，确认过期 revision 不会覆盖新数据，可重新读取重试。
-9. 检查断线、无效设置、初始化失败和清理失败的提示，不将未知状态显示为成功。
+1. 类型与测试通过，构建后安装或重载实际插件 ID，检查 running 与插件日志。
+2. 通过 Settings → Plugins 的 Zeonest 配置按钮或 Command Center 打开功能集。
+3. 宽屏、compact/mobile、明暗主题检查布局、长描述、可访问性、空列表。
+4. 保存开关显示待生效，整体重载前不改变行为；重载后两端同步更新。
+5. 重载前新连接客户端必须使用服务端本次运行快照，而非刚保存的开关。
+6. 关闭功能后仍能访问其配置页面与配置服务，配置生效方式遵循功能说明。
+7. 两客户端同时修改开关，过期 revision 不得覆盖新数据；可以重新读取重试。
+8. 检查断线、无效设置、初始化/清理失败提示，不将未知状态显示为成功。
 
-源码初始化和自动化检查不代表已完成这些人工/宿主集成验证。
+**本次未执行真实 Paseo 的宽屏/compact、明暗主题及出错状态验收。** 自动化状态/主题 token 测试不替代这些检查。
 
 ## 发布与维护
 
-`package.json` 暂设 `private: true`，防止个人项目误发布。整体版本与各功能展示版本分别维护。准备公开发布前由作者确认包名、作者、许可证、仓库、隐私说明及必要截图，再按[官方发布规范](https://paseo.sh/docs/plugins/publishing)操作。
+保持 `private: true`，此次不发布。插件整体版本和功能展示版本分别维护。未来公开发布前需由作者确认包名、作者、许可证、仓库、隐私说明与必要截图，并重新审查实际运行依赖、资源、宿主最低版本及完整包。
 
-发布白名单包含 manifest、OVERVIEW、两个入口以及全部 client/server/shared 实现和生成清单，确保子功能随壳整体分发。开发工具、tests、项目 skills 和 docs/ 文档保留在源码仓库，不进入运行包；npm 会自动带入根 README。
-
-使用在线新 API 前对照本地 SDK 类型；在线 reference 已存在而 0.15.4 尚未发布的能力不能直接采用。升版时同步最低宿主版本并重新执行检查和真实宿主验收。
+在线文档可能领先 SDK；引入新 API 前必须同步依赖、manifest 最低版本、自动化与真实宿主验证记录。

@@ -2,7 +2,7 @@ import { mkdir, writeFile, lstat, rm } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { projectRoot, validateMetadata, syncFeatures } from "./features.mjs";
+import { projectRoot, validateMetadata } from "./features.mjs";
 
 export function featureFiles(metadata, runtime = "both", settings = false) {
   validateMetadata(metadata, metadata.id);
@@ -18,23 +18,23 @@ export function featureFiles(metadata, runtime = "both", settings = false) {
   for (const side of ["client", "server"]) {
     if (runtime !== "both" && runtime !== side) continue;
     const type = side === "client" ? "PluginClientContext" : "PluginServerContext";
-    files[side + "/features/" + id + "/index.ts"] = 'import type { ' + type
+    files["features/" + id + "/" + side + "/index.ts"] = 'import type { ' + type
       + ' } from "@getpaseo/plugin/' + side + '";\n\n'
       + "export default function contribute(_" + side + ": " + type + ") {\n"
       + "  return () => {};\n}\n";
   }
   if (settings) {
-    files["shared/features/" + id + "/settings.ts"] = 'import { defineSettings } from "@getpaseo/plugin";\nimport { z } from "zod";\n\n'
+    files["features/" + id + "/shared/settings.ts"] = 'import { defineSettings } from "@getpaseo/plugin";\nimport { z } from "zod";\n\n'
       + "export const preferences = defineSettings({\n  id: " + JSON.stringify(id + "-preferences")
       + ',\n  scope: "host",\n  version: 1,\n  schema: z.object({}),\n});\n';
-    files["server/features/" + id + "/settings.ts"] = 'import type { PluginServerContext } from "@getpaseo/plugin/server";\n'
-      + 'import { preferences } from "../../../shared/features/' + id + '/settings";\n\n'
+    files["features/" + id + "/server/settings.ts"] = 'import type { PluginServerContext } from "@getpaseo/plugin/server";\n'
+      + 'import { preferences } from "../shared/settings";\n\n'
       + "export default function contributeSettings(server: PluginServerContext) {\n"
       + "  server.registerSettings(preferences);\n  return () => {};\n}\n";
-    files["client/features/" + id + "/settings.tsx"] = 'import type { PluginSettingsScreenContribution, PluginSurfaceProps } from "@getpaseo/plugin/client";\n'
+    files["features/" + id + "/client/settings.tsx"] = 'import type { PluginSettingsScreenContribution, PluginSurfaceProps } from "@getpaseo/plugin/client";\n'
       + 'import { useSettings } from "@getpaseo/plugin/client";\n'
       + 'import { SettingsAction, SettingsCard, SettingsRow, SettingsSection } from "@getpaseo/plugin/client/ui";\n'
-      + 'import { preferences } from "../../../shared/features/' + id + '/settings";\n\n'
+      + 'import { preferences } from "../shared/settings";\n\n'
       + "function Settings(_props: PluginSurfaceProps) {\n"
       + "  const settings = useSettings(preferences);\n"
       + "  return (\n    <SettingsSection title={" + title + "}>\n      <SettingsCard>\n"
@@ -51,8 +51,7 @@ export function featureFiles(metadata, runtime = "both", settings = false) {
 export async function createFeature(root, metadata, runtime, settings) {
   const files = featureFiles(metadata, runtime, settings);
   // Reject any pre-existing subtree rather than merging or overwriting user code.
-  const directories = ["features", "client/features", "server/features", "shared/features"]
-    .map((base) => path.join(root, base, metadata.id));
+  const directories = [path.join(root, "features", metadata.id)];
   for (const directory of directories) {
     try { await lstat(directory); throw new Error("Feature path already exists: " + directory); }
     catch (error) { if (error.code !== "ENOENT") throw error; }
@@ -63,10 +62,8 @@ export async function createFeature(root, metadata, runtime, settings) {
       await mkdir(path.dirname(target), { recursive: true });
       await writeFile(target, content, { flag: "wx" });
     }
-    await syncFeatures(root);
   } catch (error) {
     for (const directory of directories) await rm(directory, { recursive: true, force: true });
-    await syncFeatures(root).catch(() => {});
     throw error;
   }
   return Object.keys(files);

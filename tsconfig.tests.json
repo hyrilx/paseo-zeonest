@@ -9,8 +9,10 @@
   },
   "include": [
     "tests/**/*.ts",
-    "tools/**/*.mjs",
-    "shared/**/*.ts",
-    "server/**/*.ts"
-  ]
+    "tests/**/*.tsx",
+    "features/**/tests/**/*.ts",
+    "features/**/tests/**/*.tsx",
+    "tools/**/*.mjs"
+  ],
+  "exclude": ["node_modules", "**/fixtures/**"]
 }

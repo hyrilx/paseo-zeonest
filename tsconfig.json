@@ -15,15 +15,16 @@
     "skipLibCheck": true,
     "noEmit": true,
     "esModuleInterop": true,
-    "allowSyntheticDefaultImports": true
+    "allowSyntheticDefaultImports": true,
+    "allowImportingTsExtensions": true
   },
   "include": [
     "index.client.tsx",
     "index.server.ts",
-    "client/**/*.ts",
-    "client/**/*.tsx",
-    "server/**/*.ts",
-    "server/**/*.tsx",
-    "shared/**/*.ts"
-  ]
+    "shell/**/*.ts",
+    "shell/**/*.tsx",
+    "features/**/*.ts",
+    "features/**/*.tsx"
+  ],
+  "exclude": ["node_modules", "**/tests/**", "**/fixtures/**"]
 }

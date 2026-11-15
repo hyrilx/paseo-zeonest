@@ -9,20 +9,28 @@
 ## 静态组合
 
 ```text
-features/*/feature.json
-          │ 开发期 tools/features.mjs
-          ├── shared/catalog.generated.ts
-          ├── client/features.generated.ts ── 原生客户端贡献、配置页面
-          └── server/features.generated.ts ── 原生服务端贡献、配置注册
+features/<id>/{feature.json,client,server,shared}
+shell/{client,server,shared}
+          │ npm run build
+          ├── 校验元信息、入口、原生类型与源码依赖边界
+          ├── 内存中的静态 imports、展示信息和原生贡献表
+          ├── client/bundle.js ← index.client.tsx
+          └── server/bundle.js ← index.server.ts
 
-index.server.ts → registerSettings → 读取开关一次 → 启动已选服务端贡献
+服务端 bundle → registerSettings → 读取开关一次 → 启动已选服务端贡献
                                       │
                                 启动快照 RPC
                                       │
-index.client.tsx → 注册管理/配置页 → 读取快照一次 → 启动对应客户端贡献
+客户端 bundle → 注册管理/配置页 → 读取快照一次 → 启动对应客户端贡献
 ```
 
-`features:sync` 只在开发期扫描接入文件并输出明确的静态 import。运行时没有文件扫描、远程插件目录、动态 import 或注入点。所有被集成的源码与外壳一起分发。
+采用**功能优先的手写源码、运行端优先的构建产物**。功能只在 `features/<id>/` 内维护，壳代码在 `shell/`。统一构建稳定排序扫描功能，把明确的静态 import 和六项元信息放入内存入口，直接输出两端 bundle；不创建需要同步提交的接线文件。shared 按需打入两端，没有第三份强制产物。
+
+Paseo v0.15.4 的编译器只认可插件根的 `client/`、`server/`、`shared/` 与两个原生入口，不能直接消费 `features/` 或 `shell/`。固定原生入口各自只重导出本端 bundle，宿主只看到运行目录内的产物。这是普通打包，不通过 alias、软链接、转发源码或伪装依赖绕过宿主边界。
+
+`client/`、`server/` 完全由构建工具管理，产物及其原生类型声明均忽略提交；不要在这些目录写源码。SDK、React、React Native、TanStack Query 和 Zod 等 0.15.4 宿主库保持 external，普通第三方库随本端打包。运行时没有扫描、远程发现、动态注入或任意功能模块加载器，功能与壳整体分发。
+
+源码归属由构建工具在打包前严格检查：包含 type-only、类型查询、再导出、类型引用和传递依赖。每个功能及壳内部均遵循本端/shared 规则；功能不得依赖其他功能或壳内部实现，运行代码不得依赖测试/fixtures 或仓库根 `tools/`，但本端业务 `tools/` 子目录可以正常使用。shared 不依赖 Node、React 或端专用 SDK。shared 的第三方实现图另作共享归属检查，不能通过打包擦除导入来绕过。宿主实际消费的入口图和 external 还要在打包后再检查。
 
 功能的运行期模块不得在顶层做文件写入、注册、启动计时器等副作用。静态导入会评估所有模块，包括关闭功能；行为应放在原生贡献函数内。这属于可关闭模块的必要语义，不要求任何特定业务架构。
 
@@ -61,6 +69,6 @@ index.client.tsx → 注册管理/配置页 → 读取快照一次 → 启动对
 
 ## 内部文件与非目标
 
-`shared/lifetime.ts`、`shared/runtime.ts` 和 `client/runtime-store.ts` 是壳的实现细节。子功能不依赖它们。没有额外对外 SDK。
+`shell/shared/lifetime.ts`、`shell/shared/runtime.ts` 和 `shell/client/runtime-store.ts` 是壳的实现细节。子功能不依赖它们。没有额外对外 SDK。
 
 不实现动态装载、依赖注入、沙箱、子功能依赖图、配置 schema 生成器、独立包管理、自动安装和自动更新。需要新的能力时先在子功能内部实现，不以未来扩展为由扩大壳的职责。

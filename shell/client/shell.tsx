@@ -1,18 +1,23 @@
-import type { PluginClientContext, PluginSurfaceProps } from "@getpaseo/plugin/client";
+import type { PluginClientContext, PluginClientContribution, PluginSettingsScreenContribution, PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useSyncExternalStore } from "react";
 import { createLifetime, errorMessage } from "../shared/lifetime";
 import { runtimeRpc } from "../shared/runtime";
-import { featureContributions, featureSettingsScreens } from "./features.generated";
+import type { FeatureMetadata } from "../shared/catalog";
 import { FeatureManager } from "./feature-manager";
 import { createRuntimeStore } from "./runtime-store";
 
-export function contributeShell(client: PluginClientContext) {
+export function contributeShell(
+  client: PluginClientContext,
+  featureCatalog: readonly FeatureMetadata[],
+  featureContributions: Readonly<Record<string, PluginClientContribution>>,
+  featureSettingsScreens: Readonly<Record<string, PluginSettingsScreenContribution>>,
+) {
   const lifetime = createLifetime();
   const store = createRuntimeStore();
 
   function Settings(props: PluginSurfaceProps) {
     const runtime = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
-    return <FeatureManager {...props} runtime={runtime}
+    return <FeatureManager {...props} runtime={runtime} featureCatalog={featureCatalog} featureSettingsScreens={featureSettingsScreens}
       openSettings={(id) => client.openSettings(id)} />;
   }
 

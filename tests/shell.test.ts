@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { contributeShell } from "../server/shell";
-import { createLifetime } from "../shared/lifetime";
-import { enabledFeatureIds, pendingFeatureIds } from "../shared/selection";
-import { shellSettings } from "../shared/settings";
-import { createRuntimeStore } from "../client/runtime-store";
+import { contributeShell } from "../shell/server/shell";
+import { createLifetime } from "../shell/shared/lifetime";
+import { enabledFeatureIds, pendingFeatureIds } from "../shell/shared/selection";
+import { shellSettings } from "../shell/shared/settings";
+import { createRuntimeStore } from "../shell/client/runtime-store";
 
 const catalog = [
   { id: "one", name: "One", description: "First", version: "0.1.0", tags: [], author: "test" },
@@ -60,7 +60,7 @@ function fakeServer(read: () => Promise<unknown>) {
     registerSettings: () => ({ read, subscribe: () => () => {} }),
     handle: (_contract: unknown, callback: () => Promise<unknown>) => { handler = callback; },
   } as unknown as PluginServerContext;
-  const cleanup = contributeShell(server);
+  const cleanup = contributeShell(server, [], {}, []);
   return { cleanup, snapshot: () => handler!() };
 }
 

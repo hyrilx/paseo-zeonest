@@ -15,15 +15,19 @@
 - 不增加子功能基类、容器上下文、统一业务配置 schema、事件总线、权限抽象或生命周期 SDK。
 - 子功能直接接收原生 `PluginClientContext` / `PluginServerContext`，返回 Paseo 原生 cleanup。
 - 启停通过整个插件重载生效。不实现热注入、依赖解析、远程发现或独立子功能分发。
-- 代码必须遵循 Paseo 的 `client/`、`server/`、`shared/` 边界，根目录只放两个运行时入口。共享代码不引入端专用 API。
+- 手写功能全部放在 `features/<id>/`（六项 feature.json、README、client/server/shared、tests/fixtures），壳放在 `shell/client`、`shell/server`、`shell/shared`。无需求的可选目录不强制创建。
+- 每个源码归属内保持本端/shared 边界，包含 type-only 和传递依赖；shared 不引入 Node、React 或端专用 SDK/类型。功能不得依赖其他功能或壳内部 helper，运行代码不得依赖测试/fixtures 或仓库根 `tools/`；运行端内部的业务 `tools/` 子目录不受此目录名限制。
+- 根目录只保留两个固定原生入口，各自只重导出本端 bundle。根 `client/`、`server/` 是构建独占的可删除输出，不放手写代码，不提交产物。宿主库保持 external，不能通过 alias/软链接/伪装依赖绕过 0.15.4 的运行目录检查。
 - 配置 UI 使用 React Native 和 Paseo 原生 Settings 组件，颜色取自主题，适配 compact。
 - 子功能配置属于子功能。壳不得读取、解释、合并或重置它；功能关闭时配置入口仍然可用。
 - 子功能内部结构和实现方法自主。接入文件是静态组合约定，不是新的运行时接口。
 
 ## 修改与验证
 
-- 不手改 `*.generated.ts`；修改输入后运行 `npm run features:sync` 并提交生成结果。
+- 统一 `npm run build` 自动扫描和校验功能，使用内存中的静态 imports/元信息/原生贡献表直接输出双端 bundle。不得再创建需同步提交的接线清单。
+- 正常新增功能仅改 `features/<id>/`；新增第三方依赖等合理例外才改根配置。脚手架不得改壳或根入口，测试递归发现功能 tests，根 tests 仅承载壳/工具/整体集成。
+- 源码/Git 安装依赖 manifest 的显式准备命令，不只依赖 npm 生命周期脚本；预构建包的准备入口必须只使用随包携带的文件，不安装开发依赖或调用缺失工具。
 - 不提交演示功能、真实凭据或个人运行数据。新增子功能默认关闭。
-- 运行 `npm run check` 和 `npm pack --dry-run --ignore-scripts`。
+- 运行 `npm run check`（全类型/测试/源级边界/双端构建/产物边界）和 `npm pack --dry-run --ignore-scripts`；主动检查改变源码的 LSP，若不可用须报告，不能把空缓存当通过。
 - UI 还需在真实 Paseo 检查宽屏、compact、明暗主题及出错状态；未执行就明确说明。
 - 未获用户授权，不安装/启用插件，不修改 daemon 的 `pluginsEnabled`。不要重启 daemon 来加载源码。

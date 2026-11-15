@@ -1,12 +1,16 @@
-import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { featureCatalog } from "../shared/catalog.generated";
+import type { PluginServerContext, PluginServerContribution } from "@getpaseo/plugin/server";
+import type { FeatureMetadata } from "../shared/catalog";
 import { createLifetime, errorMessage } from "../shared/lifetime";
 import { enabledFeatureIds } from "../shared/selection";
 import { runtimeRpc } from "../shared/runtime";
 import { shellSettings } from "../shared/settings";
-import { featureContributions, featureSettingsContributions } from "./features.generated";
 
-export function contributeShell(server: PluginServerContext) {
+export function contributeShell(
+  server: PluginServerContext,
+  featureCatalog: readonly FeatureMetadata[],
+  featureContributions: Readonly<Record<string, PluginServerContribution>>,
+  featureSettingsContributions: readonly PluginServerContribution[],
+) {
   const lifetime = createLifetime();
   const settings = server.registerSettings(shellSettings);
   let snapshot: { enabledIds: string[]; error: string | null } = { enabledIds: [], error: null };

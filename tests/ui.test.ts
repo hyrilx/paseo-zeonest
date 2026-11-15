@@ -1,18 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cp, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import type { ReactElement } from "react";
-import { projectRoot } from "../tools/features.mjs";
+import { projectRoot, loadFeatures, renderEntry } from "../tools/features.mjs";
 import { createFeature } from "../tools/new-feature.mjs";
 
 async function uiFixture(t: { after(fn: () => Promise<void>): void }, populated = true) {
   const root = await mkdtemp(path.join(tmpdir(), "zeonest-ui-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const item of ["client", "server", "shared"]) {
+  for (const item of ["shell"]) {
     await cp(path.join(projectRoot, item), path.join(root, item), { recursive: true });
   }
   await symlink(path.join(projectRoot, "node_modules"), path.join(root, "node_modules"), "dir");
@@ -23,13 +23,14 @@ async function uiFixture(t: { after(fn: () => Promise<void>): void }, populated 
         id, name: id === "alpha" ? "功能甲" : "功能乙", description: "说明 " + id,
         version: "1.2.3", tags: ["工具"], author: "测试作者",
       }, "both", id === "alpha");
+      await writeFile(path.join(root, "features", id, "client/index.ts"), `import type { PluginClientContext } from "@getpaseo/plugin/client"; export default (client: PluginClientContext) => client.addCommandCenterItem({ id: "${id}-command", title: "${id}", icon: "Blocks", context: "global", onSelect() {} });`);
     }
   }
   const outfile = path.join(root, "ui-test.mjs");
   await build({
     absWorkingDir: root,
     stdin: {
-      contents: 'export { FeatureManager } from "./client/feature-manager"; export { setSettingsState } from "@getpaseo/plugin/client";',
+      contents: renderEntry(await loadFeatures(root), "client") + '\nimport { FeatureManager as RawFeatureManager } from "./shell/client/feature-manager"; export const FeatureManager = (props) => RawFeatureManager({...props, featureCatalog, featureSettingsScreens}); export { setSettingsState } from "@getpaseo/plugin/client";',
       resolveDir: root, loader: "ts",
     },
     outfile, bundle: true, format: "esm", platform: "node", packages: "external",
@@ -161,4 +162,43 @@ test("conflict errors allow reload and startup failures do not claim a confirmed
   for (const node of nodes(tree).filter((node) => node.type === "Text")) {
     assert.ok(node.props.style?.color?.startsWith("theme-"));
   }
+});
+
+function fakeClient() {
+  const screens: string[] = [];
+  const commands: string[] = [];
+  const removed: string[] = [];
+  let resolve!: (value: { enabledIds: string[]; error: string | null }) => void;
+  const ready = new Promise((done) => { resolve = done; });
+  const client = {
+    addSettingsScreen: (screen: { id: string }) => { screens.push(screen.id); return () => { removed.push(screen.id); }; },
+    addCommandCenterItem: (command: { id: string }) => { commands.push(command.id); return () => { removed.push(command.id); }; },
+    openSettings: () => {}, rpc: () => ready,
+  };
+  return { client, screens, commands, removed, resolve };
+}
+
+test("client starts only the server snapshot and keeps disabled configuration screens registered", async (t) => {
+  const ui = await uiFixture(t);
+  ui.setSettingsState(readySettings({ values: { enabled: { beta: true } } }));
+  const fake = fakeClient();
+  const cleanup = ui.default(fake.client);
+  assert.deepEqual(fake.screens, ["zeonest-features", "alpha-settings"]);
+  assert.deepEqual(fake.commands, ["zeonest-settings"]);
+  fake.resolve({ enabledIds: ["alpha"], error: null });
+  await new Promise((done) => setImmediate(done));
+  assert.deepEqual(fake.commands, ["zeonest-settings", "alpha-command"]);
+  await cleanup(); await cleanup();
+  assert.deepEqual(fake.removed, ["alpha-command", "zeonest-settings", "alpha-settings", "zeonest-features"]);
+});
+
+test("a late client snapshot after teardown cannot resurrect native contributions", async (t) => {
+  const ui = await uiFixture(t);
+  const fake = fakeClient();
+  const cleanup = ui.default(fake.client);
+  const closed = cleanup();
+  fake.resolve({ enabledIds: ["alpha", "beta"], error: null });
+  await closed;
+  assert.deepEqual(fake.commands, ["zeonest-settings"]);
+  assert.deepEqual(fake.removed, ["zeonest-settings", "alpha-settings", "zeonest-features"]);
 });
