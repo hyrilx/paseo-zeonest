@@ -105,12 +105,27 @@ test("feature UI displays all metadata, pending state and settings even while di
   assert.match(visible, /本次运行：未启用/);
   const all = nodes(tree);
   assert.ok(all.some((node) => node.props.title === "功能甲"));
-  assert.ok(all.some((node) => node.props.label === "说明 alpha"));
+  assert.ok(all.some((node) => node.props.label === "功能甲" && node.props.hint === "说明 alpha"));
   const action = all.find((node) => node.props.actionLabel === "打开配置");
   assert.ok(action);
   action.props.onPress();
   assert.equal(opened, "alpha-settings");
   assert.ok(all.some((node) => node.props.label === "无需配置"));
+});
+
+test("feature names are primary row labels and descriptions are hints in wide and compact layouts", async (t) => {
+  const ui = await uiFixture(t);
+  ui.setSettingsState(readySettings());
+  for (const compact of [false, true]) {
+    const tree = ui.FeatureManager({ ...props, layout: { ...props.layout, compact } });
+    for (const [name, description] of [["功能甲", "说明 alpha"], ["功能乙", "说明 beta"]]) {
+      const section = nodes(tree).find((node) => node.type === "SettingsSection" && node.props.title === name);
+      assert.ok(section);
+      const rows = nodes(section).filter((node) => node.type === "SettingsRow");
+      assert.ok(rows.some((row) => row.props.label === name && row.props.hint === description));
+      assert.equal(rows.some((row) => row.props.label === description), false);
+    }
+  }
 });
 
 test("toggle saves a full document with the displayed revision and preserves unknown switches", async (t) => {

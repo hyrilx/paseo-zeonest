@@ -70,7 +70,7 @@ export function FeatureManager({ theme, layout, runtime, openSettings, featureCa
         return (
           <SettingsSection key={feature.id} title={feature.name}>
             <SettingsCard>
-              <SettingsRow label={feature.description}>
+              <SettingsRow label={feature.name} hint={feature.description}>
                 <View style={{ gap: 4, flexShrink: 1 }}>
                   <Text style={muted}>版本 {feature.version} / 作者 {feature.author}</Text>
                   <Text style={muted}>标签：{feature.tags.length ? feature.tags.join("、") : "无"}</Text>
