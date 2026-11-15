@@ -1,0 +1,18 @@
+<chat-history-summary>
+Chat history from a previous Paseo agent.
+Source agent: Example refactor
+Source directory: /workspace/example
+
+[User] 请检查配置读取逻辑。
+第二行需求。
+[Read] src/config.ts
+[Assistant] 读取逻辑可以简化。
+
+```ts
+const ready = true;
+```
+[Run] npm test
+[Assistant] **检查完成**，测试通过。
+</chat-history-summary>
+
+继续处理错误提示。

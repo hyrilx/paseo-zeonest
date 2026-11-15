@@ -1,0 +1,11 @@
+{
+  "id": "chat-history",
+  "name": "历史对话展开",
+  "description": "将消息中的 Chat history 摘要展开为可折叠的历史对话",
+  "version": "0.1.0",
+  "tags": [
+    "chat",
+    "history"
+  ],
+  "author": "Zeonest"
+}
