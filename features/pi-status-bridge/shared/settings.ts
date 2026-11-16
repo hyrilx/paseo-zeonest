@@ -7,6 +7,7 @@ export const actionSchema = z.object({
 });
 export const preferencesSchema = z.object({
   hiddenKeys: z.array(z.string().min(1).max(256)).max(128).default([]),
+  pinnedKeys: z.array(z.string().min(1).max(256)).max(128).default([]),
   actions: z.array(actionSchema).max(128).default([]),
 }).superRefine((value, context) => {
   if (new Set(value.actions.map((action) => action.key)).size !== value.actions.length) {
@@ -15,10 +16,10 @@ export const preferencesSchema = z.object({
 });
 export type Preferences = z.infer<typeof preferencesSchema>;
 export const preferences = defineSettings({
-  id: "pi-status-bridge-preferences", scope: "host", version: 2, schema: preferencesSchema,
+  id: "pi-status-bridge-preferences", scope: "host", version: 3, schema: preferencesSchema,
   migrate: (values, fromVersion) => {
-    if (fromVersion !== 1) throw new Error("不支持的 Pi 状态桥接配置版本");
-    // Strip the removed preview-length field while preserving hidden keys/actions.
+    if (fromVersion !== 1 && fromVersion !== 2) throw new Error("不支持的 Pi 状态桥接配置版本");
+    // Preserve hidden keys/actions and default to aggregating every status.
     return preferencesSchema.parse(values);
   },
 });

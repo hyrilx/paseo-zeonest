@@ -11,6 +11,7 @@ function PreferencesEditor({ settings, saved, theme }: EditorProps) {
   // Draft and revision are captured together. Remote updates must not overwrite unsaved input.
   const [baseRevision] = useState(settings.revision);
   const [hiddenKeys, setHiddenKeys] = useState(settings.values.hiddenKeys.join(", "));
+  const [pinnedKeys, setPinnedKeys] = useState(settings.values.pinnedKeys.join(", "));
   const nextId = useRef(settings.values.actions.length);
   const [actions, setActions] = useState(() => settings.values.actions.map((action, index) => ({ ...action, id: index })));
   const [error, setError] = useState("");
@@ -20,6 +21,7 @@ function PreferencesEditor({ settings, saved, theme }: EditorProps) {
     if (lock.current) return;
     setError("");
     const parsed = preferencesSchema.safeParse({ hiddenKeys: hiddenKeys.split(/[,，\n]/).map((key) => key.trim()).filter(Boolean),
+      pinnedKeys: pinnedKeys.split(/[,，\n]/).map((key) => key.trim()).filter(Boolean),
       actions: actions.map(({ key, command }) => ({ key: key.trim(), command: command.trim() })) });
     if (!parsed.success) { setError(parsed.error.issues.map((issue) => issue.message).join("；")); return; }
     lock.current = true; setSaving(true);
@@ -31,7 +33,8 @@ function PreferencesEditor({ settings, saved, theme }: EditorProps) {
   return <View style={{ gap: 16 }}>
     <SettingsSection title="显示">
       <SettingsCard>
-        <SettingsInput label="隐藏的状态 key" hint="用逗号分隔，精确匹配；不影响 Pi 本身。可在胶囊全文顶部查看 key。" initialValue={hiddenKeys} onChangeText={setHiddenKeys} disabled={disabled} />
+        <SettingsInput label="隐藏的状态 key" hint="用逗号分隔，精确匹配；不影响 Pi 本身。可在 Pi 状态弹层的条目标题查看 key。" initialValue={hiddenKeys} onChangeText={setHiddenKeys} disabled={disabled} />
+        <SettingsInput label="单独常驻的状态 key" hint="用逗号分隔；这些状态单独显示正文胶囊，其余收进 Pi 状态汇总。对本宿主所有 Pi 会话生效，同时隐藏时以隐藏为准。" initialValue={pinnedKeys} onChangeText={setPinnedKeys} disabled={disabled} />
       </SettingsCard>
     </SettingsSection>
     <SettingsSection title="Pi 展开命令">
@@ -72,14 +75,14 @@ export function StatusBridgeSettings(props: PluginSurfaceProps) {
   const hint = { color: theme.colors.foregroundMuted, fontSize: 13, lineHeight: 20 };
   return <View style={{ gap: layout.compact ? 16 : 24, backgroundColor: theme.colors.surface0 }}>
     <Text style={{ color: theme.colors.foreground, fontSize: 22, fontWeight: "600" }}>Pi 状态桥接</Text>
-    <Text style={hint}>每个 Pi 原生 setStatus 项目显示为聊天框上方的独立胶囊。点击查看完整内容，配置后可调用插件的展开命令。设置保存后约 1 秒内生效；功能开关仍需整体重载 Zeonest。</Text>
+    <Text style={hint}>每个 Pi 会话默认只显示一个「Pi 状态」胶囊，入口显示数量和桥接异常。点击后逐项查看全文、复制或执行已配置的展开命令。需要随时查看的 key 可设为单独常驻。设置保存后约 1 秒内生效；功能开关仍需整体重载 Zeonest。</Text>
     <SettingsSection title="自动接入">
       <SettingsCard>
         <SettingsRow label="会话 hook 注入预加载观察器"
           hint="开启功能并整体重载 Zeonest 后，在新打开的交互式 Pi 会话中自动接入。无需包装器、额外 Pi 扩展或修改 provider 启动命令。宿主使用 Node.js 22+；原有 NODE_OPTIONS 会保留。" />
         <SettingsRow label="已有会话需空闲后手动重新打开"
           hint="运行中的进程不会补注入。每次重载插件后，请在 agent 空闲时手动重新打开会话，或新建 Pi agent。不会自动中断轮次，也不会从历史恢复状态。" />
-        <SettingsRow label="胶囊宽度由 Paseo 布局决定" hint="不再设置或按字符数截断胶囊文字；点击后的全文始终保留换行，可滚动、选择和复制。" />
+        <SettingsRow label="汇总入口不拼接状态正文" hint="条目按首次出现的顺序原位更新，保留换行。弹层沿用 Paseo 原生背景和滚动；单独常驻胶囊的可见宽度由 Paseo 布局决定。" />
       </SettingsCard>
     </SettingsSection>
     {settings.status === "ready" ? <PreferencesEditor key={epoch} {...props} settings={settings} saved={() => { setEpoch((value) => value + 1); setMessage("配置已保存，将在下一次状态轮询时生效。"); }} />

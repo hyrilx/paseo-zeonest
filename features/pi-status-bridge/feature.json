@@ -1,8 +1,8 @@
 {
   "id": "pi-status-bridge",
   "name": "Pi 状态桥接",
-  "description": "将 Pi 插件状态显示为聊天框胶囊，查看全文并调用映射的展开命令",
-  "version": "0.1.3",
+  "description": "按会话汇总 Pi 插件状态，查看全文并调用映射的展开命令",
+  "version": "0.2.0",
   "tags": [
     "pi",
     "status"

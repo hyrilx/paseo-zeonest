@@ -16,7 +16,10 @@ export function post(env: Record<string, string>, packet: unknown, extra: Record
 const packet = (statuses = [{ key: "lens", text: "\u001b[32mReady\u001b[0m\nFull detail" }], sequence = 0) => ({ version: 1, sequence, statuses, warning: null });
 
 test("defaults, action validation and Unicode labels", () => {
-  assert.deepEqual(preferencesSchema.parse({}), { hiddenKeys: [], actions: [] });
+  assert.deepEqual(preferencesSchema.parse({}), { hiddenKeys: [], pinnedKeys: [], actions: [] });
+  assert.equal(preferences.version, 3);
+  assert.equal(preferencesSchema.safeParse({ pinnedKeys: [""] }).success, false);
+  assert.equal(preferencesSchema.safeParse({ pinnedKeys: Array(129).fill("lens") }).success, false);
   for (const command of ["oops", "/review\n/quit", "/review\0", "/review\r"]) assert.equal(preferencesSchema.safeParse({ actions: [{ key: "lens", command }] }).success, false);
   assert.equal(preferencesSchema.safeParse({ actions: [{ key: "lens", command: "/review:1 all" }] }).success, true);
   assert.equal(preferencesSchema.safeParse({ actions: [{ key: "x", command: "/a" }, { key: "x", command: "/b" }] }).success, false);
@@ -24,7 +27,7 @@ test("defaults, action validation and Unicode labels", () => {
   assert.equal(pillLabel("key", "\n"), "key");
   assert.equal(pillLabel("key", "long ".repeat(100)), "long ".repeat(100).trim());
   const old = { labelLength: 24, hiddenKeys: ["hidden"], actions: [{ key: "lens", command: "/lens" }] };
-  assert.deepEqual(preferences.migrate!(old, 1), { hiddenKeys: old.hiddenKeys, actions: old.actions });
+  for (const version of [1, 2]) assert.deepEqual(preferences.migrate!(old, version), { hiddenKeys: old.hiddenKeys, pinnedKeys: [], actions: old.actions });
   assert.equal(plainStatus("\u001b]8;;https://example.com\u0007link\u001b]8;;\u0007\u001b[32mOK\u001b[0m\nnext"), "linkOK\nnext");
 });
 
@@ -37,7 +40,9 @@ test("ingestion is authenticated, origin-restricted, bounded and isolated by age
   assert.equal(await post(a, packet([{ key: "a", text: "x".repeat(65537) }])), 400);
   assert.equal(await post(a, packet()), 204);
   assert.equal(await post(b, packet([{ key: "lens", text: "B" }])), 204);
-  const preferences = preferencesSchema.parse({ actions: [{ key: "lens", command: "/lens" }] });
+  const preferences = preferencesSchema.parse({ actions: [{ key: "lens", command: "/lens" }], pinnedKeys: ["lens"] });
+  assert.ok(bridge.snapshot(preferences).statuses.every((status) => status.pinned));
+  assert.ok(bridge.snapshot(preferencesSchema.parse({})).statuses.every((status) => !status.pinned));
   assert.deepEqual(bridge.snapshot(preferences).statuses.map((s) => [s.agentId, s.text, s.command]), [["a", "Ready\nFull detail", "/lens"], ["b", "B", "/lens"]]);
   assert.equal(bridge.snapshot({ ...preferences, hiddenKeys: ["lens"] }).statuses.length, 0);
   assert.equal(await post(a, packet([], 1)), 204);

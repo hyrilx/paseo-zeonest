@@ -3,7 +3,7 @@ import { z } from "zod";
 
 export const statusSchema = z.object({
   agentId: z.string(), workspaceId: z.string(), key: z.string(), text: z.string(),
-  command: z.string().nullable(),
+  command: z.string().nullable(), pinned: z.boolean().optional(),
 });
 export type BridgedStatus = z.infer<typeof statusSchema>;
 export const snapshotSchema = z.object({

@@ -98,7 +98,8 @@ export function createBridge(now = Date.now) {
       for (const status of session.statuses) {
         if (!status.text.trim() || preferences.hiddenKeys.includes(status.key)) continue;
         statuses.push({ agentId: session.agentId, workspaceId: session.workspaceId, ...status,
-          command: preferences.actions.find((action) => action.key === status.key)?.command ?? null });
+          command: preferences.actions.find((action) => action.key === status.key)?.command ?? null,
+          pinned: preferences.pinnedKeys.includes(status.key) });
       }
     }
     return { statuses, warnings };

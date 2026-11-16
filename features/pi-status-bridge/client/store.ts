@@ -2,13 +2,23 @@ import type { BridgeSnapshot } from "../shared/contracts";
 
 export interface DisplayEntry {
   id: string; agentId: string; workspaceId: string; key: string; text: string;
-  command: string | null; warning: boolean;
+  command: string | null; warning: boolean; pinned?: boolean;
 }
 export function statusId(agentId: string, key: string, warning = false) { return JSON.stringify([agentId, key, warning]); }
 export function createStatusStore() {
   let entries: readonly DisplayEntry[] = [];
   const listeners = new Set<() => void>();
-  function replace(next: readonly DisplayEntry[]) { entries = next; for (const listener of listeners) listener(); }
+  function replace(next: readonly DisplayEntry[]) {
+    // Keep surviving rows in their first-seen order; updates never move a row.
+    const remaining = new Map(next.map((entry) => [entry.id, entry]));
+    const ordered: DisplayEntry[] = [];
+    for (const entry of entries) {
+      const updated = remaining.get(entry.id);
+      if (updated) { ordered.push(updated); remaining.delete(entry.id); }
+    }
+    entries = [...ordered, ...remaining.values()];
+    for (const listener of listeners) listener();
+  }
   return {
     get: () => entries,
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },

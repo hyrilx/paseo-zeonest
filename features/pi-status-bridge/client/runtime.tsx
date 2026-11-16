@@ -4,38 +4,59 @@ import { expandStatus, listStatuses } from "../shared/contracts";
 import { errorMessage, pillLabel } from "../shared/text";
 import { createStatusStore } from "./store";
 import { StatusDetails } from "./details";
+import type { StatusScope } from "./details";
 
 // One poll per installation, not per pill or per open popover. Updates preserve native registrations.
 export function startStatusClient(client: PluginClientContext, intervalMs = 1000) {
   const source = createStatusStore();
-  const pills = new Map<string, { registration: PluginButtonRegistration; Content: ComponentType<PluginButtonContentProps>; label: string; text: string; workspaceId: string }>();
+  const pills = new Map<string, { registration: PluginButtonRegistration; Content: ComponentType<PluginButtonContentProps>; label: string; warning: boolean; workspaceId: string }>();
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let deadline: ReturnType<typeof setTimeout> | undefined;
   let nextId = 0;
   let reported = false;
   function reconcile() {
-    const ids = new Set(source.get().map((entry) => entry.id));
-    for (const [id, pill] of pills) if (!ids.has(id)) { pill.registration.remove(); pills.delete(id); }
+    const groups = new Map<string, { scope: StatusScope; count: number; warnings: number; label: string; title: string }>();
     for (const entry of source.get()) {
-      const label = entry.warning ? "Pi 状态桥接异常" : pillLabel(entry.key, entry.text);
-      let existing = pills.get(entry.id);
-      if (existing && existing.workspaceId !== entry.workspaceId) { existing.registration.remove(); pills.delete(entry.id); existing = undefined; }
+      if (entry.pinned && !entry.warning) {
+        groups.set(entry.id, { scope: { agentId: entry.agentId, workspaceId: entry.workspaceId, entryId: entry.id },
+          count: 1, warnings: 0, label: pillLabel(entry.key, entry.text), title: entry.key });
+        continue;
+      }
+      const id = JSON.stringify([entry.agentId]);
+      let group = groups.get(id);
+      if (!group) {
+        group = { scope: { agentId: entry.agentId, workspaceId: entry.workspaceId }, count: 0, warnings: 0, label: "", title: "Pi 状态" };
+        groups.set(id, group);
+      }
+      if (entry.warning) group.warnings++; else group.count++;
+    }
+    for (const group of groups.values()) if (!group.scope.entryId) {
+      group.label = group.count ? `Pi 状态 · ${group.count}` : "Pi 状态";
+      if (group.warnings) group.label += ` · ${group.warnings} 异常`;
+      group.title = group.label;
+    }
+    for (const [id, pill] of pills) if (!groups.has(id)) { pill.registration.remove(); pills.delete(id); }
+    for (const [id, group] of groups) {
+      const { scope, label, title } = group;
+      const warning = group.warnings > 0;
+      const icon = warning ? "TriangleAlert" : "Activity";
+      let existing = pills.get(id);
+      if (existing && existing.workspaceId !== scope.workspaceId) { existing.registration.remove(); pills.delete(id); existing = undefined; }
       if (existing) {
-        if (existing.label !== label || existing.text !== entry.text) {
-          existing.registration.update({ label, title: entry.warning ? "Pi 状态桥接异常" : entry.key });
-          existing.label = label; existing.text = entry.text;
+        if (existing.label !== label || existing.warning !== warning) {
+          existing.registration.update({ label, title, icon });
+          existing.label = label; existing.warning = warning;
         }
         continue;
       }
-      const entryId = entry.id;
-      const Content = (props: PluginButtonContentProps) => <StatusDetails {...props} source={source} entryId={entryId}
+      const Content = (props: PluginButtonContentProps) => <StatusDetails {...props} source={source} scope={scope}
         expand={(status) => client.rpc(expandStatus, { agentId: status.agentId, key: status.key, command: status.command! })} />;
       const registration = client.addComposerPill({
-        id: `pi-status-bridge-${++nextId}`, agentId: entry.agentId, workspaceId: entry.workspaceId,
-        button: { title: entry.warning ? "Pi 状态桥接异常" : entry.key, label, icon: entry.warning ? "TriangleAlert" : "Activity", behavior: { kind: "popover", Content } },
+        id: `pi-status-bridge-${++nextId}`, agentId: scope.agentId, workspaceId: scope.workspaceId,
+        button: { title, label, icon, behavior: { kind: "popover", Content } },
       });
-      pills.set(entry.id, { registration, Content, label, text: entry.text, workspaceId: entry.workspaceId });
+      pills.set(id, { registration, Content, label, warning, workspaceId: scope.workspaceId });
     }
   }
   async function poll() {
