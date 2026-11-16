@@ -88,8 +88,64 @@ test("preload captures first status, deletion and fragmented UTF-8 without chang
   f.child.stdin.write("clear\n"); await until(() => bridge.snapshot(preferences).statuses.length === 0);
   f.child.stdin.write("oversized\n"); await until(() => bridge.snapshot(preferences).warnings.length > 0);
   assert.match(bridge.snapshot(preferences).warnings[0]!.message, /65536/);
+  f.child.stdin.write("update\n"); await delay(450);
+  assert.equal(bridge.snapshot(preferences).warnings.length, 1, "An unrelated key must not clear the rejected status warning");
+  f.child.stdin.write("clear-big\n"); await until(() => bridge.snapshot(preferences).warnings.length === 0);
   f.child.stdin.write("exit\n"); assert.equal((await f.closed).code, 7);
   assert.match(f.errors(), /65536/);
+});
+for (const command of ["large-rpc", "large-rpc-fragmented", "large-rpc-notify-fragmented"]) {
+  test(`unrelated oversized RPC is transparent without a sticky bridge warning: ${command}`, async (t) => {
+    const bridge = createBridge(); t.after(() => bridge.close());
+    const f = await launch(t, await bridge.open("a", "w"));
+    await until(() => bridge.snapshot(preferences).statuses.length === 1);
+    const original = bridge.snapshot(preferences).statuses;
+    f.child.stdin.write(command + "\n");
+    await until(() => f.output().includes('"type":"large-rpc-done"')); await delay(450);
+    const frame = JSON.parse(f.output().split("\n").find((line) => line.length > 1048576)!);
+    assert.equal(frame.data.text, "x".repeat(1048577), "The original RPC line must remain intact");
+    assert.deepEqual(bridge.snapshot(preferences), { statuses: original, warnings: [] });
+    assert.equal(f.errors(), "");
+    f.child.stdin.write("update\n");
+    await until(() => bridge.snapshot(preferences).statuses[0]?.text === "Updated detail");
+    assert.deepEqual(bridge.snapshot(preferences).warnings, []);
+    f.child.stdin.write("clear\n"); await until(() => bridge.snapshot(preferences).statuses.length === 0);
+  });
+}
+for (const command of ["large-status", "large-status-fragmented"]) {
+  test(`an oversized status hides stale text and recovers on a valid update: ${command}`, async (t) => {
+    const bridge = createBridge(); t.after(() => bridge.close());
+    const f = await launch(t, await bridge.open("a", "w"));
+    await until(() => bridge.snapshot(preferences).statuses.length === 1);
+    f.child.stdin.write(command + "\n");
+    await until(() => bridge.snapshot(preferences).warnings.length === 1);
+    assert.equal(bridge.snapshot(preferences).statuses.length, 0, "A skipped status must not leave its old text visible");
+    assert.match(bridge.snapshot(preferences).warnings[0]!.message, /Status RPC line/);
+    await until(() => f.output().includes('"type":"large-status-done"'));
+    const frame = JSON.parse(f.output().split("\n").find((line) => line.length > 1048576)!);
+    assert.equal(frame.statusText, "x".repeat(1048577));
+    f.child.stdin.write("update\n");
+    await until(() => bridge.snapshot(preferences).statuses[0]?.text === "Updated detail" && bridge.snapshot(preferences).warnings.length === 0);
+  });
+}
+test("oversized custom RPC with its status key outside the header is passed through without guessing", async (t) => {
+  const bridge = createBridge(); t.after(() => bridge.close());
+  const f = await launch(t, await bridge.open("a", "w"));
+  await until(() => bridge.snapshot(preferences).statuses.length === 1);
+  const original = bridge.snapshot(preferences).statuses;
+  f.child.stdin.write("large-status-late-key\n");
+  await until(() => f.output().includes('"type":"large-status-done"')); await delay(450);
+  assert.deepEqual(bridge.snapshot(preferences), { statuses: original, warnings: [] });
+  const frame = JSON.parse(f.output().split("\n").find((line) => line.length > 1048576)!);
+  assert.equal(frame.statusKey, "lens"); assert.equal(frame.statusText, "x".repeat(1048577)); assert.equal(f.errors(), "");
+});
+test("an oversized get_state response still completes the observer handshake", async (t) => {
+  const bridge = createBridge(); t.after(() => bridge.close());
+  const f = await launch(t, await bridge.open("a", "w"), { TEST_PI_LARGE_HANDSHAKE: "1" });
+  await until(() => bridge.snapshot(preferences).statuses.length === 1);
+  const frame = JSON.parse(f.output().split("\n").find((line) => line.length > 1048576)!);
+  assert.equal(frame.data, "x".repeat(1048577));
+  assert.deepEqual(bridge.snapshot(preferences).warnings, []); assert.equal(f.errors(), "");
 });
 test("unconfigured preload is transparent, including native exit status", async (t) => {
   const f = await launch(t);
@@ -178,7 +234,7 @@ test("an inactive non-RPC process clears only injected environment and does not 
 test("Paseo MCP command-only probes cannot publish under the real agent's channel", async (t) => {
   const bridge = createBridge(); t.after(() => bridge.close());
   const channel = await bridge.open("a", "w");
-  const probe = await launch(t, channel, { TEST_PI_PROBE: "1" });
+  const probe = await launch(t, channel, { TEST_PI_PROBE: "1", TEST_PI_LARGE_HANDSHAKE: "1" });
   await until(() => probe.output().includes('"command":"get_commands"'));
   await delay(450); assert.equal(bridge.snapshot(preferences).statuses.length, 0);
   const main = await launch(t, channel);

@@ -70,6 +70,21 @@ test("client reconciles in place, removes deleted pills and cleans up late RPC r
   const late = { ...client, rpc: () => new Promise<BridgeSnapshot>((yes) => { resolve = yes; }) } as unknown as PluginClientContext;
   const stopLate = startStatusClient(late, 5); stopLate(); resolve(snapshot()); await delay(5); assert.equal(count, 1);
 });
+test("a recovered bridge warning removes only its pill and preserves healthy statuses", async (t) => {
+  let state = snapshot();
+  const registrations: { label: string; removed: number; updates: number }[] = [];
+  const client = { rpc: async () => state, addComposerPill: (pill: any) => {
+    const registration = { label: pill.button.label, removed: 0, updates: 0 }; registrations.push(registration);
+    return { update() { registration.updates++; }, remove() { registration.removed++; } };
+  } } as unknown as PluginClientContext;
+  const stop = startStatusClient(client, 5); t.after(stop);
+  await delay(20);
+  state = { ...snapshot(), warnings: [{ agentId: "a", workspaceId: "w", message: "Status exceeds 65536 characters" }] };
+  await delay(20); assert.equal(registrations.length, 2); assert.equal(registrations[1]!.label, "Pi 状态桥接异常");
+  state = snapshot(); await delay(20);
+  assert.equal(registrations[1]!.removed, 1); assert.equal(registrations[0]!.removed, 0);
+  assert.equal(registrations[0]!.updates, 0); assert.equal(registrations.length, 2);
+});
 test("RPC failure replaces stale status with an explicit warning and can recover", async () => {
   let fail = false; const labels: string[] = []; let removed = 0;
   const client = { rpc: async () => { if (fail) throw new Error("offline"); return snapshot(); }, addComposerPill: (pill: any) => { labels.push(pill.button.label); return { update() {}, remove() { removed++; } }; } } as unknown as PluginClientContext;
