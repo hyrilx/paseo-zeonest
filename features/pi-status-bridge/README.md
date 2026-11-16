@@ -21,7 +21,7 @@ Pi 原生 `setStatus` 只有 key 和文本，没有通用的点击回调。因�
 2. 新建 Pi agent，或者在已有 agent **空闲后**手动重新打开会话。运行中的进程不会补注入，不要中断正在执行的轮次。
 3. Pi 插件发布状态后应出现独立胶囊。全文顶部就是配置映射时使用的精确 key。
 
-采用原生 `agent.open.before`（SDK 的 `agent.session_open` 别名所对应的事件），在交互式 Pi 会话启动环境中追加 `NODE_OPTIONS --import`，使观察器早于 Pi 的 stdout 接管运行。保留原有 Node options，优先级为会话环境 > Pi provider 环境 > daemon 进程环境；不会持久化到 agent 配置。没有凭据、非 RPC 模式或 worker 中不启动观察。启动状态先在内存中收集，直到真实 agent 的首个 `get_state` 成功响应才开始发送；Paseo 0.15.4 另起的 MCP 命令探测进程只请求 commands，不会发布到正式会话通道。
+采用原生 `agent.open.before`（SDK 的 `agent.session_open` 别名所对应的事件），在交互式 Pi 会话启动环境中追加 `NODE_OPTIONS --import`，使观察器早于 Pi 的 stdout 接管运行。hook 返回包含新环境的完整请求；Paseo 0.15.4 会复制传入的请求，只修改副本而不返回时，注入不会生效。保留原有 Node options，优先级为会话环境 > Pi provider 环境 > daemon 进程环境；不会持久化到 agent 配置。没有凭据、非 RPC 模式或 worker 中不启动观察。启动状态先在内存中收集，直到真实 agent 的首个 `get_state` 成功响应才开始发送；Paseo 0.15.4 另起的 MCP 命令探测进程只请求 commands，不会发布到正式会话通道。
 
 宿主及实际运行 Pi 的 Node 需 22+。自定义启动脚本必须把注入环境传给实际的 Node Pi RPC 进程；清除 `NODE_OPTIONS`、改用非 Node 的 Pi 可执行文件或吞掉 stdout 的特殊启动器不在兼容范围内。不要把同一份已注入环境主动复制给多个独立 Pi 进程。
 
@@ -90,11 +90,13 @@ npm pack --dry-run --ignore-scripts
 
 真实 Pi 测试优先使用 `ZEONEST_TEST_PI_ENTRY` 指向的本机已安装 CLI JS 入口，否则查找 PATH 上的 `pi`（含包管理器 shell shim）；均不可用时显式跳过，不安装 Pi。测试使用临时工作目录、独立 `PI_CODING_AGENT_DIR` 和随功能携带的测试扩展，禁用个人扩展/技能/主题/模板，不请求模型、不改个人 Pi 数据。覆盖启动 `session_start` 首条状态、真实 stdout 接管、正常 `get_state` 响应、插件命令更新与清除；不能替代 Paseo 宿主验收。
 
-其余自动化覆盖鉴权/协议边界、多会话、快照排序、租约、设置迁移、文件完整性与并发生成、hook 环境合并、失败/取消/卸载清理、真实 Node 预加载进程、原始 RPC/编码/参数、write 语义、子进程/worker 与 MCP 探测隔离、非阻止退出的 HTTP/心跳、HTTP 失败、展开检查、胶囊原位更新、全文/复制、草稿/revision 冲突和主题 token。
+其余自动化覆盖鉴权/协议边界、多会话、快照排序、租约、设置迁移、文件完整性与并发生成、hook 环境合并、宿主复制请求并仅应用返回值的语义、用 hook 返回环境启动 Node 后的观察器连接与状态转发、失败/取消/卸载清理、真实 Node 预加载进程、原始 RPC/编码/参数、write 语义、子进程/worker 与 MCP 探测隔离、非阻止退出的 HTTP/心跳、HTTP 失败、展开检查、胶囊原位更新、全文/复制、草稿/revision 冲突和主题 token。
 
 此前观察器接入验证：31 项功能测试全部通过，其中真实 Pi 1.5.2（本机 Node 26.13.1）经 PATH 上原有 shell shim 启动的兼容测试实际执行并通过，也单独验证了直接 Node + CLI JS 入口；未据此宣称所有 Node/Pi 版本均已验收。全量 `npm run check` 通过：145 项测试，144 通过、1 项既有可选测试跳过，包括全类型、源码边界、双端构建及产物边界。`npm pack --dry-run --ignore-scripts` 通过，运行包 11 个文件；已检查 Git diff 和全部新增文件的空白错误。
 
 本次 RPC 注册修复已通过全仓 `npm run check`（229 项测试，228 通过，1 项既有可选测试跳过）和 `npm pack --dry-run --ignore-scripts`。回归覆盖同步发布业务方法、功能未启用时拒绝 IO、启用后正常调用，以及停止后拒绝旧处理函数。对本次相关的 26 个源码文件主动请求 LSP，其中 10 个完成且无诊断，16 个没有就绪客户端；全类型检查通过。
+
+本次会话 hook 返回值修复（0.1.2）先用回归测试复现了注入环境丢失，修复后功能 32 项测试全部通过，包括本机真实 Pi 兼容测试。全仓 `npm run check` 通过：230 项测试，229 通过、1 项既有可选测试跳过，类型、源码边界、双端构建及产物边界均通过；`npm pack --dry-run --ignore-scripts` 通过，运行包仍为 11 个文件。3 个修改的 TypeScript 源码/测试文件主动 LSP 检查均无诊断；`feature.json` 的 LSP 客户端未就绪，未完成该文件的 LSP 检查，元信息已通过构建校验。
 
 观察器接入时主动请求了 17 个修改源码/测试文件的 LSP 诊断：7 个完成且无诊断，10 个没有就绪客户端；对最后修改的预加载程序和测试再次请求，仍不可用，不能当作 LSP 通过。实际 TypeScript 全类型检查已通过，作为补充而非替代 LSP 结果。
 

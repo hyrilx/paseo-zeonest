@@ -20,7 +20,8 @@ export default function contribute(server: PluginServerContext, preload = create
         if (stopped || context.signal.aborted) return;
         const channel = await bridge.open(request.agentId, request.workspaceId);
         if (stopped || context.signal.aborted) { bridge.remove(request.agentId); return; }
-        request.env = observerEnvironment(path, channel, request.env, fallback);
+        // Paseo uses the returned request; mutations of its cloned hook input are discarded.
+        return { ...request, env: observerEnvironment(path, channel, request.env, fallback) };
       } catch {
         bridge.remove(request.agentId);
         // Do not log config/env/token values. Failure is observational, never a launch veto.

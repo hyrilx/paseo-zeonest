@@ -79,7 +79,7 @@ test("busy, missing/skill commands, discovery errors and stopped actions cannot 
     await assert.rejects(f.run()); assert.equal(f.calls.includes("/lens detail"), false, mode);
   }
 });
-test("native hooks are business-only, skip non-Pi/history, preserve env and are cleaned up", async (t) => {
+test("native hooks return transformed session requests, skip non-Pi/history and are cleaned up", async (t) => {
   const hooks = new Map<string, Function>(); const handlers = new Map<string, Function>();
   const server = { addHook: (name: string, callback: Function) => { hooks.set(name, callback); return () => { hooks.delete(name); }; },
     handle: (contract: { name: string }, callback: Function) => handlers.set(contract.name, callback) } as unknown as PluginServerContext;
@@ -95,12 +95,17 @@ test("native hooks are business-only, skip non-Pi/history, preserve env and are 
   try {
     const base = { agentId: "a", workspaceId: "w", purpose: "interactive", provider: "pi", env: { EXISTING: "keep" } };
     const request = { ...base }; const ctx = { signal: new AbortController().signal, paseo: { config: { get: async () => ({ config: { providers: { pi: { env: { NODE_OPTIONS: "--trace-warnings" } } } } }) } } };
-    await hooks.get("agent.open.before")!({ request }, ctx);
-    assert.equal(request.env.EXISTING, "keep"); assert.ok("ZEONEST_PI_STATUS_URL" in request.env);
-    assert.match((request.env as Record<string, string>).NODE_OPTIONS!, /^--trace-warnings --import=/);
+    // Paseo 0.15.4 clones the request and discards mutations unless the hook returns it.
+    const result = await hooks.get("agent.open.before")!({ request: structuredClone(request) }, ctx);
+    assert.ok(result, "The transformed request must be returned to Paseo");
+    const opened = structuredClone(result);
+    assert.deepEqual(request.env, { EXISTING: "keep" });
+    assert.equal(opened.env.EXISTING, "keep"); assert.ok("ZEONEST_PI_STATUS_URL" in opened.env);
+    assert.match(opened.env.NODE_OPTIONS, /^--trace-warnings --import=/);
     for (const patch of [{ provider: "codex" }, { purpose: "history" }, { workspaceId: null }]) {
       const skipped = { ...base, ...patch, env: {} };
-      await hooks.get("agent.open.before")!({ request: skipped }, ctx); assert.deepEqual(skipped.env, {});
+      assert.equal(await hooks.get("agent.open.before")!({ request: structuredClone(skipped) }, ctx), undefined);
+      assert.deepEqual(skipped.env, {});
     }
     assert.equal((await handlers.get("zeonest.pi-status-bridge.list")!()).statuses.length, 0);
   } finally { await cleanup!(); removeReader(); }
@@ -120,12 +125,14 @@ test("failed preparation, aborts and cleanup during injection leave the original
     const original = mode === "config-failure" ? { KEEP: "yes" } : { KEEP: "yes", NODE_OPTIONS: "--trace-warnings" };
     const request = { agentId: "a", workspaceId: "w", provider: "pi", purpose: "interactive", env: original };
     const context = { signal: controller.signal, paseo: { config: { get: async () => { configReads++; throw new Error("config unavailable"); } } } };
-    const opening = hooks.get("agent.open.before")!({ request }, context);
+    const opening = hooks.get("agent.open.before")!({ request: structuredClone(request) }, context);
     if (mode === "cleanup") { await cleanup!(); release("/observer.mjs"); }
-    await opening;
+    const result = await opening;
+    assert.equal(request.env, original, mode);
     if (mode === "options") {
-      assert.notEqual(request.env, original); assert.match(request.env.NODE_OPTIONS!, /^--trace-warnings --import=/);
-    } else assert.equal(request.env, original, mode);
+      assert.ok(result, "Explicit session Node options must also be returned");
+      assert.match(result.env.NODE_OPTIONS, /^--trace-warnings --import=/);
+    } else assert.equal(result, undefined, mode);
     assert.equal(configReads, mode === "config-failure" ? 1 : 0);
     assert.equal(prepares, ["aborted", "config-failure"].includes(mode) ? 0 : 1);
     await cleanup!();

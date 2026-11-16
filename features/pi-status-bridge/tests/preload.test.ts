@@ -7,6 +7,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
+import type { PluginServerContext, PluginSessionOpenRequest } from "@getpaseo/plugin/server";
+import contribute from "../server/index";
+import { activeBridge } from "../server/activation";
 import { createBridge } from "../server/bridge";
 import { createPreload, observerEnvironment } from "../server/preload";
 import { preferencesSchema } from "../shared/settings";
@@ -37,6 +40,37 @@ async function launch(t: TestContext, channel: Record<string, string> = {}, extr
   return { ...capture(t, child), path, env };
 }
 const preferences = preferencesSchema.parse({});
+
+test("native session hook result launches a Node observer that connects and forwards status", async (t) => {
+  const home = await directory(t);
+  const hooks = new Map<string, Function>();
+  const server = { addHook: (name: string, callback: Function) => {
+    hooks.set(name, callback); return () => { hooks.delete(name); };
+  } } as unknown as PluginServerContext;
+  const cleanup = contribute(server, createPreload(home)); t.after(async () => { await cleanup(); });
+  const request: PluginSessionOpenRequest = {
+    agentId: "hook-agent", workspaceId: "w", provider: "pi", cwd: home,
+    reason: "create", purpose: "interactive", title: null, labels: {}, tools: [], mcpServers: {},
+    env: { NODE_OPTIONS: "--trace-warnings", KEEP: "yes" },
+  };
+  // Match the host boundary: only the returned request survives the cloned hook input.
+  const result = await hooks.get("agent.open.before")!({ request: structuredClone(request) }, { signal: new AbortController().signal });
+  const opened: PluginSessionOpenRequest = result === undefined ? request : structuredClone(result);
+  assert.deepEqual(request.env, { NODE_OPTIONS: "--trace-warnings", KEEP: "yes" });
+  assert.ok(opened.env.ZEONEST_PI_STATUS_PRELOAD, "The actual launch environment must include the observer");
+  assert.equal(opened.env.KEEP, "yes");
+  const f = capture(t, spawn(process.execPath, [new URL("./fixtures/fake-pi.mjs", import.meta.url).pathname, "--mode", "rpc"], {
+    cwd: home, env: { ...process.env, ...opened.env }, stdio: "pipe",
+  }));
+  const bridge = activeBridge().bridge;
+  await until(() => bridge.snapshot(preferences).statuses.length === 1);
+  const snapshot = bridge.snapshot(preferences);
+  assert.equal(snapshot.statuses[0]!.agentId, "hook-agent");
+  assert.match(snapshot.statuses[0]!.text, /^😀分析/); assert.deepEqual(snapshot.warnings, []);
+  f.child.stdin.write("update\n");
+  await until(() => bridge.snapshot(preferences).statuses[0]?.text === "Updated detail");
+  f.child.stdin.write("exit\n"); assert.equal((await f.closed).code, 7); assert.equal(f.errors(), "");
+});
 
 test("preload captures first status, deletion and fragmented UTF-8 without changing RPC bytes, arguments or stdin", async (t) => {
   const bridge = createBridge(); t.after(() => bridge.close());
