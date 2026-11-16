@@ -31,9 +31,10 @@ function snapshot(confirmDiff = true): Snapshot {
     documents: ["settings", "models", "mcp", "preferences"].map((kind) => ({ kind: kind as Snapshot["documents"][number]["kind"], path: `/test/agent/${kind}.json`, text: kind === "preferences" ? JSON.stringify({ confirmDiff }) : "{}", revision: "v1", exists: true, error: null })),
     globalSettings: "{}", globalMcp: "{}", resources: [], packages: [], warnings: [] };
 }
-async function mount(t: { after(fn: () => Promise<void>): void }, options: { confirmDiff?: boolean; commitError?: boolean; compact?: boolean } = {}) {
+async function mount(t: { after(fn: () => Promise<void>): void }, options: { confirmDiff?: boolean; commitError?: boolean; compact?: boolean; warnings?: string[] } = {}) {
   const calls: { method: string; input: any }[] = [];
   const state = snapshot(options.confirmDiff ?? true);
+  state.warnings = options.warnings ?? [];
   const plan: Preview = { token: "preview-1", title: "Save", expiresAt: "2099-01-01T00:00:00Z", confirmationRequired: options.confirmDiff ?? true, changes: [{ path: "/test/agent/settings.json", diff: "--- old\n+++ new\n+new-model\n", additions: 1, deletions: 0 }], artifacts: [], warnings: [] };
   const handlers: Record<string, (input: any) => Promise<any>> = {
     read: async () => state, workspaces: async () => [], prepare: async (input) => ({ ...plan, changes: plan.changes.map((change) => ({ ...change, path: state.documents.find((d) => d.kind === input.edits[0].kind)!.path })) }),
@@ -44,7 +45,7 @@ async function mount(t: { after(fn: () => Promise<void>): void }, options: { con
   await act(async () => { root = create(<PiSettingsPage theme={theme} host={{ id: "host-1", label: "Host" }} layout={{ compact: options.compact ?? false, platform: "web" }} />); });
   t.after(async () => { await act(async () => root.unmount()); });
   const host = (type: string, label: string) => root.root.findAll((n) => typeof n.type === "string" && n.type === type && (n.props.label === label || n.props.accessibilityLabel === label))[0]!;
-  return { root, calls, host };
+  return { root, calls, host, state };
 }
 
 test("save opens diff first; cancel never calls commit and retains draft", async (t) => {
@@ -111,4 +112,77 @@ test("saving one section never discards another section's unsaved draft", async 
 test("compact page and diff use supplied theme tokens", async (t) => {
   const { root } = await mount(t, { compact: true });
   const output = JSON.stringify(root.toJSON()); assert.match(output, /#001100/); assert.match(output, /#005500/);
+});
+
+const warningToggle = (root: ReactTestRenderer) => root.root.findAll((node) =>
+  String(node.type) === "Pressable" && typeof node.props.accessibilityLabel === "string" && node.props.accessibilityLabel.includes("配置警告，共"));
+
+test("no warnings leave no warning card or extra scroll area", async (t) => {
+  const { root } = await mount(t);
+  assert.equal(warningToggle(root).length, 0);
+  assert.equal(root.root.findAll((node) => String(node.type) === "ScrollView").length, 1);
+});
+
+test("many warnings start collapsed, expand in a bounded area and collapse without RPC", async (t) => {
+  for (const compact of [false, true]) {
+    const warnings = Array.from({ length: 100 }, (_, index) => `配置警告 ${index + 1}\n${"很长的路径/".repeat(50)}`);
+    const { root, calls, host } = await mount(t, { compact, warnings });
+    const warningTexts = () => root.root.findAll((node) => String(node.type) === "Text" && warnings.includes(node.props.children));
+    assert.equal(warningToggle(root)[0]!.props.accessibilityState.expanded, false);
+    assert.match(warningToggle(root)[0]!.props.accessibilityLabel, /共 100 条/);
+    assert.equal(warningTexts().length, 1);
+    assert.equal(warningTexts()[0]!.props.numberOfLines, 2);
+    assert.equal(warningTexts()[0]!.props.style.color, theme.colors.statusWarning);
+    const before = calls.length;
+    await act(async () => warningToggle(root)[0]!.props.onPress());
+    assert.equal(warningToggle(root)[0]!.props.accessibilityState.expanded, true);
+    const scroll = host("ScrollView", "配置警告列表");
+    assert.equal(scroll.props.style.maxHeight, compact ? 180 : 240);
+    assert.equal(scroll.props.nestedScrollEnabled, true);
+    assert.deepEqual(warningTexts().map((node) => node.props.children), warnings);
+    assert.ok(warningTexts().every((node) => node.props.selectable && node.props.numberOfLines === undefined));
+    assert.ok(host("SettingsInput", "默认模型 ID"), "settings remain mounted while warnings are expanded");
+    await act(async () => warningToggle(root)[0]!.props.onPress());
+    assert.equal(warningTexts().length, 1);
+    assert.equal(root.root.findAll((node) => String(node.type) === "ScrollView").length, 1);
+    assert.equal(calls.length, before);
+  }
+});
+
+test("a single long warning is bounded too, and duplicate messages remain readable", async (t) => {
+  const warning = "重复的警告\n".repeat(100);
+  const { root } = await mount(t, { warnings: [warning] });
+  assert.equal(root.root.findAll((node) => String(node.type) === "Text" && node.props.children === warning)[0]!.props.numberOfLines, 2);
+  await act(async () => warningToggle(root)[0]!.props.onPress());
+  assert.equal(root.root.findAll((node) => String(node.type) === "Text" && node.props.children === warning)[0]!.props.numberOfLines, undefined);
+  const duplicate = await mount(t, { warnings: [warning, warning] });
+  await act(async () => warningToggle(duplicate.root)[0]!.props.onPress());
+  assert.equal(duplicate.root.root.findAll((node) => String(node.type) === "Text" && node.props.children === warning).length, 2);
+});
+
+test("refresh preserves expansion until the agent directory changes", async (t) => {
+  const { root, host, state } = await mount(t, { warnings: ["配置目录警告"] });
+  await act(async () => warningToggle(root)[0]!.props.onPress());
+  await act(async () => host("SettingsAction", "从磁盘重新读取").props.onPress());
+  assert.equal(warningToggle(root)[0]!.props.accessibilityState.expanded, true);
+  state.agentDir = "/test/other-agent";
+  await act(async () => host("SettingsAction", "从磁盘重新读取").props.onPress());
+  assert.equal(warningToggle(root)[0]!.props.accessibilityState.expanded, false);
+});
+
+test("scope changes reset warning expansion; errors stay outside the collapsed warning list", async (t) => {
+  const { root, host, state } = await mount(t, { warnings: ["首条警告", "第二条警告"], commitError: true });
+  await act(async () => warningToggle(root)[0]!.props.onPress());
+  await act(async () => host("SettingsSelect", "全局 / 项目工作区").props.onValueChange("workspace-2"));
+  assert.equal(warningToggle(root)[0]!.props.accessibilityState.expanded, false);
+  await act(async () => host("SettingsInput", "默认模型 ID").props.onChangeText("new-model"));
+  await act(async () => host("SettingsAction", "保存模型默认值").props.onPress());
+  await act(async () => host("Pressable", "确认应用").props.onPress());
+  assert.ok(root.root.findAll((node) => String(node.type) === "Text" && node.props.accessibilityRole === "alert" && node.props.children === "stale revision").length > 0);
+  assert.equal(warningToggle(root)[0]!.props.accessibilityState.expanded, false);
+  state.warnings = [];
+  await act(async () => host("Pressable", "取消，不写入").props.onPress());
+  await act(async () => host("SettingsAction", "有未保存的草稿；先保存或放弃后才能切换范围").props.onPress());
+  await act(async () => host("Pressable", "放弃草稿并重新读取").props.onPress());
+  assert.equal(warningToggle(root).length, 0);
 });

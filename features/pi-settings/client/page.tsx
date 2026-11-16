@@ -7,6 +7,7 @@ import { commitChanges, discardChanges, listWorkspaces, prepareChanges, prepareP
   type ConfigDocument, type DocumentKind, type PackageRequest, type Preview, type Resource, type Scope, type Snapshot } from "../shared/contracts";
 import { effectiveMcp, isObject, parseObject, resourceLoading, setModelInvocation, setProperty, stringList, type JsonObject } from "../shared/config";
 import { Button, CodeInput, DiffModal, EntityEditor, type EntityEditorState } from "./components";
+import { ConfigWarnings } from "./warnings";
 
 type Tab = "models" | "skills" | "plugins" | "mcp" | "preferences";
 const tabs: { value: Tab; label: string }[] = [
@@ -156,7 +157,7 @@ function Page({ theme, layout, host }: PluginSurfaceProps) {
     {busy && <Text style={muted}>正在准备或应用操作；联网包操作最长需要约 3 分钟，请勿重复点击。</Text>}
     {error && <View style={{ gap: 8 }}><Text accessibilityRole="alert" selectable style={{ color: c.statusDanger, lineHeight: 20 }}>{error}</Text><Text style={muted}>错误不会被标为成功；草稿仍保留。若有版本冲突，请取消预览并重新读取。</Text></View>}
     {notice && <Text accessibilityLiveRegion="polite" style={{ color: c.statusSuccess, lineHeight: 20 }}>{notice}</Text>}
-    {snapshot?.warnings.map((warning) => <Text key={warning} selectable style={{ ...muted, color: c.statusWarning }}>{warning}</Text>)}
+    {snapshot && snapshot.warnings.length > 0 && <ConfigWarnings key={`${workspaceId}:${snapshot.agentDir}`} warnings={snapshot.warnings} theme={theme} layout={layout} />}
     {snapshot && !loading && <>
       {tab === "models" && <>
         <SettingsSection title={workspaceId ? "项目模型默认值" : "全局模型默认值"}>

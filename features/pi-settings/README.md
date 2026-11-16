@@ -21,6 +21,8 @@ Pi **不支持项目级 `models.json`**。项目范围只编辑模型默认值�
 
 资源发现读取 Pi 约定目录、配置路径/glob、包的 `pi` 清单或约定资源目录、`~/.agents/skills` 及工作区到仓库根之间的 `.agents/skills`。不会加载扩展工厂或调用 Pi 的可执行资源加载器。支持资源 `!glob`、`+exact-path`、`-exact-path`，以及包资源筛选；项目同身份包覆盖全局包，`autoload:false` 的项目筛选作为增量。扫描有数量/深度上限，异常会以警告显示，不能当作完整的运行时资源报告。
 
+页面顶部的配置警告默认折叠，显示总数和首条的两行摘要。点击「展开全部」后可滚动查看完整列表，列表最高为宽屏 240、compact 180 个布局单位；点击「收起」恢复摘要。切换配置范围或 agent 目录后恢复折叠。操作失败的错误提示仍单独显示。
+
 ## 文件与配置生效
 
 自动发现全局目录：宿主进程 `PI_CODING_AGENT_DIR`，否则 `~/.pi/agent`。可在页面设置中用绝对路径或 `~/` 覆盖。
@@ -86,7 +88,7 @@ ZEONEST_PI_CLI=/absolute/path/to/pi/dist/cli.js \
   node --import tsx --test features/pi-settings/tests/package-cli.test.ts
 ```
 
-自动化覆盖：配置 diff/确认开关、取消/过期不写入、冲突拒写、项目隔离、MCP 继承、JSONC/未知字段保留、技能 YAML、资源规则、包筛选备份、安装目录暂存及回滚、服务 teardown、分页、真实 React 保存/取消/失败交互、模型编辑及主题 token。
+自动化覆盖：配置 diff/确认开关、取消/过期不写入、冲突拒写、项目隔离、MCP 继承、JSONC/未知字段保留、技能 YAML、资源规则、包筛选备份、安装目录暂存及回滚、服务 teardown、分页、真实 React 保存/取消/失败交互、模型编辑、警告折叠/限高/范围切换及主题 token。
 
 开发时在 macOS / Node 26.12.0 / Pi 1.2.0 上执行了真实 CLI 的 npm 安装/更新/卸载契约测试，使用仅有测试 fixture 的本地 registry，验证安装脚本与扩展均未运行；不修改正式 Pi 配置。常规 `npm run check` 在未设置 `ZEONEST_PI_CLI` 时显式跳过此宿主相关测试。Git 远端、需要构建脚本的第三方包、Windows/Linux 未实机验证。
 
