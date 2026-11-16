@@ -8,7 +8,7 @@ Zeonest 取自 Zeolite（沸石）+ Nest（巢），意为「沸石之巢」：�
 
 <!-- zeonest:features:start -->
 
-当前包含 **4** 个子功能，默认均关闭；点击名称查看使用说明。
+当前包含 **5** 个子功能，默认均关闭；点击名称查看使用说明。
 
 | 名称 / ID | 描述 | 版本 | 标签 | 作者 |
 | --- | --- | --- | --- | --- |
@@ -16,6 +16,7 @@ Zeonest 取自 Zeolite（沸石）+ Nest（巢），意为「沸石之巢」：�
 | [历史对话展开](features/chat-history/README.md)<br><code>chat-history</code> | 将消息中的 Chat history 摘要展开为可折叠的历史对话 | 0.1.2 | <code>chat</code> <code>history</code> | Zeonest |
 | [Pi 设置](features/pi-settings/README.md)<br><code>pi-settings</code> | 管理全局与项目的 Pi 模型、技能、插件和 MCP，应用前审阅配置 diff | 0.1.1 | <code>pi</code> <code>configuration</code> | Zeonest |
 | [Pi 状态桥接](features/pi-status-bridge/README.md)<br><code>pi-status-bridge</code> | 将 Pi 插件状态显示为聊天框胶囊，查看全文并调用映射的展开命令 | 0.1.3 | <code>pi</code> <code>status</code> | Zeonest |
+| [会话统计](features/session-stats/README.md)<br><code>session-stats</code> | 通过聊天胶囊查看会话轮次、工具用时与估算输出速度。 | 0.2.0 | <code>效率</code> <code>统计</code> | Zeonest |
 
 <!-- zeonest:features:end -->
 

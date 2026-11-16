@@ -1,0 +1,11 @@
+{
+  "id": "session-stats",
+  "name": "会话统计",
+  "description": "通过聊天胶囊查看会话轮次、工具用时与估算输出速度。",
+  "version": "0.2.0",
+  "tags": [
+    "效率",
+    "统计"
+  ],
+  "author": "Zeonest"
+}
