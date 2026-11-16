@@ -9,6 +9,10 @@ import type { PluginClientContext, PluginSurfaceProps, PluginTimelineItemProps, 
 import { defaultPreferences, preferencesSchema } from "../shared/settings";
 import type { HistoryMessage } from "../client/parse";
 import { splitHistoryMessage } from "../client/parse";
+import { chatHistorySchema } from "../client/transform";
+import type { PluginTimelineTransformerContribution } from "@getpaseo/plugin/client";
+import { deferred, fakePaseo, page, user } from "./fixtures/paseo";
+import { setTimeout as delay } from "node:timers/promises";
 
 const require = createRequire(import.meta.url);
 const compiled = await build({
@@ -28,7 +32,7 @@ const compiled = await build({
   } }],
 });
 const module = { exports: {} as {
-  default(client: PluginClientContext): () => void;
+  default(client: PluginClientContext): () => void | Promise<void>;
   ChatHistoryRenderer: React.ComponentType<PluginTimelineItemProps<HistoryMessage>>;
   ChatHistorySettings: React.ComponentType<PluginSurfaceProps>;
   setSettings(value: SettingsState<typeof preferencesSchema>): void;
@@ -153,6 +157,7 @@ test("entry registers only native timeline contributions and cleans up in revers
   const events: string[] = [];
   const registrations: { kind: string; value: any }[] = [];
   const client = {
+    paseo: fakePaseo([]).paseo,
     addTimelineRenderer(value: unknown) { registrations.push({ kind: "renderer", value }); return () => { events.push("renderer"); }; },
     addTimelineTransformer(value: unknown) { registrations.push({ kind: "transformer", value }); return () => { events.push("transformer"); }; },
   } as unknown as PluginClientContext;
@@ -171,6 +176,80 @@ test("entry registers only native timeline contributions and cleans up in revers
   assert.deepEqual(events, ["transformer", "renderer"]);
   failingStop();
   assert.deepEqual(events, ["transformer", "renderer"]);
+});
+
+test("backfill re-registers a fixed transformer so the same cached native message becomes a folded history", async (t) => {
+  type Transformer = PluginTimelineTransformerContribution<"user_message">;
+  const host = fakePaseo();
+  const read = deferred<ReturnType<typeof page>>();
+  host.setRead(async () => read.promise);
+  let active: Transformer | undefined;
+  const registrations: Transformer[] = [];
+  const stop = contribute({
+    paseo: host.paseo,
+    addTimelineRenderer() { return () => {}; },
+    addTimelineTransformer(value: Transformer) {
+      assert.equal(active, undefined, "old registration must be removed before reusing its ID");
+      active = value;
+      registrations.push(value);
+      return () => { active = undefined; };
+    },
+  } as unknown as PluginClientContext);
+  t.after(async () => { await stop(); });
+  const local = Object.freeze({ ...user(), text: "Continue here" });
+  // Model the host's source-reference cache. This is a registration/UI unit test,
+  // not a real Paseo UI test; the native cache behavior was checked separately.
+  const cache = new WeakMap<Transformer, ReturnType<Transformer["transform"]>>();
+  const project = () => {
+    if (!cache.has(active!)) cache.set(active!, active!.transform({ item: local, phase: "complete" }));
+    return cache.get(active!);
+  };
+  assert.equal(project(), undefined);
+  const before = active!;
+  await delay(0);
+  read.resolve(page("agent-1", [user()]));
+  await delay(50);
+  assert.equal(registrations.length, 2);
+  assert.notEqual(active, before);
+  assert.equal(before.transform({ item: local, phase: "complete" }), undefined, "old snapshot never changes");
+  const enriched = chatHistorySchema.parse(project()!.items[0]!.data);
+  assert.equal(enriched.body, local.text);
+  assert.equal(enriched.histories.length, 1);
+  const root = await mount(t, props(enriched));
+  assert.equal(button(root, "Chat history").props.accessibilityState.expanded, false);
+  assert.equal(find(root, "Markdown").length, 0);
+  assert.match(JSON.stringify(root.toJSON()), /Continue here/);
+  assert.equal(active!.transform({ item: { ...local, messageId: "other", clientMessageId: "other" }, phase: "complete" }), undefined);
+  await stop();
+  assert.equal(active, undefined);
+  assert.equal(host.timelines.get("agent-1")!.releases, 1);
+});
+
+test("failed dynamic registration falls back to text-only transformation without leaking observers", async (t) => {
+  type Transformer = PluginTimelineTransformerContribution<"user_message">;
+  t.mock.method(console, "warn", () => {});
+  const host = fakePaseo();
+  let active: Transformer | undefined;
+  let count = 0;
+  const stop = contribute({
+    paseo: host.paseo,
+    addTimelineRenderer() { return () => {}; },
+    addTimelineTransformer(value: Transformer) {
+      if (++count === 2) throw new Error("dynamic registration failed");
+      active = value;
+      return () => { active = undefined; };
+    },
+  } as unknown as PluginClientContext);
+  t.after(async () => { await stop(); });
+  await delay(0);
+  host.emit("agent-1", user());
+  await delay(50);
+  assert.equal(count, 3);
+  assert.equal(active!.transform({ item: user("message-1", "Continue here"), phase: "complete" }), undefined);
+  assert.ok(active!.transform({ item: user(), phase: "complete" }));
+  await stop();
+  assert.equal(active, undefined);
+  assert.equal(host.directories[0]!.releases, 1);
 });
 
 test("current bubble has no duplicate role header or summary separator lines, preserving interior whitespace", async (t) => {
