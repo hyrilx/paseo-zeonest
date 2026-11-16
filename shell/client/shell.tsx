@@ -1,5 +1,7 @@
 import type { PluginClientContext, PluginClientContribution, PluginSettingsScreenContribution, PluginSurfaceProps } from "@getpaseo/plugin/client";
+import { SettingsAction, SettingsCard } from "@getpaseo/plugin/client/ui";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { View } from "react-native";
 import { createLifetime, errorMessage } from "../shared/lifetime";
 import { runtimeRpc } from "../shared/runtime";
 import { reloadRpc } from "../shared/reload";
@@ -19,6 +21,7 @@ export function contributeShell(
   function Settings(props: PluginSurfaceProps) {
     const runtime = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
     const [reloadState, setReloadState] = useState<ReloadState>({ status: "idle", message: null });
+    const [settingsId, setSettingsId] = useState<string | null>(null);
     const reloading = useRef(false);
     const mounted = useRef(false);
     useEffect(() => {
@@ -42,17 +45,26 @@ export function contributeShell(
         reloading.current = false;
       }
     }
+    const screen = Object.values(featureSettingsScreens).find((screen) => screen.id === settingsId);
+    if (screen) {
+      const Component = screen.Component;
+      return (
+        <View style={{ gap: props.layout.compact ? 16 : 24, backgroundColor: props.theme.colors.surface0 }}>
+          <SettingsCard>
+            <SettingsAction label={screen.title} actionLabel="返回功能集" onPress={() => setSettingsId(null)} />
+          </SettingsCard>
+          <Component key={screen.id} {...props} />
+        </View>
+      );
+    }
     return <FeatureManager {...props} runtime={runtime} featureCatalog={featureCatalog} featureSettingsScreens={featureSettingsScreens}
       reloadState={reloadState} reloadPlugin={() => { void reloadPlugin(); }}
-      openSettings={(id) => client.openSettings(id)} />;
+      openSettings={setSettingsId} />;
   }
 
   lifetime.add(client.addSettingsScreen({
     id: "zeonest-features", title: "功能集", icon: "Blocks", Component: Settings,
   }));
-  for (const screen of Object.values(featureSettingsScreens)) {
-    lifetime.add(client.addSettingsScreen(screen));
-  }
   lifetime.add(client.addCommandCenterItem({
     id: "zeonest-settings", title: "Zeonest：管理功能集", icon: "Blocks",
     context: "global",

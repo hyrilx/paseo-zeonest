@@ -27,7 +27,7 @@ ID 使用小写 kebab-case，和目录名一致，不能使用保留的 `zeonest
 | --- | --- | --- |
 | `features/<id>/client/index.ts(x)` | 原生 `PluginClientContribution` | 功能启用后的客户端启动 |
 | `features/<id>/server/index.ts(x)` | 原生 `PluginServerContribution` | 功能启用后的服务端启动 |
-| `features/<id>/client/settings.ts(x)` | 原生 `PluginSettingsScreenContribution` | 无论开关，始终注册配置页 |
+| `features/<id>/client/settings.ts(x)` | 原生 `PluginSettingsScreenContribution` | 无论开关，始终可从功能集进入配置页 |
 | `features/<id>/server/settings.ts(x)` | 原生 `PluginServerContribution` | 无论开关，始终注册配置所需服务 |
 | `features/<id>/server/rpc.ts(x)` | 原生 `PluginServerContribution` | 同步声明业务 RPC，处理函数自行拒绝未启用/已停止状态 |
 
@@ -74,7 +74,7 @@ export default function contribute(client: PluginClientContext) {
     icon: "Text",
     context: "global",
     onSelect() {
-      client.openSettings("prompt-tools-settings");
+      client.openSettings("zeonest-features");
     },
   });
   return remove;
@@ -107,7 +107,9 @@ export default {
 } satisfies PluginSettingsScreenContribution;
 ```
 
-页面自己使用 `useSettings`、`useRpc` 或其他原生能力。壳不会向它传递额外的配置对象或方法，只让 Paseo 按原生 `PluginSurfaceProps` 渲染页面。
+宿主只注册一个「功能集」设置入口（`zeonest-features`）。壳在该页内部切换到描述符的 `Component`，原样传入宿主的 `PluginSurfaceProps`，并提供「返回功能集」操作。描述符的 `id` 用于内部页面选择，不是独立的宿主设置路由；调用 `openSettings` 时应打开 `zeonest-features`，再在功能集中选择子功能。
+
+页面自己使用 `useSettings`、`useRpc` 或其他原生能力。壳不传入额外的配置对象或方法，也不读取子功能配置。
 
 若使用原生 `defineSettings`，将定义放在 `features/<id>/shared/`，在 `features/<id>/server/settings.ts` 调用 `server.registerSettings`。这样业务关闭时仍可配置。支撑配置的 RPC 也可以在该原生服务端贡献中注册。
 

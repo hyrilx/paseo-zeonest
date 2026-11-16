@@ -14,7 +14,7 @@ description: 维护 Zeonest 的最小 Paseo 容器外壳、原生功能管理页
 ## 修改流程
 
 1. 读取 `shell/client`、`shell/server`、`shell/shared` 中受影响源码与根 tests，确认是壳职责。features/<id> 内的业务不搬进壳；不得要求新功能维护根清单。
-2. 配置界面使用 Paseo 原生 `addSettingsScreen` 与 Settings 组件，不复制宿主设置框架。
+2. 配置界面只通过 Paseo 原生 `addSettingsScreen` 注册一个「功能集」（`zeonest-features`）。子功能配置在该页内部切换，原样传递宿主 `PluginSurfaceProps`，提供「返回功能集」操作；不逐个注册顶层设置入口。UI 使用原生 Settings 组件，不复制宿主设置框架。
 3. 区分保存的期望开关和本次服务端运行快照。新客户端必须跟随运行快照，不能提前启用待重载功能。
 4. 整体重载后生效，不增加热启停或运行时动态注入。
 5. 配置页和支撑配置的原生服务端注册始终可用；壳不得读取或重置子功能配置。服务端可选 `rpc.ts(x)` 必须在同步贡献返回前执行，以进入 0.15.4 的固定 RPC 目录；它仍是原生贡献，由功能内部拒绝未启用/已停止时的业务调用。不得包装原生 context 或把业务状态放入壳。

@@ -14,7 +14,7 @@ import { createFeature } from "../tools/new-feature.mjs";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-async function uiFixture(t: { after(fn: () => Promise<void>): void }, populated = true) {
+async function uiFixture(t: { after(fn: () => Promise<void>): void }, populated = true, allSettings = false) {
   const root = await mkdtemp(path.join(tmpdir(), "zeonest-ui-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   for (const item of ["shell"]) {
@@ -27,7 +27,7 @@ async function uiFixture(t: { after(fn: () => Promise<void>): void }, populated 
       await createFeature(root, {
         id, name: id === "alpha" ? "功能甲" : "功能乙", description: "说明 " + id,
         version: "1.2.3", tags: ["工具"], author: "测试作者",
-      }, "both", id === "alpha");
+      }, "both", id === "alpha" || allSettings);
       await writeFile(path.join(root, "features", id, "client/index.ts"), `import type { PluginClientContext } from "@getpaseo/plugin/client"; export default (client: PluginClientContext) => client.addCommandCenterItem({ id: "${id}-command", title: "${id}", icon: "Blocks", context: "global", onSelect() {} });`);
     }
   }
@@ -190,28 +190,97 @@ function fakeClient(onReload: () => Promise<{ error: string | null }> = async ()
   const components = new Map<string, React.ComponentType<PluginSurfaceProps>>();
   const commands: string[] = [];
   const removed: string[] = [];
+  const opened: string[] = [];
   let resolve!: (value: { enabledIds: string[]; error: string | null }) => void;
   const ready = new Promise((done) => { resolve = done; });
   const client = {
     addSettingsScreen: (screen: { id: string; Component: React.ComponentType<PluginSurfaceProps> }) => { screens.push(screen.id); components.set(screen.id, screen.Component); return () => { removed.push(screen.id); }; },
     addCommandCenterItem: (command: { id: string }) => { commands.push(command.id); return () => { removed.push(command.id); }; },
-    openSettings: () => {}, rpc: (contract: { name: string }) => contract.name === "zeonest.shell.reload" ? onReload() : ready,
+    openSettings: (id: string) => { opened.push(id); }, rpc: (contract: { name: string }) => contract.name === "zeonest.shell.reload" ? onReload() : ready,
   };
-  return { client, screens, commands, removed, resolve, components };
+  return { client, screens, commands, removed, opened, resolve, components };
 }
 
-test("client starts only the server snapshot and keeps disabled configuration screens registered", async (t) => {
+test("all child settings stay inside one menu entry and receive native surface props", async (t) => {
+  const ui = await uiFixture(t, true, true);
+  for (const compact of [false, true]) {
+    ui.setSettingsState(readySettings());
+    const fake = fakeClient();
+    const cleanup = ui.default(fake.client);
+    fake.resolve({ enabledIds: [], error: null });
+    const Component = fake.components.get("zeonest-features")!;
+    const surfaceProps = {
+      theme: props.theme, host: props.host, layout: { ...props.layout, compact },
+      openScreen: () => {}, openSettings: () => {},
+    };
+    let root!: ReactTestRenderer;
+    await act(async () => { root = create(React.createElement(Component, surfaceProps as unknown as PluginSurfaceProps)); });
+    try {
+      assert.deepEqual(fake.screens, ["zeonest-features"]);
+      assert.deepEqual(fake.commands, ["zeonest-settings"]);
+      for (const screen of Object.values(ui.featureSettingsScreens) as { id: string; title: string; Component: React.ComponentType<PluginSurfaceProps> }[]) {
+        assert.equal(root.root.findAllByType(screen.Component).length, 0);
+        const section = root.root.findAll((node) => String(node.type) === "SettingsSection" && node.props.title === screen.title)[0]!;
+        const action = section.findAll((node) => String(node.type) === "SettingsAction" && node.props.actionLabel === "打开配置")[0]!;
+        await act(async () => action.props.onPress());
+        assert.deepEqual(root.root.findByType(screen.Component).props, surfaceProps);
+        assert.equal(root.root.findAll((node) => String(node.type) === "SettingsSwitch").length, 0);
+        const back = root.root.findAll((node) => String(node.type) === "SettingsAction" && node.props.actionLabel === "返回功能集")[0]!;
+        assert.ok(back);
+        await act(async () => back.props.onPress());
+        assert.equal(root.root.findAllByType(screen.Component).length, 0);
+        assert.equal(root.root.findAll((node) => String(node.type) === "SettingsSwitch").length, 2);
+      }
+      assert.deepEqual(fake.opened, []);
+      assert.deepEqual(fake.screens, ["zeonest-features"]);
+    } finally {
+      await act(async () => root.unmount());
+      await cleanup();
+    }
+  }
+});
+
+test("child settings remain reachable while shell settings and startup are loading or failed", async (t) => {
+  const ui = await uiFixture(t);
+  t.mock.method(console, "error", () => {});
+  for (const status of ["loading", "invalid", "error"]) {
+    ui.setSettingsState(status === "loading" ? { status } : readySettings({ status, error: "settings failed" }));
+    const fake = fakeClient();
+    const cleanup = ui.default(fake.client);
+    if (status !== "loading") fake.resolve({ enabledIds: [], error: "startup failed" });
+    const Component = fake.components.get("zeonest-features")!;
+    let root!: ReactTestRenderer;
+    await act(async () => { root = create(React.createElement(Component, props as unknown as PluginSurfaceProps)); });
+    try {
+      const action = root.root.findAll((node) => String(node.type) === "SettingsAction" && node.props.actionLabel === "打开配置")[0]!;
+      await act(async () => action.props.onPress());
+      assert.equal(root.root.findAllByType(ui.featureSettingsScreens.alpha.Component).length, 1);
+      const back = root.root.findAll((node) => String(node.type) === "SettingsAction" && node.props.actionLabel === "返回功能集")[0]!;
+      await act(async () => back.props.onPress());
+      assert.equal(root.root.findAllByType(ui.featureSettingsScreens.alpha.Component).length, 0);
+      assert.match(JSON.stringify(root.toJSON()), status === "loading" ? /正在读取本次运行状态/ : /startup failed/);
+      assert.deepEqual(fake.opened, []);
+      assert.deepEqual(fake.screens, ["zeonest-features"]);
+    } finally {
+      await act(async () => root.unmount());
+      fake.resolve({ enabledIds: [], error: null });
+      await cleanup();
+    }
+  }
+});
+
+test("client starts only the server snapshot and registers a single settings screen", async (t) => {
   const ui = await uiFixture(t);
   ui.setSettingsState(readySettings({ values: { enabled: { beta: true } } }));
   const fake = fakeClient();
   const cleanup = ui.default(fake.client);
-  assert.deepEqual(fake.screens, ["zeonest-features", "alpha-settings"]);
+  assert.deepEqual(fake.screens, ["zeonest-features"]);
   assert.deepEqual(fake.commands, ["zeonest-settings"]);
   fake.resolve({ enabledIds: ["alpha"], error: null });
   await new Promise((done) => setImmediate(done));
   assert.deepEqual(fake.commands, ["zeonest-settings", "alpha-command"]);
   await cleanup(); await cleanup();
-  assert.deepEqual(fake.removed, ["alpha-command", "zeonest-settings", "alpha-settings", "zeonest-features"]);
+  assert.deepEqual(fake.removed, ["alpha-command", "zeonest-settings", "zeonest-features"]);
 });
 
 test("a late client snapshot after teardown cannot resurrect native contributions", async (t) => {
@@ -222,7 +291,7 @@ test("a late client snapshot after teardown cannot resurrect native contribution
   fake.resolve({ enabledIds: ["alpha", "beta"], error: null });
   await closed;
   assert.deepEqual(fake.commands, ["zeonest-settings"]);
-  assert.deepEqual(fake.removed, ["zeonest-settings", "alpha-settings", "zeonest-features"]);
+  assert.deepEqual(fake.removed, ["zeonest-settings", "zeonest-features"]);
 });
 
 test("reload action exists even in empty/error states and never runs while saving or reloading", async (t) => {
