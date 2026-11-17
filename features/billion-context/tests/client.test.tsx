@@ -1,17 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createRequire } from "node:module";
-import { setTimeout as delay } from "node:timers/promises";
 import { build } from "esbuild";
 import React, { StrictMode } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import type { PluginClientContext, PluginScreenProps } from "@getpaseo/plugin/client";
+import type { PluginAgentCommandContext, PluginClientContext, PluginCommandCenterItemContribution, PluginScreenProps } from "@getpaseo/plugin/client";
 import { preferencesSchema } from "../shared/settings";
-import { listDashboardAgents, listDashboardWorkspaces, resolveDashboard, screenId } from "../shared/contracts";
+import { listDashboardWorkspaces, resolveDashboard, screenId } from "../shared/contracts";
 
 const require = createRequire(import.meta.url);
 const compiled = await build({
-  stdin: { contents: `export { DashboardScreen, DashboardSidebar } from './screen'; export { DashboardSettings } from './settings'; export { startPills } from './runtime'; export { default as contribute } from './index';`, resolveDir: new URL("../client", import.meta.url).pathname, loader: "tsx" },
+  stdin: { contents: `export { DashboardScreen, DashboardSidebar } from './screen'; export { DashboardSettings } from './settings'; export { default as contribute } from './index';`, resolveDir: new URL("../client", import.meta.url).pathname, loader: "tsx" },
   bundle: true, write: false, platform: "node", format: "cjs", jsx: "automatic", external: ["react", "react/jsx-runtime"],
   plugins: [{ name: "native-host", setup(builder) {
     builder.onResolve({ filter: /^(@getpaseo\/plugin\/client(?:\/ui)?|react-native)$/ }, (args) => ({ path: args.path, namespace: "test-host" }));
@@ -22,9 +21,9 @@ const compiled = await build({
         export const SettingsAction = component('SettingsAction'), SettingsCard = component('SettingsCard'), SettingsInput = component('SettingsInput'), SettingsRow = component('SettingsRow'), SettingsSection = component('SettingsSection'), SettingsSelect = component('SettingsSelect');` }));
   } }],
 });
-const module = { exports: {} as { DashboardScreen: React.ComponentType<PluginScreenProps>; DashboardSidebar: React.ComponentType<any>; DashboardSettings: React.ComponentType<any>; startPills(client: PluginClientContext, intervalMs?: number): () => void; contribute(client: PluginClientContext): () => void } };
+const module = { exports: {} as { DashboardScreen: React.ComponentType<PluginScreenProps>; DashboardSidebar: React.ComponentType<any>; DashboardSettings: React.ComponentType<any>; contribute(client: PluginClientContext): () => void } };
 new Function("require", "module", "exports", compiled.outputFiles[0]!.text)(require, module, module.exports);
-const { DashboardScreen, DashboardSidebar, DashboardSettings, startPills, contribute } = module.exports;
+const { DashboardScreen, DashboardSidebar, DashboardSettings, contribute } = module.exports;
 const globals = globalThis as typeof globalThis & { __billionHost: { rpc: Record<string, (input: any) => Promise<any>>; settings: any; external(url: string): Promise<void> }; IS_REACT_ACT_ENVIRONMENT: boolean };
 globals.IS_REACT_ACT_ENVIRONMENT = true;
 const props: PluginScreenProps = { params: {}, host: { id: "remote-host", label: "Host" }, layout: { compact: true, platform: "web" }, theme: { colors: {
@@ -62,7 +61,7 @@ test("sidebar overview auto-opens once on its host without choosing between mult
   assert.equal(find(root, "SettingsSelect", "工作区"), undefined);
   assert.equal(find(root, "SettingsAction", "查看 dashboard 总览"), undefined);
 });
-test("one pill click route resolves exact detail and auto-opens desktop; strict effects do not strand loading", async (t) => {
+test("one session command route resolves exact detail and auto-opens desktop; strict effects do not strand loading", async (t) => {
   const calls = setup(); const opened: any[] = [];
   const root = await mount(t, <StrictMode><DashboardScreen {...props} params={{ agentId: "a", workspaceId: "w" }} navigation={{ openBrowser: (input) => { opened.push(input); }, openAgent() {}, openWorkspace() {} }} /></StrictMode>);
   assert.ok(calls.every((input) => input.agentId === "a" && input.workspaceId === "w"));
@@ -120,6 +119,28 @@ test("multiple instances never auto-open and selection re-resolves the chosen in
   assert.deepEqual(opened, [{ ...target, serverId: "remote-host" }]);
   assert.equal(find(root, "SettingsSelect", "实例"), undefined);
 });
+test("instance choices show PID, startup and identity, and bind selection to that identity", async (t) => {
+  setup(); const calls: any[] = [], opened: any[] = [];
+  const details = [
+    { origin: "http://127.0.0.1:9001", instanceId: "instance-a", pid: 123, startedAt: 1700000000000 },
+    { origin: "http://127.0.0.1:9002", instanceId: "instance-b", pid: 456, startedAt: 1700000001000 },
+  ];
+  globals.__billionHost.rpc[resolveDashboard.name] = async (input) => {
+    calls.push(input);
+    if (input.instanceOrigin) throw new Error("所选地址的实例身份已改变或无法验证");
+    return { instances: details.map((entry) => entry.origin), instanceDetails: details, workspaceId: "w" };
+  };
+  const root = await mount(t, <DashboardScreen {...props} params={{ agentId: "a", workspaceId: "w" }}
+    navigation={{ openBrowser: (input) => { opened.push(input); }, openAgent() {}, openWorkspace() {} }} />);
+  const selector = find(root, "SettingsSelect", "实例")!;
+  assert.match(selector.props.options[1].label, /PID 123.*2023-11-14T22:13:20.000Z.*ID instance-a/);
+  assert.match(selector.props.options[2].label, /PID 456/);
+  assert.match(JSON.stringify(root.toJSON()), /可读取同一会话不代表它属于该进程/);
+  await act(async () => selector.props.onValueChange(details[1]!.origin));
+  await act(async () => find(root, "SettingsAction", "打开选定实例")!.props.onPress());
+  assert.deepEqual(calls.at(-1), { workspaceId: "w", agentId: "a", instanceOrigin: details[1]!.origin, instanceKey: "instance-b/456/1700000001000" });
+  assert.match(JSON.stringify(root.toJSON()), /实例身份已改变/); assert.deepEqual(opened, []);
+});
 test("overview only asks for an instance; failed choices can rediscover or recover in another browser workspace", async (t) => {
   setup();
   globals.__billionHost.rpc[resolveDashboard.name] = async (input) => {
@@ -175,7 +196,7 @@ test("overview browser failure exposes an optional workspace recovery, with imme
   assert.deepEqual(opened, [{ ...overview, workspaceId: "other", serverId: "remote-host" }]);
   assert.equal(find(root, "SettingsSelect", "工作区"), undefined);
 });
-test("a missing capsule workspace is an error, not an invitation to select a different workspace", async (t) => {
+test("a missing session command workspace is an error, not an invitation to select a different workspace", async (t) => {
   const calls = setup(); const opened: string[] = [];
   globals.__billionHost.external = async (url) => { opened.push(url); };
   globals.__billionHost.rpc[listDashboardWorkspaces.name] = async () => { assert.fail("must not guess a workspace"); };
@@ -214,31 +235,71 @@ test("late route/host results cannot open a previous session", async (t) => {
   await act(async () => finish({ ...target, url: "https://old.test" }));
   assert.deepEqual(opened, [{ ...target, serverId: "new-host" }]);
 });
-test("pills reconcile without duplication, remove on archive/move/failure and clean late RPCs", async () => {
-  let agents = [{ agentId: "a", workspaceId: "w" }]; let fail = false; let removed = 0; const registrations: any[] = []; const screens: any[] = [];
-  const client = { rpc: async (contract: { name: string }) => { assert.equal(contract.name, listDashboardAgents.name); if (fail) throw new Error("offline"); return agents; },
-    openScreen: (input: any) => screens.push(input), addComposerPill: (value: any) => { registrations.push(value); return { update() { assert.fail("no replacement needed"); }, remove() { removed++; } }; } } as unknown as PluginClientContext;
-  const stop = startPills(client, 5);
-  try {
-    await delay(20); assert.equal(registrations.length, 1);
-    registrations[0].button.behavior.onPress(); assert.equal(screens[0].screenId, screenId);
-    assert.deepEqual({ ...screens[0].params, openedAt: undefined }, { agentId: "a", workspaceId: "w", openedAt: undefined });
-    assert.match(screens[0].params.openedAt, /^[0-9]+$/);
-    agents = [{ agentId: "a", workspaceId: "other" }]; await delay(20); assert.equal(removed, 1); assert.equal(registrations.length, 2);
-    agents = []; await delay(20); assert.equal(removed, 2);
-    agents = [{ agentId: "b", workspaceId: "w" }]; await delay(20); fail = true; await delay(20); assert.equal(removed, 3);
-  } finally { stop(); stop(); }
-  const before = screens.length; registrations[0].button.behavior.onPress(); assert.equal(screens.length, before);
-  let finish!: (value: unknown) => void;
-  const stopLate = startPills({ ...client, rpc: () => new Promise((yes) => { finish = yes; }) } as unknown as PluginClientContext, 5);
-  stopLate(); finish([{ agentId: "late", workspaceId: "w" }]); await delay(5); assert.equal(registrations.length, 3);
+function commandHost() {
+  const commands: PluginCommandCenterItemContribution[] = [], removed: string[] = [];
+  const client = {
+    rpc() { assert.fail("Command Center registration must not poll agents or call RPCs"); },
+    openScreen() { assert.fail("must use the selected command host, not the client entry host"); },
+    addComposerPill() { assert.fail("session entry must not occupy the composer"); },
+    addScreen: () => () => { removed.push("screen"); },
+    addSidebarHeaderItem: () => () => { removed.push("sidebar"); },
+    addCommandCenterItem(value: PluginCommandCenterItemContribution) { commands.push(value); return () => { removed.push("command"); }; },
+  } as unknown as PluginClientContext;
+  return { client, commands, removed };
+}
+function sessionContext(agentId: string, workspaceId: string, openScreen: PluginAgentCommandContext["openScreen"]) {
+  return { context: "agent", agent: { id: agentId }, workspace: { id: workspaceId }, openScreen } as PluginAgentCommandContext;
+}
+test("session command is agent-scoped and reads the current selection without polling or pills", async (t) => {
+  const { client, commands } = commandHost();
+  const stop = contribute(client); t.after(stop);
+  assert.equal(commands.length, 1);
+  const command = commands[0]!;
+  assert.equal(command.id, "billion-context-session");
+  assert.match(command.title, /Billion Context.*当前会话详情/);
+  assert.ok(command.keywords?.includes("上下文详情"));
+  if (command.context !== "agent") assert.fail("must be hidden outside an agent context");
+  const screens: any[] = [];
+  await command.onSelect(sessionContext("first-agent", "first-workspace", (input) => { screens.push(input); }));
+  await command.onSelect(sessionContext("current-agent", "current-workspace", (input) => { screens.push(input); }));
+  assert.deepEqual(screens.map(({ screenId: id, params }) => ({ screenId: id, agentId: params.agentId, workspaceId: params.workspaceId })), [
+    { screenId, agentId: "first-agent", workspaceId: "first-workspace" },
+    { screenId, agentId: "current-agent", workspaceId: "current-workspace" },
+  ]);
+  for (const screen of screens) assert.match(screen.params.openedAt, /^[0-9]+$/);
+  stop();
+  await command.onSelect(sessionContext("stale", "stale", () => { assert.fail("stopped command must not navigate"); }));
+  assert.equal(screens.length, 2);
 });
-test("client contribution cleans up screen/sidebar and rolls back partial registration", () => {
-  const removed: string[] = [];
-  const client = { rpc: async () => [], addScreen: () => () => { removed.push("screen"); }, addSidebarHeaderItem: () => () => { removed.push("sidebar"); } } as unknown as PluginClientContext;
-  const stop = contribute(client); stop(); stop(); assert.deepEqual(removed, ["sidebar", "screen"]);
+test("Command Center selection directly opens the exact session in its workspace and selected host", async (t) => {
+  const calls = setup(), { client, commands } = commandHost(), opened: any[] = [];
+  const stop = contribute(client); t.after(stop);
+  const command = commands[0]!;
+  if (command.context !== "agent") assert.fail("agent command required");
+  let location!: Parameters<PluginAgentCommandContext["openScreen"]>[0];
+  await command.onSelect(sessionContext("selected-agent", "selected-workspace", (input) => { location = input; }));
+  assert.equal(location.screenId, screenId);
+  globals.__billionHost.rpc[listDashboardWorkspaces.name] = async () => { assert.fail("detail must not prompt for a workspace"); };
+  const root = await mount(t, <DashboardScreen {...props} host={{ id: "selected-host", label: "Selected" }}
+    params={location.params ?? {}} navigation={{ openBrowser: (input) => { opened.push(input); }, openAgent() {}, openWorkspace() {} }} />);
+  assert.deepEqual(calls, [{ agentId: "selected-agent", workspaceId: "selected-workspace" }]);
+  assert.deepEqual(opened, [{ ...target, workspaceId: "selected-workspace", serverId: "selected-host" }]);
+  assert.equal(find(root, "SettingsSelect"), undefined);
+});
+test("client contribution removes command/sidebar/screen once and rolls back partial registration", async () => {
+  const { client, commands, removed } = commandHost();
+  const stop = contribute(client); stop(); stop(); assert.deepEqual(removed, ["command", "sidebar", "screen"]);
   assert.throws(() => contribute({ ...client, addSidebarHeaderItem() { throw new Error("registration failed"); } }));
-  assert.deepEqual(removed, ["sidebar", "screen", "screen"]);
+  assert.deepEqual(removed, ["command", "sidebar", "screen", "screen"]);
+  let partial!: PluginCommandCenterItemContribution;
+  assert.throws(() => contribute({ ...client, addCommandCenterItem(value: PluginCommandCenterItemContribution) {
+    partial = value; throw new Error("command registration failed");
+  } }));
+  assert.deepEqual(removed.slice(-2), ["sidebar", "screen"]);
+  for (const command of [...commands, partial]) {
+    if (command.context !== "agent") assert.fail("agent command required");
+    await command.onSelect(sessionContext("a", "w", () => { assert.fail("removed command must not navigate"); }));
+  }
 });
 function settingsHost() {
   const saves: any[] = [];
@@ -263,6 +324,8 @@ test("settings validate origins and preserve draft/revision when another client 
 test("settings support empty automatic discovery and preserve the client port template until navigation", async (t) => {
   const { saves } = settingsHost(); const root = await mount(t, <DashboardSettings {...props} />);
   assert.equal(find(root, "SettingsInput", "宿主侧实例地址")!.props.initialValue, "");
+  const entryHint = find(root, "SettingsRow", "总览与会话详情入口")!.props.hint;
+  assert.match(entryHint, /Command Center/); assert.doesNotMatch(entryHint, /胶囊/);
   await act(async () => find(root, "SettingsInput", "客户端访问地址（可选）")!.props.onChangeText(" https://my-host:{port}/// "));
   await act(async () => find(root, "SettingsAction", "保存 dashboard 配置")!.props.onPress());
   assert.deepEqual(saves, [{ values: { serverOrigin: "", browserOrigin: "https://my-host:{port}" }, revision: "v1" }]);

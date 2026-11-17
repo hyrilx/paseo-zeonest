@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { URL } from "node:url";
 import { validOrigin } from "../shared/settings";
 
-export const MAX_CANDIDATES = 16;
+// The history pool is separate from the maximum number of choices shown to a user.
+export const MAX_CANDIDATES = 256;
 const LOG_BYTES = 524288;
 
 // Discovery never trusts a recorded remote address with a provider conversation ID.
@@ -87,6 +88,6 @@ export async function discoverOrigins(
     records.push(...await Promise.all(files.slice(offset, offset + 8).map((name) => safeRead(join(directory, "instances", name), 32768))));
   }
   check();
-  const candidates = [recordOrigin(proxy, isAlive), ...inlineOrigins(log), ...records.map((text) => recordOrigin(text, isAlive)), ...legacyOrigins(legacy, isAlive)];
+  const candidates = [recordOrigin(proxy, isAlive), ...records.map((text) => recordOrigin(text, isAlive)), ...legacyOrigins(legacy, isAlive), ...inlineOrigins(log)];
   return [...new Set(candidates.filter((value): value is string => !!value))].slice(0, MAX_CANDIDATES);
 }

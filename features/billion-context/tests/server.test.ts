@@ -7,13 +7,18 @@ import { join } from "node:path";
 import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { dashboardUrl } from "../shared/contracts";
 import { preferencesSchema } from "../shared/settings";
-import { listAgents, listWorkspaces, resolveTarget } from "../server/service";
+import { listAgents, listWorkspaces, resolveTarget as resolveTargetImpl } from "../server/service";
 import { readManifest, readStatus } from "../server/http";
 import { discoverOrigins } from "../server/discovery";
 import { readPreferences } from "../server/configuration";
 import contribute from "../server/index";
 import contributeRpc from "../server/rpc";
 import contributeSettings from "../server/settings";
+
+// These service tests inject no health identity; do not contact arbitrary local fixture ports.
+const resolveTarget: typeof resolveTargetImpl = (...args) => resolveTargetImpl(
+  args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7] ?? (async () => ({})),
+);
 
 test("origins reject credentials, paths, injection and unsafe schemes; URLs encode actual IDs", () => {
   const defaults = preferencesSchema.parse({});
@@ -88,7 +93,7 @@ test("auto overview validates manifests, ignores stale ports and never sends a c
   const result = await resolveTarget(f.paseo, { workspaceId: "w" }, preferencesSchema.parse({}), f.controller.signal,
     async () => assert.fail("overview must not read status"), async () => origins,
     async (origin, _signal, timeout) => {
-      probed.push(origin); assert.equal(timeout, 500);
+      probed.push(origin); assert.equal(timeout, 2000);
       if (origin === origins[0]) throw new Error("old process exited");
       return origin === origins[1] ? manifest : { ok: true, proxy: "another-app", version: "1" };
     });
@@ -102,17 +107,18 @@ test("auto detail checks manifest before identity lookup and only returns exact 
       calls.push({ origin, conversationId, timeout });
       return origin === origins[1] ? { ok: true, sessionId: "canonical/bili" } : { ok: true, sessionId: "wrong", fallback: true };
     }, async () => origins, async (origin) => origin === origins[0] ? { ok: true, proxy: "foreign", version: "1" } : manifest);
-  assert.deepEqual(calls, origins.slice(1).map((origin) => ({ origin, conversationId: "provider-id", timeout: 1000 })));
+  assert.deepEqual(calls, origins.slice(1).map((origin) => ({ origin, conversationId: "provider-id", timeout: 5000 })));
   assert.equal(result.url, origins[1] + "/__bili/#/session/canonical%2Fbili");
 });
 test("multiple exact matches require choice; selection repeats discovery, manifest and exact session validation", async () => {
   const f = fixture(); const preferences = preferencesSchema.parse({ browserOrigin: "https://client.test:{port}" });
   const input = { workspaceId: "w", agentId: "a" };
   const lookup: typeof readStatus = async (_origin, _id, _signal, timeout) => {
-    assert.ok(timeout === 1000 || timeout === 5000); return { ok: true, sessionId: "same/bili" };
+    assert.equal(timeout, 5000); return { ok: true, sessionId: "same/bili" };
   };
   const choices = await resolveTarget(f.paseo, input, preferences, f.controller.signal, lookup, async () => origins, async () => manifest);
-  assert.deepEqual(choices, { instances: origins, workspaceId: "w" }); assert.equal(choices.url, undefined);
+  assert.deepEqual(choices.instances, origins); assert.equal(choices.workspaceId, "w"); assert.equal(choices.url, undefined);
+  assert.deepEqual(choices.instanceDetails?.map(({ origin }) => origin), origins);
   const selected = await resolveTarget(f.paseo, { ...input, instanceOrigin: origins[1] }, preferences, f.controller.signal,
     async (origin, id, _signal, timeout) => { assert.equal(origin, origins[1]); assert.equal(id, "provider-id"); assert.equal(timeout, 5000); return { ok: true, sessionId: "same/bili" }; },
     async () => origins, async (origin) => { assert.equal(origin, origins[1]); return manifest; });
@@ -121,6 +127,17 @@ test("multiple exact matches require choice; selection repeats discovery, manife
     async () => assert.fail("stale choice must not get identity"), async () => [origins[0]!], async () => assert.fail()), /实例记录已改变/);
   await assert.rejects(resolveTarget(f.paseo, { ...input, instanceOrigin: "http://attacker.test" }, preferences, f.controller.signal,
     async () => assert.fail(), async () => origins, async () => assert.fail()), /实例记录已改变/);
+});
+test("service returns validated process identities and rejects a port reused after selection", async () => {
+  const f = fixture(); const preferences = preferencesSchema.parse({});
+  const lookup: typeof readStatus = async () => ({ ok: true, sessionId: "shared-exact-session" });
+  const health = async (origin: string) => ({ ok: true, instanceId: origin === origins[0] ? "one" : "two", pid: origin === origins[0] ? 123 : 456, startedAt: 1700000000000 });
+  const choices = await resolveTarget(f.paseo, { workspaceId: "w", agentId: "a" }, preferences, f.controller.signal,
+    lookup, async () => origins.slice(0, 2), async () => manifest, health);
+  assert.deepEqual(choices.instanceDetails?.map(({ pid }) => pid), [123, 456]);
+  await assert.rejects(resolveTarget(f.paseo, { workspaceId: "w", agentId: "a", instanceOrigin: origins[0], instanceKey: "one/123/1700000000000" },
+    preferences, f.controller.signal, async () => assert.fail("changed identity must not receive the provider session ID"),
+    async () => origins, async () => manifest, async () => ({ ...await health(origins[0]!), instanceId: "restarted" })), /实例身份已改变/);
 });
 test("manual origins retain precedence and do not read files or probe other services", async () => {
   const f = fixture();
@@ -137,7 +154,7 @@ test("auto failure and shutdown never fall back to another conversation", async 
     mode === "stopped" ? /已停止/ : /不会打开最近会话/);
   }
 });
-test("auto discovery has at most four concurrent probes and ignores results after identity changes", async () => {
+test("auto discovery has at most eight concurrent probes and ignores results after identity changes", async () => {
   const f = fixture(); let concurrent = 0, peak = 0;
   const candidates = Array.from({ length: 16 }, (_, index) => `http://127.0.0.1:${9100 + index}`);
   const result = await resolveTarget(f.paseo, { workspaceId: "w" }, preferencesSchema.parse({}), f.controller.signal,
@@ -145,7 +162,7 @@ test("auto discovery has at most four concurrent probes and ignores results afte
       concurrent++; peak = Math.max(peak, concurrent);
       await new Promise((yes) => setTimeout(yes, 2)); concurrent--; return manifest;
     });
-  assert.equal(peak, 4); assert.deepEqual(result.instances, candidates);
+  assert.equal(peak, 8); assert.deepEqual(result.instances, candidates);
   await assert.rejects(resolveTarget(f.paseo, { workspaceId: "w", agentId: "a" }, preferencesSchema.parse({}), f.controller.signal,
     async () => { f.change({ ...f.agent, persistence: { sessionId: "new-session" } }); return { ok: true, sessionId: "old" }; },
     async () => [origins[0]!], async () => manifest), /当前会话已改变/);
@@ -258,7 +275,6 @@ test("settings register while disabled; business handlers guard cleanup", async 
   for (const handler of handlers.values()) await assert.rejects(async () => handler({ workspaceId: "w" }, unavailable), /未启用或已停止/);
   const stop = contribute(context);
   assert.deepEqual(new Set(handlers.keys()), published);
-  const f = fixture();
   assert.deepEqual(await handlers.get("zeonest.billion-context.workspaces")!({}, { paseo: { workspaces: { list: async () => ({ entries: [], pageInfo: { hasMore: false } }) } } }), []);
   stop(); stop();
   for (const handler of handlers.values()) await assert.rejects(async () => handler({ workspaceId: "w" }, unavailable), /已停止/);

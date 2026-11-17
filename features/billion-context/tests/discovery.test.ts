@@ -40,7 +40,7 @@ test("discovers proxy, inline, per-instance and legacy records, deduplicating an
   await writeFile(join(root, "instances.json"), JSON.stringify({ instances: [
     { pid: 42, origin: "http://[::1]:9002", portReleasedAt: null }, { pid: 0, origin: origin(9008) },
   ] }));
-  assert.deepEqual(await discoverOrigins(signal(), root, (pid) => pid === 42), [origin(8787), origin(9003), origin(9001), "http://[::1]:9002"]);
+  assert.deepEqual(await discoverOrigins(signal(), root, (pid) => pid === 42), [origin(8787), origin(9001), "http://[::1]:9002", origin(9003)]);
 });
 
 test("legacy raw proxy origin is accepted but still restricted to loopback; process liveness uses signal zero", async (t) => {
@@ -85,12 +85,16 @@ test("log reads are limited to the last 512 KiB and discard a partial first line
 
 test("candidate and registry limits remain bounded even with many stale entries", async (t) => {
   const root = await directory(t);
-  await writeFile(join(root, "bili.log"), Array.from({ length: 25 }, (_, index) =>
+  await writeFile(join(root, "bili.log"), Array.from({ length: MAX_CANDIDATES + 40 }, (_, index) =>
     `[inline] web UI listening on ${origin(9000 + index)} (loopback only)`).join("\n"));
   const found = await discoverOrigins(signal(), root);
   assert.equal(found.length, MAX_CANDIDATES);
-  assert.equal(found[0], origin(9024));
-  await writeFile(join(root, "bili.log"), ""); await mkdir(join(root, "instances"));
+  assert.equal(found[0], origin(9000 + MAX_CANDIDATES + 39));
+  assert.ok(found.length > 16, "history must not be truncated to the UI choice count");
+  // Live PID-backed registry entries take precedence over a crowded history tail.
+  await writeFile(join(root, "proxy-origin"), record(8787));
+  assert.equal((await discoverOrigins(signal(), root, () => true))[0], origin(8787));
+  await writeFile(join(root, "bili.log"), ""); await writeFile(join(root, "proxy-origin"), ""); await mkdir(join(root, "instances"));
   await Promise.all(Array.from({ length: 65 }, (_, index) => writeFile(join(root, "instances", `${String(index).padStart(3, "0")}.json`), index === 64 ? record(9999) : "invalid")));
   assert.deepEqual(await discoverOrigins(signal(), root, () => true), []);
 });

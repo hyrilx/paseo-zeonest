@@ -2,7 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { openExternalUrl, useRpc, type PluginScreenProps, type PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { ExternalLink, ScrollView, SettingsAction, SettingsCard, SettingsRow, SettingsSection, SettingsSelect, SidebarRow } from "@getpaseo/plugin/client/ui";
-import { errorMessage, listDashboardWorkspaces, resolveDashboard, screenId } from "../shared/contracts";
+import { errorMessage, instanceIdentity, listDashboardWorkspaces, resolveDashboard, screenId, type DashboardInstance } from "../shared/contracts";
+
+function instanceLabel(instance: DashboardInstance): string {
+  return [instance.origin, instance.pid ? `PID ${instance.pid}` : "身份信息不可用",
+    instance.startedAt ? `启动 ${new Date(instance.startedAt).toISOString()}` : "",
+    instance.instanceId ? `ID ${instance.instanceId.slice(0, 12)}` : ""].filter(Boolean).join(" · ");
+}
 
 export function DashboardSidebar({ currentScreen, openScreen }: PluginSidebarItemProps) {
   return <SidebarRow icon="ChartPie" label="Billion Context" active={currentScreen?.screenId === screenId}
@@ -18,7 +24,7 @@ function DashboardPage({ theme, layout, host, params, navigation }: PluginScreen
   const [workspaces, setWorkspaces] = useState<{ id: string; name: string }[]>([]);
   const [workspaceId, setWorkspaceId] = useState(params.workspaceId ?? "");
   const [target, setTarget] = useState<{ url: string; workspaceId: string } | null>(null);
-  const [instances, setInstances] = useState<string[]>([]);
+  const [instances, setInstances] = useState<DashboardInstance[]>([]);
   const [instanceOrigin, setInstanceOrigin] = useState("");
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
@@ -41,12 +47,14 @@ function DashboardPage({ theme, layout, host, params, navigation }: PluginScreen
   async function loadTarget(id: string, selectedOrigin?: string) {
     if (lock.current) return;
     const request = ++generation.current;
+    const selected = instances.find((instance) => instance.origin === selectedOrigin);
+    const instanceKey = selected ? instanceIdentity(selected) : undefined;
     lock.current = true; setBusy(true); setError(""); setTarget(null); setMessage(""); setInstances([]); setInstanceOrigin("");
     try {
       const value = await resolve({ workspaceId: id, ...(params.agentId ? { agentId: params.agentId } : {}),
-        ...(selectedOrigin ? { instanceOrigin: selectedOrigin } : {}) });
+        ...(selectedOrigin ? { instanceOrigin: selectedOrigin } : {}), ...(instanceKey ? { instanceKey } : {}) });
       if (!mounted.current || generation.current !== request) return;
-      if ("instances" in value) setInstances(value.instances);
+      if ("instances" in value) setInstances(value.instances.map((origin) => value.instanceDetails?.find((entry) => entry.origin === origin) ?? { origin }));
       else {
         setTarget(value);
         const opened = await openTarget(value);
@@ -92,10 +100,10 @@ function DashboardPage({ theme, layout, host, params, navigation }: PluginScreen
       <SettingsRow label="工作区仅用于放置浏览器标签" hint="总览始终展示所选 billion-context 实例的全局数据。" />
     </SettingsCard></SettingsSection>}
     {instances.length > 1 && <SettingsSection title="选择 dashboard 实例"><SettingsCard>
-      <SettingsRow label={params.agentId ? "多个实例收录了当前会话" : "发现多个可用实例"}
-        hint="请选择要查看的实例。打开时会重新验证地址及会话；客户端访问地址如已配置，须指向所选实例。" />
+      <SettingsRow label={params.agentId ? "多个实例可读取当前会话" : "发现多个可用实例"}
+        hint="相同实例身份的入口已合并。不同 Pi 进程可能共享会话存储，可读取同一会话不代表它属于该进程。请选择实例，打开时重新验证身份和会话。" />
       <SettingsSelect label="实例" value={instanceOrigin} disabled={busy}
-        options={[{ label: "请选择实例", value: "" }, ...instances.map((origin) => ({ label: origin, value: origin }))]}
+        options={[{ label: "请选择实例", value: "" }, ...instances.map((instance) => ({ label: instanceLabel(instance), value: instance.origin }))]}
         onValueChange={setInstanceOrigin} />
       <SettingsAction label="打开选定实例" actionLabel="打开" disabled={busy || !instanceOrigin}
         onPress={() => { void loadTarget(workspaceId, instanceOrigin); }} />

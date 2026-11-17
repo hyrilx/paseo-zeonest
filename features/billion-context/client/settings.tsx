@@ -37,7 +37,7 @@ export function DashboardSettings({ theme, layout }: PluginSurfaceProps) {
   const [message, setMessage] = useState("");
   return <View style={{ gap: layout.compact ? 16 : 24, backgroundColor: theme.colors.surface0 }}>
     <SettingsSection title="Billion Context"><SettingsCard>
-      <SettingsRow label="总览与会话详情入口" hint="启用并整体重载 Zeonest 后，侧边栏显示总览入口，聊天框底部显示「上下文详情」胶囊。SDK 0.15.4 不支持修改原有上下文圆环。" />
+      <SettingsRow label="总览与会话详情入口" hint="启用并整体重载 Zeonest 后，侧边栏显示总览入口。在当前会话的 Command Center 搜索「Billion Context」或「上下文详情」，可直接打开会话详情。" />
       <SettingsRow label="使用已运行的 billion-context dashboard" hint="默认自动读取宿主的实例运行记录与 bili.log 启动日志，验证地址后打开。多个实例需选择；日志关闭或位置自定义时可手动填写地址。不扫描端口、不读取会话文件、不启动服务。" />
     </SettingsCard></SettingsSection>
     {settings.status === "ready" ? <Editor key={epoch} settings={settings} theme={theme} saved={() => { setEpoch((value) => value + 1); setMessage("已保存，下次打开入口时生效。"); }} />
