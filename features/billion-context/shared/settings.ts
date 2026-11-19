@@ -14,7 +14,9 @@ const browserOrigin = normalizedOrigin.refine((value) => !value || validOrigin(v
   || (value.endsWith(":{port}") && validOrigin(value.replace("{port}", "1234"))),
   "填写 HTTP(S) 源地址；端口可用 {port}，例如 http://my-host:{port}，不含路径或凭据");
 export const preferencesSchema = z.object({
+  // Retained for saved-config compatibility; managed mode never uses this legacy address.
   serverOrigin: origin.default(""),
+  biliCommand: z.string().trim().min(1).max(4096).refine((value) => !/[\r\n\0]/.test(value), "填写 bili 可执行文件路径，不附加命令参数").default("bili"),
   browserOrigin: browserOrigin.default(""),
 });
 export type Preferences = z.infer<typeof preferencesSchema>;

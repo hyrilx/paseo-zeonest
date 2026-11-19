@@ -7,6 +7,7 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import type { PluginAgentCommandContext, PluginClientContext, PluginCommandCenterItemContribution, PluginScreenProps } from "@getpaseo/plugin/client";
 import { preferencesSchema } from "../shared/settings";
 import { listDashboardWorkspaces, resolveDashboard, screenId } from "../shared/contracts";
+import { serviceStatus, serviceControl, type ServiceStatus } from "../shared/managed-contracts";
 
 const require = createRequire(import.meta.url);
 const compiled = await build({
@@ -302,40 +303,88 @@ test("client contribution removes command/sidebar/screen once and rolls back par
   }
 });
 function settingsHost() {
-  const saves: any[] = [];
+  const saves: any[] = [], controls: any[] = [];
   const state: any = { status: "ready", revision: "v1", values: preferencesSchema.parse({}), saving: false, saveError: null,
     save: async (values: unknown, revision: string) => { saves.push({ values, revision }); state.saveError = "revision conflict"; return false; }, reload: async () => {}, reset: async () => true };
-  globals.__billionHost = { settings: state, rpc: {}, external: async () => {} }; return { state, saves };
+  const service: ServiceStatus = { enabled: true, busy: false, revision: "r1", phase: "running", origin: "http://127.0.0.1:42001", port: 42001, pid: 1234, instanceId: "owned-instance", startedAt: 1700000000000, version: "0.1.215" };
+  globals.__billionHost = { settings: state, rpc: {
+    [serviceStatus.name]: async () => ({ ...service }),
+    [serviceControl.name]: async (input) => { controls.push(input); return { ...service, revision: "r2" }; },
+  }, external: async () => {} }; return { state, saves, service, controls };
 }
-test("settings validate origins and preserve draft/revision when another client saves", async (t) => {
+test("launcher settings preserve draft/revision when another client saves", async (t) => {
   const { state, saves } = settingsHost(); const root = await mount(t, <DashboardSettings {...props} />);
-  await act(async () => find(root, "SettingsInput", "宿主侧实例地址")!.props.onChangeText("http://user:secret@host"));
-  await act(async () => find(root, "SettingsAction", "保存 dashboard 配置")!.props.onPress());
-  assert.equal(saves.length, 0); assert.match(JSON.stringify(root.toJSON()), /不含路径或凭据/);
-  await act(async () => find(root, "SettingsInput", "宿主侧实例地址")!.props.onChangeText("http://my-host:4444"));
-  state.revision = "v2"; state.values = preferencesSchema.parse({ serverOrigin: "http://remote:8888" });
+  await act(async () => find(root, "SettingsInput", "Bili 可执行文件")!.props.onChangeText(""));
+  await act(async () => find(root, "SettingsAction", "保存启动器配置")!.props.onPress()); assert.equal(saves.length, 0);
+  await act(async () => find(root, "SettingsInput", "Bili 可执行文件")!.props.onChangeText("/my/bin/bili"));
+  state.revision = "v2"; state.values = preferencesSchema.parse({ biliCommand: "/other/bili" });
   await act(async () => root.update(<DashboardSettings {...props} />));
-  await act(async () => find(root, "SettingsAction", "保存 dashboard 配置")!.props.onPress());
-  assert.deepEqual(saves, [{ values: { serverOrigin: "http://my-host:4444", browserOrigin: "" }, revision: "v1" }]);
+  await act(async () => find(root, "SettingsAction", "保存启动器配置")!.props.onPress());
+  assert.deepEqual(saves, [{ values: { serverOrigin: "", biliCommand: "/my/bin/bili", browserOrigin: "" }, revision: "v1" }]);
   await act(async () => root.update(<DashboardSettings {...props} />));
-  assert.match(JSON.stringify(root.toJSON()), /revision conflict/);
-  assert.equal(find(root, "SettingsInput", "宿主侧实例地址")!.props.initialValue, "http://my-host:4444");
+  assert.match(JSON.stringify(root.toJSON()), /revision conflict/); assert.equal(find(root, "SettingsInput", "Bili 可执行文件")!.props.initialValue, "/my/bin/bili");
 });
-test("settings support empty automatic discovery and preserve the client port template until navigation", async (t) => {
+test("managed settings remove legacy server address and retain client port template validation", async (t) => {
   const { saves } = settingsHost(); const root = await mount(t, <DashboardSettings {...props} />);
-  assert.equal(find(root, "SettingsInput", "宿主侧实例地址")!.props.initialValue, "");
-  const entryHint = find(root, "SettingsRow", "总览与会话详情入口")!.props.hint;
-  assert.match(entryHint, /Command Center/); assert.doesNotMatch(entryHint, /胶囊/);
+  assert.equal(find(root, "SettingsInput", "宿主侧实例地址"), undefined);
+  assert.match(find(root, "SettingsRow", "总览与会话详情入口")!.props.hint, /Command Center/);
   await act(async () => find(root, "SettingsInput", "客户端访问地址（可选）")!.props.onChangeText(" https://my-host:{port}/// "));
-  await act(async () => find(root, "SettingsAction", "保存 dashboard 配置")!.props.onPress());
-  assert.deepEqual(saves, [{ values: { serverOrigin: "", browserOrigin: "https://my-host:{port}" }, revision: "v1" }]);
+  await act(async () => find(root, "SettingsAction", "保存启动器配置")!.props.onPress());
+  assert.deepEqual(saves, [{ values: { serverOrigin: "", biliCommand: "bili", browserOrigin: "https://my-host:{port}" }, revision: "v1" }]);
   await act(async () => find(root, "SettingsInput", "客户端访问地址（可选）")!.props.onChangeText("http://{port}.test"));
-  await act(async () => find(root, "SettingsAction", "保存 dashboard 配置")!.props.onPress());
+  await act(async () => find(root, "SettingsAction", "保存启动器配置")!.props.onPress());
   assert.equal(saves.length, 1); assert.match(JSON.stringify(root.toJSON()), /端口可用/);
+});
+test("configuration shows live process identity, service controls and lifecycle policy", async (t) => {
+  settingsHost(); const root = await mount(t, <StrictMode><DashboardSettings {...props} /></StrictMode>);
+  assert.match(find(root, "SettingsRow", "服务运行状态")!.props.hint, /运行中/);
+  assert.equal(find(root, "SettingsRow", "固定服务地址")!.props.hint, "http://127.0.0.1:42001");
+  assert.match(find(root, "SettingsRow", "进程与版本")!.props.hint, /PID 1234.*0.1.215/);
+  assert.match(find(root, "SettingsRow", "实例身份")!.props.hint, /owned-instance.*2023-11-14/);
+  assert.match(JSON.stringify(root.toJSON()), /服务独立于插件生命周期/); assert.equal(find(root, "SettingsAction", "启动服务")!.props.disabled, true);
+});
+test("forced port change requires a second explicit confirmation and sends the viewed revision", async (t) => {
+  const { controls } = settingsHost(); const root = await mount(t, <DashboardSettings {...props} />);
+  await act(async () => find(root, "SettingsAction", "强制更换端口")!.props.onPress()); assert.deepEqual(controls, []);
+  assert.match(JSON.stringify(root.toJSON()), /旧 Pi 仍持有旧地址/);
+  await act(async () => find(root, "SettingsAction", "取消服务操作")!.props.onPress()); assert.deepEqual(controls, []);
+  await act(async () => find(root, "SettingsAction", "强制更换端口")!.props.onPress());
+  await act(async () => find(root, "SettingsAction", "确认强制更换端口")!.props.onPress());
+  assert.deepEqual(controls, [{ action: "rotate", revision: "r1", confirmPortChange: true }]);
+  assert.match(JSON.stringify(root.toJSON()), /端口已更换/);
+});
+test("disabled feature still exposes status/explicit stop but not startup/restart/rotation", async (t) => {
+  const { service, controls } = settingsHost(); service.enabled = false;
+  const root = await mount(t, <DashboardSettings {...props} />);
+  for (const label of ["启动服务", "重启服务", "强制更换端口"]) assert.equal(find(root, "SettingsAction", label)!.props.disabled, true);
+  assert.equal(find(root, "SettingsAction", "停止服务")!.props.disabled, false);
+  await act(async () => find(root, "SettingsAction", "停止服务")!.props.onPress());
+  await act(async () => find(root, "SettingsAction", "确认停止服务")!.props.onPress()); assert.deepEqual(controls, [{ action: "stop", revision: "r1" }]);
+});
+test("status and control failures remain visible with refresh and do not open a browser", async (t) => {
+  settingsHost(); globals.__billionHost.rpc[serviceStatus.name] = async () => { throw new Error("test status unavailable"); };
+  const root = await mount(t, <DashboardSettings {...props} />); assert.match(JSON.stringify(root.toJSON()), /test status unavailable/);
+  globals.__billionHost.rpc[serviceStatus.name] = async () => ({ enabled: true, busy: false, revision: "r3", phase: "stopped" });
+  await act(async () => find(root, "SettingsAction", "刷新服务状态")!.props.onPress());
+  globals.__billionHost.rpc[serviceControl.name] = async () => { throw new Error("test revision changed"); };
+  await act(async () => find(root, "SettingsAction", "启动服务")!.props.onPress()); assert.match(JSON.stringify(root.toJSON()), /test revision changed/);
+});
+test("confirmation is discarded when another client changes service revision", async (t) => {
+  const { service } = settingsHost(); const root = await mount(t, <DashboardSettings {...props} />);
+  await act(async () => find(root, "SettingsAction", "重启服务")!.props.onPress()); assert.ok(find(root, "SettingsAction", "确认重启服务"));
+  service.revision = "r2"; await act(async () => find(root, "SettingsAction", "刷新服务状态")!.props.onPress());
+  assert.equal(find(root, "SettingsAction", "确认重启服务"), undefined);
+});
+test("old host service responses cannot overwrite the newly selected host", async (t) => {
+  const { service } = settingsHost(); let release!: (value: ServiceStatus) => void;
+  globals.__billionHost.rpc[serviceStatus.name] = () => new Promise((resolve) => { release = resolve; });
+  const root = await mount(t, <DashboardSettings {...props} />);
+  globals.__billionHost.rpc[serviceStatus.name] = async () => ({ ...service, origin: "http://127.0.0.1:45000", port: 45000 });
+  await act(async () => root.update(<DashboardSettings {...props} host={{ id: "new-host", label: "New" }} />));
+  await act(async () => release(service)); assert.equal(find(root, "SettingsRow", "固定服务地址")!.props.hint, "http://127.0.0.1:45000");
 });
 test("invalid settings have explicit reset and reload even with business disabled", async (t) => {
   const { state } = settingsHost(); state.status = "invalid"; state.error = "invalid origin";
   const root = await mount(t, <DashboardSettings {...props} />);
-  assert.ok(find(root, "SettingsAction", "恢复自动发现默认配置"));
-  assert.ok(find(root, "SettingsAction", "丢弃草稿并重新读取"));
+  assert.ok(find(root, "SettingsAction", "恢复启动器默认配置")); assert.ok(find(root, "SettingsAction", "丢弃草稿并重新读取"));
 });

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fakeManager } from "./fixtures/managed";
 import test from "node:test";
 import { createServer, type RequestListener } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -264,22 +265,24 @@ test("abort stops an active dashboard request", async (t) => {
 test("settings register while disabled; business handlers guard cleanup", async () => {
   let definition: unknown; const handlers = new Map<string, Function>();
   const context = { registerSettings: (value: unknown) => { definition = value; return { read: async () => ({ status: "ready", values: preferencesSchema.parse({}) }) }; },
-    handle: (contract: { name: string }, callback: Function) => handlers.set(contract.name, callback) } as unknown as PluginServerContext;
-  const stopSettings = contributeSettings(context);
-  assert.ok(definition); assert.equal(handlers.size, 0);
+    handle: (contract: { name: string }, callback: Function) => handlers.set(contract.name, callback),
+    addHook: () => () => {} } as unknown as PluginServerContext;
+  const stopSettings = contributeSettings(context, fakeManager().manager);
+  assert.ok(definition); assert.equal(handlers.size, 2);
   assert.equal((await readPreferences()).serverOrigin, "");
   const stopRpc = contributeRpc(context);
   const published = new Set(handlers.keys());
-  assert.equal(published.size, 3);
+  assert.equal(published.size, 5);
+  const businessHandlers = () => [...handlers].filter(([name]) => !name.includes(".service.")).map(([, handler]) => handler);
   const unavailable = { paseo: new Proxy({}, { get() { assert.fail("disabled RPC performed business IO"); } }) };
-  for (const handler of handlers.values()) await assert.rejects(async () => handler({ workspaceId: "w" }, unavailable), /未启用或已停止/);
+  for (const handler of businessHandlers()) await assert.rejects(async () => handler({ workspaceId: "w" }, unavailable), /未启用或已停止/);
   const stop = contribute(context);
   assert.deepEqual(new Set(handlers.keys()), published);
   assert.deepEqual(await handlers.get("zeonest.billion-context.workspaces")!({}, { paseo: { workspaces: { list: async () => ({ entries: [], pageInfo: { hasMore: false } }) } } }), []);
-  stop(); stop();
-  for (const handler of handlers.values()) await assert.rejects(async () => handler({ workspaceId: "w" }, unavailable), /已停止/);
+  await stop(); await stop();
+  for (const handler of businessHandlers()) await assert.rejects(async () => handler({ workspaceId: "w" }, unavailable), /已停止/);
   // A stale declaration cannot attach to a later activation after its own cleanup.
   stopRpc(); const stopAgain = contribute(context);
   await assert.rejects(async () => handlers.get("zeonest.billion-context.agents")!({}, unavailable), /已停止/);
-  stopAgain(); stopSettings(); await assert.rejects(readPreferences(), /尚未就绪/);
+  await stopAgain(); await stopSettings(); await assert.rejects(readPreferences(), /尚未就绪/);
 });

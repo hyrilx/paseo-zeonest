@@ -118,8 +118,8 @@ function DashboardPage({ theme, layout, host, params, navigation }: PluginScreen
       onPress={() => { if (params.agentId) void loadTarget(workspaceId); else setReload((value) => value + 1); }} /></SettingsCard>
     {busy && <Text style={hint}>正在定位{params.agentId ? "当前会话" : "dashboard 总览"}…</Text>}
     {error ? <View style={{ gap: 8 }}><Text accessibilityLiveRegion="polite" style={{ color: theme.colors.statusDanger }}>{error}</Text>
-      <Text style={hint}>地址留空时读取宿主的实例记录与默认日志。未发现实例时可重新尝试，或在 Billion Context 配置中填写地址；不会跳转到最近会话。</Text></View> : null}
+      <Text style={hint}>请在 Billion Context 配置页检查托管服务状态。已手动停止时需先启动；会话尚未产生压缩记录时可在首轮请求后重试，不会跳转到最近会话。</Text></View> : null}
     {message ? <Text accessibilityLiveRegion="polite" style={hint}>{message}</Text> : null}
-    <Text style={hint}>浏览器运行在客户端。远程宿主请配置客户端可达的地址或安全隧道；127.0.0.1 始终指浏览器所在设备。本功能不会启动 billion-context 或建立隧道。</Text>
+    <Text style={hint}>浏览器运行在客户端。远程宿主请配置客户端可达的地址或安全隧道；127.0.0.1 始终指浏览器所在设备。面板仅使用本功能托管的固定服务地址，不自动发现其他实例，也不会建立隧道。</Text>
   </ScrollView>;
 }
