@@ -1,0 +1,11 @@
+{
+  "id": "file-activity",
+  "name": "文件活动",
+  "description": "按轮查看当前会话的文件增删改查记录与差异",
+  "version": "0.1.1",
+  "tags": [
+    "files",
+    "conversation"
+  ],
+  "author": "Zeonest"
+}
