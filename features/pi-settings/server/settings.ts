@@ -1,5 +1,5 @@
 import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin/server";
-import { commitChanges, discardChanges, listWorkspaces, prepareChanges, preparePackage, prepareResource, readResource, readSnapshot } from "../shared/contracts";
+import { commitChanges, discardChanges, inventoryModels, listWorkspaces, packageVersion, prepareChanges, preparePackage, prepareResource, probeMcp, readPreferences, readResource, readSnapshot, searchPackages, startSubscription, subscriptionAction, subscriptionCatalog, testModel } from "../shared/contracts";
 import { PiSettingsService } from "./service";
 
 export default function contributeSettings(server: PluginServerContext) {
@@ -14,7 +14,7 @@ export default function contributeSettings(server: PluginServerContext) {
         if (!workspace || workspace.archivingAt) throw new Error("工作区不存在或已归档，请重新选择。");
         return workspace.workspaceDirectory ?? workspace.projectRootPath;
       } });
-          }
+    }
     return instance;
   };
   server.handle(listWorkspaces, async (_, { paseo }) => {
@@ -32,7 +32,16 @@ export default function contributeSettings(server: PluginServerContext) {
     return [...entries.values()];
   });
   server.handle(readSnapshot, (input, { paseo }) => service(paseo).snapshot(input));
+  server.handle(readPreferences, (_, { paseo }) => service(paseo).readPreferences());
   server.handle(readResource, (input, { paseo }) => service(paseo).readResource(input, input.id));
+  server.handle(inventoryModels, (input, { paseo }) => service(paseo).listModels(input));
+  server.handle(subscriptionCatalog, (input, { paseo }) => service(paseo).listSubscriptions(input));
+  server.handle(startSubscription, (input, { paseo }) => service(paseo).startSubscription(input));
+  server.handle(subscriptionAction, (input, { paseo }) => service(paseo).subscriptionAction(input));
+  server.handle(testModel, (input, { paseo }) => service(paseo).testModel(input));
+  server.handle(probeMcp, (input, { paseo }) => service(paseo).testMcp(input));
+  server.handle(searchPackages, (input, { paseo }) => service(paseo).searchPackages(input.query));
+  server.handle(packageVersion, (input, { paseo }) => service(paseo).packageVersion(input, input.source));
   server.handle(prepareChanges, (input, { paseo }) => service(paseo).prepare(input, input.edits));
   server.handle(prepareResource, (input, { paseo }) => service(paseo).prepareResource(input, input.id, input.text, input.revision));
   server.handle(preparePackage, (input, { paseo }) => service(paseo).preparePackage(input, input));

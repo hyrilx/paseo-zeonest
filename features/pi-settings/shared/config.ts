@@ -94,11 +94,17 @@ export function effectiveMcp(global: JsonObject, project: JsonObject): JsonObjec
 export function validateConfig(kind: string, text: string, project: boolean): JsonObject {
   const value = parseObject(text);
   if (kind === "settings") {
-    for (const key of ["extensions", "skills", "prompts", "themes", "enabledModels"]) {
+    for (const key of ["extensions", "skills", "prompts", "themes", "enabledModels", "defaultTools"]) {
       if (value[key] !== undefined && (!Array.isArray(value[key]) || !value[key].every((x: unknown) => typeof x === "string"))) throw new Error(`${key} 必须是字符串数组。`);
     }
     for (const key of ["defaultProvider", "defaultModel"]) if (value[key] !== undefined && typeof value[key] !== "string") throw new Error(`${key} 必须是字符串。`);
     if (value.defaultThinkingLevel !== undefined && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(String(value.defaultThinkingLevel))) throw new Error("不支持的思考等级。");
+    if (value.codemode !== undefined) {
+      if (!isObject(value.codemode)) throw new Error("codemode 必须是对象。");
+      const { mode, inlineBudget } = value.codemode;
+      if (mode !== undefined && mode !== "on" && mode !== "only") throw new Error("codemode.mode 必须是 on 或 only。");
+      if (inlineBudget !== undefined && (typeof inlineBudget !== "number" || !Number.isFinite(inlineBudget) || inlineBudget < 0)) throw new Error("codemode.inlineBudget 必须是非负数。");
+    }
     if (value.packages !== undefined && (!Array.isArray(value.packages) || value.packages.some((x: unknown) => !sourceOf(x)))) throw new Error("packages 必须包含非空 source。");
     if (Array.isArray(value.packages)) for (const entry of value.packages) if (isObject(entry)) for (const key of resourceTypes) {
       if (entry[key] !== undefined && (!Array.isArray(entry[key]) || !entry[key].every((x: unknown) => typeof x === "string"))) throw new Error(`包的 ${key} 筛选必须是字符串数组。`);
@@ -111,10 +117,18 @@ export function validateConfig(kind: string, text: string, project: boolean): Js
       if (!name || !isObject(entry)) throw new Error("供应商必须是命名对象。");
       if (entry.baseUrl !== undefined && (typeof entry.baseUrl !== "string" || !/^https?:\/\//.test(entry.baseUrl))) throw new Error(`${name}: baseUrl 必须是 HTTP(S) URL。`);
       if (entry.models !== undefined && (!Array.isArray(entry.models) || entry.models.some((m: unknown) => !isObject(m) || typeof m.id !== "string" || !m.id.trim()))) throw new Error(`${name}: models 中每项必须有非空 id。`);
+      if (entry.modelOverrides !== undefined && !isObject(entry.modelOverrides)) throw new Error(`${name}: modelOverrides 必须是对象。`);
+      for (const [id, model] of Object.entries(isObject(entry.modelOverrides) ? entry.modelOverrides : {})) {
+        if (!isObject(model)) throw new Error(`${name}/${id}: 模型覆盖必须是对象。`);
+        const { contextWindow } = model;
+        if (contextWindow !== undefined && (typeof contextWindow !== "number" || !Number.isSafeInteger(contextWindow) || contextWindow <= 0))
+          throw new Error(`${name}/${id}: contextWindow 必须是正整数。`);
+      }
     }
   }
   if (kind === "mcp") {
     try { JSON.parse(text); } catch { throw new Error("Pi 的 mcp.json 必须为标准 JSON（不支持注释、BOM 或尾随逗号）。"); }
+    if (value.autoEnableCodemode !== undefined && typeof value.autoEnableCodemode !== "boolean") throw new Error("autoEnableCodemode 必须是布尔值。");
     if (value.mcpServers !== undefined && !isObject(value.mcpServers)) throw new Error("mcpServers 必须是对象。");
     const names = new Set<string>();
     for (const [name, entry] of Object.entries(isObject(value.mcpServers) ? value.mcpServers : {})) {
@@ -122,14 +136,25 @@ export function validateConfig(kind: string, text: string, project: boolean): Js
       if (!/^[\w-]+$/.test(name) || names.has(normalized) || !isObject(entry)) throw new Error("MCP 名称无效、重复，或配置不是对象。");
       names.add(normalized);
       if (entry.enabled !== undefined && typeof entry.enabled !== "boolean") throw new Error(`${name}: enabled 必须是布尔值。`);
-      if (entry.exposure !== undefined && !["codemode", "codemode-deferred", "deferred", "direct", "hidden"].includes(String(entry.exposure))) throw new Error(`${name}: exposure 无效。`);
+      const exposures = ["codemode", "codemode-deferred", "deferred", "direct", "hidden"];
+      if (entry.exposure !== undefined && (typeof entry.exposure !== "string" || !exposures.includes(entry.exposure))) throw new Error(`${name}: exposure 无效。`);
+      if (entry.description !== undefined && typeof entry.description !== "string") throw new Error(`${name}: description 必须是字符串。`);
+      if (entry.timeout !== undefined && (typeof entry.timeout !== "number" || !Number.isFinite(entry.timeout) || entry.timeout <= 0)) throw new Error(`${name}: timeout 必须是正数（秒）。`);
       if (entry.type !== undefined && !["stdio", "http", "streamable-http"].includes(String(entry.type))) throw new Error(`${name}: 不支持此传输类型（不支持 SSE）。`);
       const transport = ["command", "url", "type"].some((key) => Object.hasOwn(entry, key));
       if (!transport && !project) throw new Error(`${name}: 全局条目必须有 command 或 url。`);
       if (transport && (Boolean(entry.command) === Boolean(entry.url))) throw new Error(`${name}: 必须且只能提供 command 或 url。`);
       if (entry.command !== undefined && (typeof entry.command !== "string" || !entry.command.trim())) throw new Error(`${name}: command 必须是可执行文件。`);
       if (entry.url !== undefined && (typeof entry.url !== "string" || !/^https?:\/\//.test(entry.url))) throw new Error(`${name}: url 必须是 HTTP(S) URL。`);
+      if (entry.cwd !== undefined && typeof entry.cwd !== "string") throw new Error(`${name}: cwd 必须是字符串。`);
       for (const key of ["env", "headers", "toolExposure"]) if (entry[key] !== undefined && (!isObject(entry[key]) || Object.values(entry[key]).some((x) => typeof x !== "string"))) throw new Error(`${name}: ${key} 必须是字符串映射。`);
+      if (isObject(entry.toolExposure) && Object.values(entry.toolExposure).some((x) => !exposures.includes(String(x)))) throw new Error(`${name}: toolExposure 包含无效规则。`);
+      if (entry.oauth !== undefined) {
+        if (!isObject(entry.oauth)) throw new Error(`${name}: oauth 必须是对象。`);
+        for (const key of ["clientId", "clientSecret", "clientName", "scope", "callbackUrl"])
+          if (entry.oauth[key] !== undefined && typeof entry.oauth[key] !== "string") throw new Error(`${name}: oauth.${key} 必须是字符串。`);
+        if (entry.oauth.clientRegistration !== undefined && (typeof entry.oauth.clientRegistration !== "string" || !["auto", "dcr", "cimd"].includes(entry.oauth.clientRegistration))) throw new Error(`${name}: oauth.clientRegistration 无效。`);
+      }
       if (entry.args !== undefined && (!Array.isArray(entry.args) || entry.args.some((x: unknown) => typeof x !== "string"))) throw new Error(`${name}: args 必须是字符串数组。`);
     }
   }

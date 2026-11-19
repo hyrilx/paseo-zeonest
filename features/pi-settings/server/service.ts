@@ -10,6 +10,10 @@ import type { ConfigDocument, DocumentKind, PackageRequest, Preferences, Preview
 import { preferencesSchema } from "../shared/contracts";
 import { isObject, packageEnabled, parseObject, resourceTypes, setProperty, skillMetadata, sourceOf, validateConfig } from "../shared/config";
 import { discover, packageIdentity, packagePath, resolveResourcePath } from "./discovery";
+import { inspectMcp, inspectModel, inspectModels, inspectPackage, searchRegistry } from "./inspect";
+import { loadSubscriptions, SubscriptionLogin, subscriptionSdk } from "./subscriptions";
+import type { subscriptionAction } from "../shared/contracts";
+import type { z } from "zod";
 import { assertRevision, atomicWrite, canonical, copyTree, fileDiff, hash, lockTargets, readState, revalidate, target, treeDiff, treeState, validateTreeLinks, MAX_TEXT, type FileState, type Target, type TreeState } from "./files";
 
 interface Edit { before: FileState; after: string }
@@ -49,6 +53,9 @@ export class PiSettingsService {
   private readonly cleanupTimer: ReturnType<typeof setInterval>;
   private readonly abort = new AbortController();
   private staging = false;
+  private probing = false;
+  private subscription?: SubscriptionLogin;
+  private subscriptionBusy = false;
   private disposed = false;
   constructor(private readonly options: Options) {
     this.home = options.home ?? homedir();
@@ -81,12 +88,107 @@ export class PiSettingsService {
     const state = readState(t);
     return kind === "preferences" || kind === "models" || base === agentDir ? { ...state, mode: 0o600 } : state;
   }
+  private async probe<T>(request: { preferencesRevision: string; revision: string; confirmed: true }, kind: "models" | "mcp", run: (host: { executable: string; agentDir: string; signal: AbortSignal }, text: string) => Promise<T>) {
+    this.active();
+    if (request.confirmed !== true) throw new Error("请先确认运行检查。");
+    if (this.probing || this.subscriptionBusy) throw new Error("已有 Pi 检查或订阅操作正在运行，请稍候。");
+    this.probing = true;
+    try {
+      const { state, values } = this.preferences(); assertRevision(state, request.preferencesRevision);
+      const { agentDir } = await this.location({}, values);
+      this.active();
+      const config = this.document(kind, agentDir, agentDir); assertRevision(config, request.revision);
+      const text = config.text ?? "{}";
+      validateConfig(kind, text, false);
+      return await run({ executable: values.piExecutable, agentDir, signal: this.abort.signal }, text);
+    } finally { this.probing = false; }
+  }
+  listModels(request: { preferencesRevision: string; revision: string; confirmed: true }) {
+    return this.probe(request, "models", inspectModels);
+  }
+  listSubscriptions(request: { preferencesRevision: string; revision: string; confirmed: true; patterns: string[]; refresh?: string }) {
+    return this.probe(request, "models", (host) => {
+      for (const name of ["auth.json", "models-store.json"]) target(join(host.agentDir, name), host.agentDir);
+      return loadSubscriptions(host, { patterns: request.patterns, refresh: request.refresh });
+    });
+  }
+  async startSubscription(request: { preferencesRevision: string; revision: string; confirmed: true; provider: string; action: "login" | "logout" }) {
+    this.active();
+    if (request.confirmed !== true) throw new Error("请先确认订阅操作。");
+    if (this.subscriptionBusy || this.probing) throw new Error("已有 Pi 检查或订阅操作正在运行，请稍候。");
+    this.subscriptionBusy = true;
+    try {
+      const { state, values } = this.preferences(); assertRevision(state, request.preferencesRevision);
+      const { agentDir } = await this.location({}, values);
+      this.active();
+      const models = this.document("models", agentDir, agentDir); assertRevision(models, request.revision);
+      validateConfig("models", models.text ?? "{}", false);
+      subscriptionSdk(values.piExecutable);
+      const targets = [state.target.real, models.target.real, ...["auth.json", "models-store.json", "settings.json"].map((name) => target(join(agentDir, name), agentDir).real)];
+      const release = lockTargets(targets);
+      const session = new SubscriptionLogin();
+      this.subscription = session;
+      void session.run({ executable: values.piExecutable, agentDir, signal: this.abort.signal }, { provider: request.provider, action: request.action })
+        .finally(() => { release(); this.subscriptionBusy = false; });
+      return { token: session.token };
+    } catch (e) { this.subscriptionBusy = false; throw e; }
+  }
+  subscriptionAction(request: z.infer<typeof subscriptionAction.input>) {
+    this.active();
+    if (!this.subscription || this.subscription.token !== request.token) throw new Error("订阅操作已结束或已过期。");
+    return this.subscription.act(request);
+  }
+  testModel(request: { preferencesRevision: string; revision: string; confirmed: true; provider: string; id: string }) {
+    return this.probe(request, "models", (host) => inspectModel(host, request.provider, request.id));
+  }
+  testMcp(request: { preferencesRevision: string; revision: string; confirmed: true; name: string }) {
+    return this.probe(request, "mcp", (host, text) => {
+      const servers = parseObject(text).mcpServers;
+      const entry = isObject(servers) && Object.hasOwn(servers, request.name) ? servers[request.name] : undefined;
+      if (!isObject(entry) || entry.enabled === false) throw new Error("只可检查已保存并启用的全局服务器。");
+      return inspectMcp(host, request.name, entry);
+    });
+  }
+  searchPackages(query: string) { this.active(); return searchRegistry(query, this.abort.signal); }
+  async packageVersion(scope: Scope, source: string) {
+    this.active();
+    const { values } = this.preferences();
+    const { base, agentDir } = await this.location(scope, values);
+    const config = parseObject(this.document("settings", base, agentDir).text ?? "{}");
+    if (!Array.isArray(config.packages) || !config.packages.some((entry) => sourceOf(entry) === source)) throw new Error("此范围未配置这个包，请刷新后重试。");
+    let path: string | null = null; let version: string | null = null;
+    if (source.startsWith("npm:") || /^(?:git:|https:\/\/)/.test(source)) {
+      const root = packagePath(source, base, this.home);
+      try {
+        path = target(root, base).real;
+        if (source.startsWith("npm:")) {
+          const metadata = parseObject(readState(target(join(path, "package.json"), base)).text ?? "{}");
+          if (typeof metadata.version === "string") version = metadata.version.slice(0, 120);
+        }
+      } catch { path = null; }
+    }
+    return inspectPackage(source, path, version, this.abort.signal);
+  }
+  readPreferences() {
+    this.active();
+    const path = this.preferencesTarget.path;
+    let document: ConfigDocument;
+    try {
+      const state = readState(this.preferencesTarget);
+      const text = state.text ?? "{}\n";
+      let error: string | null = null;
+      try { preferencesSchema.parse(parseObject(text)); }
+      catch { error = "插件偏好文件无效，请修复原始配置后保存。"; }
+      document = { kind: "preferences", path, text, revision: state.revision, exists: state.text !== null, error };
+    } catch { document = { kind: "preferences", path, text: "", revision: "unreadable", exists: false, error: "无法读取插件偏好文件。" }; }
+    return { document, defaultAgentDir: this.defaultAgentDir };
+  }
   async snapshot(scope: Scope): Promise<Snapshot> {
     this.active(); this.expire();
     const warnings: string[] = [];
     let prefs: Preferences; let prefState: FileState;
     try { ({ state: prefState, values: prefs } = this.preferences()); }
-    catch { prefState = readState(this.preferencesTarget); prefs = preferencesSchema.parse({}); warnings.push("本页偏好文件无效；目录选择和写入已停用，请在「页面设置」修复后保存。"); }
+    catch { prefState = readState(this.preferencesTarget); prefs = preferencesSchema.parse({}); warnings.push("本页偏好文件无效；目录选择和写入已停用，请在 Paseo 的插件设置中修复后保存。"); }
     const { agentDir, directory, base } = await this.location(scope, prefs);
     const documents: ConfigDocument[] = [];
     for (const kind of ["settings", "models", "mcp", "preferences"] as const) {

@@ -1,50 +1,109 @@
 import { useEffect, useRef, useState } from "react";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useRpc } from "@getpaseo/plugin/client";
-import { Modal, ScrollView, SettingsAction, SettingsCard, SettingsInput, SettingsRow, SettingsSection, SettingsSelect, SettingsSwitch, TextInput } from "@getpaseo/plugin/client/ui";
-import { Text, View } from "react-native";
-import { commitChanges, discardChanges, listWorkspaces, prepareChanges, preparePackage, prepareResource, readResource, readSnapshot,
-  type ConfigDocument, type DocumentKind, type PackageRequest, type Preview, type Resource, type Scope, type Snapshot } from "../shared/contracts";
-import { effectiveMcp, isObject, parseObject, resourceLoading, setModelInvocation, setProperty, stringList, type JsonObject } from "../shared/config";
-import { Button, CodeInput, DiffModal, EntityEditor, type EntityEditorState } from "./components";
+import { Modal, SettingsSelect, SettingsSwitch } from "@getpaseo/plugin/client/ui";
+import { Pressable, Text, View } from "react-native";
+import { commitChanges, discardChanges, inventoryModels, listWorkspaces, packageVersion, prepareChanges, preparePackage, prepareResource, probeMcp, readResource, readSnapshot, searchPackages, startSubscription, subscriptionAction, subscriptionCatalog, testModel,
+  type CatalogModel, type DocumentKind, type PackageRequest, type PackageUpdate, type Preview, type Resource, type Scope, type Snapshot, type SubscriptionCatalog } from "../shared/contracts";
+import { effectiveMcp, isObject, parseObject, resourceLoading, setModelInvocation, setProperty, sourceOf, stringList, validateConfig, type JsonObject } from "../shared/config";
+import { canCheckPackage, mergeMcpImport, toggleSubscriptionModel } from "../shared/management";
+import { McpCodeMode } from "./codemode";
+import { Button, CodeInput, DiffModal } from "./components";
+import { EntityForm } from "./entity";
+import { Caption, Field, Heading, ListRow, matches, Pane, row } from "./layout";
+import { modelCatalog, ModelDefaults, ModelsInventory, providerEntries } from "./models";
+import { matchingResources, PackageDetail, PackageInstall, ReferencePath, ResourceDetail } from "./resources";
+import { Subscriptions } from "./subscriptions";
 import { ConfigWarnings } from "./warnings";
 
-type Tab = "models" | "skills" | "plugins" | "mcp" | "preferences";
+type Tab = "models" | "skills" | "plugins" | "mcp";
 const tabs: { value: Tab; label: string }[] = [
-  { value: "models", label: "模型" }, { value: "skills", label: "技能" }, { value: "plugins", label: "插件" }, { value: "mcp", label: "MCP" }, { value: "preferences", label: "页面设置" },
+  { value: "models", label: "模型" }, { value: "skills", label: "技能" }, { value: "plugins", label: "插件" }, { value: "mcp", label: "MCP" },
 ];
+const empty: Record<Tab, string> = { models: "defaults", skills: "", plugins: "", mcp: "" };
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : "操作失败，请检查连接后重试。";
-function objectOrEmpty(text: string): JsonObject { try { return parseObject(text); } catch { return {}; } }
-interface TextEditor { title: string; text: string; original: string; revision: string; kind?: DocumentKind; resource?: Resource; readOnly?: boolean }
+function objectOrNull(text: string): JsonObject | null { try { return parseObject(text); } catch { return null; } }
+const objectOrEmpty = (text: string) => objectOrNull(text) ?? {};
+const entityKey = (name: string) => `entity:${name}`;
+interface TextEditor { title: string; text: string; original: string; kind?: DocumentKind; resource?: Resource; revision: string }
+interface EntityDraft { kind: "provider" | "mcp"; name: string; originalName: string | null; raw: string; originalRaw: string }
+interface Confirmation { title: string; message: string; label: string; run(): void }
+interface McpResult { state: "connected" | "needs-auth" | "failed"; tools: string[] }
+interface PackageTarget { source: string; workspaceId?: string }
+const packageKey = ({ source, workspaceId }: PackageTarget) => JSON.stringify([workspaceId ?? "", source]);
+const checkBadge = (result?: PackageUpdate) => result && ({ current: "已是当前", different: "有版本差异", failed: "检查失败", unavailable: "无法检查" }[result.state]);
+const mcpSeed = JSON.stringify({ command: "", args: [] }, null, 2);
+function skillTarget(resource: Resource, workspaceId: string): PackageTarget | undefined {
+  return resource.packageSource ? { source: resource.packageSource, workspaceId: resource.scope === "project" ? workspaceId || undefined : undefined } : undefined;
+}
+
 export function PiSettingsPage(props: PluginSurfaceProps) { return <Page key={props.host.id} {...props} />; }
 function Page({ theme, layout, host }: PluginSurfaceProps) {
   const rpcRead = useRpc(readSnapshot); const rpcWorkspaces = useRpc(listWorkspaces); const rpcPrepare = useRpc(prepareChanges);
   const rpcPackage = useRpc(preparePackage); const rpcResource = useRpc(readResource); const rpcPrepareResource = useRpc(prepareResource);
   const rpcCommit = useRpc(commitChanges); const rpcDiscard = useRpc(discardChanges);
-  const [workspaceId, setWorkspaceId] = useState(""); const scope: Scope = workspaceId ? { workspaceId } : {};
+  const rpcCatalog = useRpc(inventoryModels); const rpcTest = useRpc(testModel); const rpcProbe = useRpc(probeMcp);
+  const rpcSearch = useRpc(searchPackages); const rpcVersion = useRpc(packageVersion);
+  const rpcSubscriptions = useRpc(subscriptionCatalog); const rpcStart = useRpc(startSubscription); const rpcAuth = useRpc(subscriptionAction);
+  const [workspaceId, setWorkspaceId] = useState(""); const scope: Scope = workspaceId ? { workspaceId } : {}; const project = Boolean(workspaceId);
   const [workspaces, setWorkspaces] = useState<{ id: string; name: string; directory: string }[]>([]);
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null); const [drafts, setDrafts] = useState<Partial<Record<DocumentKind, string>>>({});
-  const [tab, setTab] = useState<Tab>("models"); const [search, setSearch] = useState(""); const [source, setSource] = useState("");
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [drafts, setDrafts] = useState<Partial<Record<DocumentKind, string>>>({});
+  const [tab, setTab] = useState<Tab>("models"); const [selection, setSelection] = useState("defaults"); const [inDetail, setInDetail] = useState(false);
+  const [search, setSearch] = useState(""); const [resourceFilter, setResourceFilter] = useState("all");
   const [busy, setBusy] = useState(false); const [loading, setLoading] = useState(true); const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null); const [preview, setPreview] = useState<Preview | null>(null);
-  const [entity, setEntity] = useState<EntityEditorState | null>(null); const [editor, setEditor] = useState<TextEditor | null>(null);
-  const [discardOpen, setDiscardOpen] = useState(false); const [deleteEntity, setDeleteEntity] = useState<{ kind: "provider" | "mcp"; name: string } | null>(null);
-  const mounted = useRef(true); const generation = useRef(0); const pending = useRef<string | null>(null);
-  const c = theme.colors; const muted = { color: c.foregroundMuted, fontSize: 13, lineHeight: 20 };
-  const doc = (kind: DocumentKind): ConfigDocument | undefined => snapshot?.documents.find((entry) => entry.kind === kind);
+  const [entity, setEntity] = useState<EntityDraft | null>(null); const [editor, setEditor] = useState<TextEditor | null>(null);
+  const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const [resourcePreview, setResourcePreview] = useState<{ id: string; text: string } | null>(null);
+  const [inventory, setInventory] = useState<CatalogModel[] | null>(null);
+  const [subscriptions, setSubscriptions] = useState<SubscriptionCatalog | null>(null);
+  const [addMethod, setAddMethod] = useState<"search" | "local" | "json" | "manual">("search");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [mcpResults, setMcpResults] = useState<Record<string, McpResult>>({}); const [versions, setVersions] = useState<Record<string, PackageUpdate>>({});
+  const [importText, setImportText] = useState("");
+  const [bulkOpen, setBulkOpen] = useState(false); const [scopeOpen, setScopeOpen] = useState(false);
+  const mounted = useRef(true); const generation = useRef(0); const pending = useRef<string | null>(null); const running = useRef(false);
+  const draftRevisions = useRef<Partial<Record<DocumentKind, string>>>({});
+  const c = theme.colors;
+  const doc = (kind: DocumentKind) => snapshot?.documents.find((entry) => entry.kind === kind);
   const text = (kind: DocumentKind) => drafts[kind] ?? doc(kind)?.text ?? "{}\n";
-  const dirty = Object.entries(drafts).some(([kind, value]) => value !== doc(kind as DocumentKind)?.text);
-  const blocked = busy || loading || preview !== null;
-  const readable = (kind: DocumentKind) => doc(kind)?.revision !== "unreadable";
+  const edits = (Object.keys(drafts) as DocumentKind[]).filter((kind) => drafts[kind] !== doc(kind)?.text);
+  const entityDirty = !!entity && (entity.originalName === null || entity.raw !== entity.originalRaw);
+  const dirty = edits.length > 0 || entityDirty;
+  const blocked = busy || loading || preview !== null || authBusy;
+  const writable = (kind: DocumentKind) => !!doc(kind) && !doc(kind)?.error && !(project && kind === "models");
   const settings = objectOrEmpty(text("settings")); const global = objectOrEmpty(snapshot?.globalSettings ?? "{}");
-  const saveDraft = (kind: DocumentKind, value: string) => setDrafts((old) => ({ ...old, [kind]: value }));
+  function rememberRevision(kind: DocumentKind) {
+    draftRevisions.current[kind] ??= doc(kind)?.revision;
+  }
+  const saveDraft = (kind: DocumentKind, value: string) => {
+    rememberRevision(kind);
+    setDrafts((old) => ({ ...old, [kind]: value })); setError(null); setNotice(null);
+  };
+  function changeDocument(kind: DocumentKind, update: (current: string) => string) {
+    try { saveDraft(kind, update(text(kind))); } catch (e) { setError(errorMessage(e)); }
+  }
+  const changeProperty = (kind: DocumentKind, path: (string | number)[], value: unknown) => changeDocument(kind, (current) => setProperty(current, path, value));
+  const begin = () => { running.current = true; setBusy(true); setError(null); setNotice(null); };
+  const finish = () => { running.current = false; if (mounted.current) setBusy(false); };
   async function load(selectedScope: Scope = scope, savedPaths?: readonly string[]) {
     const current = ++generation.current; setLoading(true); setError(null);
     try {
       const state = await rpcRead(selectedScope);
       if (mounted.current && current === generation.current) {
         setSnapshot(state);
-        setDrafts((previous) => !savedPaths || state.agentDir !== snapshot?.agentDir ? {} : Object.fromEntries(Object.entries(previous).filter(([kind]) => !savedPaths.includes(doc(kind as DocumentKind)?.path ?? ""))));
+        const sameAgent = state.agentDir === snapshot?.agentDir;
+        if (!savedPaths || !sameAgent) { draftRevisions.current = {}; setDrafts({}); }
+        else {
+          const savedKinds = snapshot?.documents.filter((item) => savedPaths.includes(item.path)).map((item) => item.kind) ?? [];
+          for (const kind of savedKinds) delete draftRevisions.current[kind];
+          setDrafts((previous) => Object.fromEntries(Object.entries(previous).filter(([kind]) => !savedKinds.includes(kind as DocumentKind))));
+        }
+        if (!savedPaths || !sameAgent || savedPaths.some((path) => path === doc("models")?.path || path === doc("preferences")?.path)) { setInventory(null); setSubscriptions(null); }
+        if (!savedPaths || !sameAgent || savedPaths.some((path) => path === doc("mcp")?.path || path === doc("preferences")?.path)) setMcpResults({});
+        if (!savedPaths || !sameAgent || state.documents.some((entry) => entry.kind === "settings" && savedPaths.includes(entry.path)) || savedPaths.includes(doc("preferences")?.path ?? "")) setVersions({});
+        setResourcePreview(null);
       }
     } catch (e) { if (mounted.current && current === generation.current) { setSnapshot(null); setError(errorMessage(e)); } }
     finally { if (mounted.current && current === generation.current) setLoading(false); }
@@ -56,237 +115,437 @@ function Page({ theme, layout, host }: PluginSurfaceProps) {
   useEffect(() => { void load(workspaceId ? { workspaceId } : {}); }, [workspaceId, rpcRead]);
   useEffect(() => { let active = true; void rpcWorkspaces({}).then((entries) => { if (active) setWorkspaces(entries); }).catch((e: unknown) => { if (active) setError(`无法列出工作区：${errorMessage(e)}`); }); return () => { active = false; }; }, [rpcWorkspaces]);
   async function apply(plan: Preview, confirmed: boolean) {
-    setBusy(true); setError(null);
+    begin();
     try {
       const result = await rpcCommit({ token: plan.token, confirmed });
       if (!mounted.current) return;
-      pending.current = null; setPreview(null); setEntity(null); setEditor(null); setDeleteEntity(null); setNotice(result.message); await load(scope, plan.changes.map((change) => change.path));
+      pending.current = null; setPreview(null); setEditor(null); setNotice(result.message); await load(scope, plan.changes.map((change) => change.path));
     } catch (e) { if (mounted.current) { setError(errorMessage(e)); setPreview(plan); } }
-    finally { if (mounted.current) setBusy(false); }
+    finally { finish(); }
   }
   async function prepare(operation: () => Promise<Preview>) {
-    if (blocked) return;
-    setBusy(true); setError(null); setNotice(null);
+    if (blocked || running.current) return;
+    begin();
     try {
       const plan = await operation();
       if (!mounted.current) { await rpcDiscard({ token: plan.token }); return; }
       pending.current = plan.token;
-      if (plan.changes.length === 0 && plan.artifacts.length === 0) { await rpcDiscard({ token: plan.token }); pending.current = null; setNotice("没有改动，配置或安装版本已是最新。"); }
+      if (plan.changes.length === 0 && plan.artifacts.length === 0) { await rpcDiscard({ token: plan.token }); pending.current = null; setNotice("没有需要写入的改动。"); }
       else if (plan.confirmationRequired) setPreview(plan);
       else await apply(plan, false);
     } catch (e) { if (mounted.current) setError(errorMessage(e)); }
-    finally { if (mounted.current) setBusy(false); }
+    finally { finish(); }
   }
   async function cancelPreview() {
-    if (!preview || busy) return;
+    if (!preview || busy || running.current) return;
+    running.current = true; setBusy(true);
     try { await rpcDiscard({ token: preview.token }); pending.current = null; setPreview(null); setError(null); }
-    catch (e) { setError(errorMessage(e)); }
+    catch (e) { if (mounted.current) setError(errorMessage(e)); }
+    finally { finish(); }
   }
-  function saveDocument(kind: DocumentKind, value = text(kind)) {
-    const document = doc(kind); if (!document) return;
-    if (kind === "preferences" && String(objectOrEmpty(value).agentDir ?? "") !== (snapshot?.preferences.agentDir ?? "") && Object.entries(drafts).some(([key, draft]) => key !== "preferences" && draft !== doc(key as DocumentKind)?.text)) {
-      setError("切换 agent 目录前，请先保存或放弃其他分区的草稿。"); return;
-    }
-    saveDraft(kind, value);
-    void prepare(() => rpcPrepare({ ...scope, edits: [{ kind, text: value, revision: document.revision }] }));
+  function run<T>(operation: () => Promise<T>, result: (value: T) => void) {
+    if (blocked || running.current) return;
+    begin();
+    void (async () => {
+      try { const value = await operation(); if (mounted.current) result(value); }
+      catch (e) { if (mounted.current) setError(errorMessage(e)); }
+      finally { finish(); }
+    })();
   }
-  function changeProperty(kind: DocumentKind, path: (string | number)[], value: unknown) {
-    try { saveDraft(kind, setProperty(text(kind), path, value)); setError(null); }
-    catch (e) { setError(errorMessage(e)); }
+  function ask(title: string, message: string, label: string, action: () => void) {
+    setConfirmation({ title, message, label, run: () => { setConfirmation(null); action(); } });
   }
-  function saveEntity(name: string, value: JsonObject) {
-    if (!entity) return;
+  function entityToDocument() {
+    if (!entity || !entityDirty) return;
     const kind = entity.kind === "provider" ? "models" : "mcp"; const key = entity.kind === "provider" ? "providers" : "mcpServers";
+    const name = entity.name.trim(); const existing = objectOrEmpty(text(kind))[key];
+    if (!name || /^(?:__proto__|constructor|prototype)$/.test(name) || /[\x00-\x1f]/.test(name)) throw new Error("请填写有效的名称。");
+    if (entity.originalName === null && isObject(existing) && Object.hasOwn(existing, name)) throw new Error("名称已存在，请使用其他名称。");
+    const value = setProperty(text(kind), [key, name], parseObject(entity.raw));
+    validateConfig(kind, value, project && kind === "mcp");
+    return { kind, name, value } as const;
+  }
+  function stageEntity() {
+    if (!entity) return true;
+    try { const staged = entityToDocument(); if (staged) saveDraft(staged.kind, staged.value); setEntity(null); return true; }
+    catch (e) { setError(errorMessage(e)); return false; }
+  }
+  function saveAll() {
     try {
-      const document = objectOrEmpty(text(kind));
-      if (!entity.existing && isObject(document[key]) && Object.hasOwn(document[key], name)) throw new Error("此名称已存在，请选择其他名称。");
-      setEntity({ ...entity, name, value, existing: true });
-      saveDocument(kind, setProperty(text(kind), [key, name], value));
+      const staged = entityToDocument();
+      const values = { ...drafts, ...(staged ? { [staged.kind]: staged.value } : {}) };
+      const request = (Object.keys(values) as DocumentKind[]).flatMap((kind) => {
+        const document = doc(kind); const value = values[kind];
+        if (!document || value === undefined || document.text === value) return [];
+        const revision = draftRevisions.current[kind] ?? document.revision;
+        if (revision !== document.revision) throw new Error(`草稿所依据的文件已变更：${document.path}。请备份草稿后刷新。`);
+        return [{ kind, text: value, revision }];
+      });
+      if (staged) { rememberRevision(staged.kind); setDrafts(values); setSelection(entityKey(staged.name)); }
+      setEntity(null);
+      if (request.length) void prepare(() => rpcPrepare({ ...scope, edits: request }));
     } catch (e) { setError(errorMessage(e)); }
   }
-  function removeEntity() {
-    if (!deleteEntity) return;
-    const kind = deleteEntity.kind === "provider" ? "models" : "mcp"; const key = deleteEntity.kind === "provider" ? "providers" : "mcpServers";
-    try { saveDocument(kind, setProperty(text(kind), [key, deleteEntity.name], undefined)); } catch (e) { setError(errorMessage(e)); }
+  function select(next: string, nextTab = tab) {
+    if (next === selection && nextTab === tab) { setInDetail(true); return true; }
+    if (!stageEntity()) return false;
+    if (tab !== nextTab) { setTab(nextTab); setSearch(""); setResourceFilter("all"); setNotice(null); }
+    setSelection(next); setInDetail(true); return true;
   }
-  function packageAction(action: PackageRequest["action"], packageSource: string) {
-    const settingsDoc = doc("settings"); const prefsDoc = doc("preferences"); if (!settingsDoc || !prefsDoc) return;
-    if (drafts.settings && drafts.settings !== settingsDoc.text) { setError("请先保存或放弃 settings.json 草稿，再进行包操作。"); return; }
-    void prepare(() => rpcPackage({ ...scope, action, source: packageSource, revision: settingsDoc.revision, preferencesRevision: prefsDoc.revision }));
+  function switchTab(next: Tab) {
+    if (tab === next || !stageEntity()) return;
+    setTab(next); setSelection(empty[next]); setSearch(""); setResourceFilter("all"); setInDetail(false); setNotice(null);
   }
-  async function openResource(resource: Resource, toggleInvocation?: boolean) {
-    if (blocked) return; setBusy(true); setError(null);
+  function openAdd(method: typeof addMethod) {
+    if (select("add")) setAddMethod(method);
+  }
+  function editEntity(kind: EntityDraft["kind"], name: string | null, value: JsonObject) {
+    if (entity && entity.kind === kind && entity.originalName === name) { setInDetail(true); return; }
+    if (!select(name === null ? "new" : entityKey(name))) return;
+    const raw = JSON.stringify(value, null, 2);
+    setEntity({ kind, name: name ?? "", originalName: name, raw, originalRaw: raw });
+  }
+  function removeEntity(kind: "models" | "mcp", name: string) {
+    ask("删除配置？", `将从草稿中移除 ${name}。认证文件会保留。`, "删除条目", () => {
+      changeProperty(kind, [kind === "models" ? "providers" : "mcpServers", name], undefined);
+      setEntity(null); setSelection(empty[tab]); setInDetail(false);
+    });
+  }
+  function packageAction(action: PackageRequest["action"], source: string) {
+    const configuration = doc("settings"); const prefs = doc("preferences"); if (!configuration || !prefs) return;
+    if (edits.includes("settings") || edits.includes("preferences")) { setError("请先保存或放弃配置草稿，再操作包。"); return; }
+    void prepare(() => rpcPackage({ ...scope, action, source, revision: configuration.revision, preferencesRevision: prefs.revision }));
+  }
+  function checkPackages(targets: PackageTarget[]) {
+    const queue = [...new Map(targets.filter(({ source }) => canCheckPackage(source)).map((item) => [packageKey(item), item])).values()];
+    if (!queue.length) return;
+    run(async () => {
+      const results: Record<string, PackageUpdate> = {};
+      let cursor = 0;
+      const worker = async () => {
+        while (mounted.current && cursor < queue.length) {
+          const item = queue[cursor++]!;
+          try { results[packageKey(item)] = await rpcVersion(item); }
+          catch (e) { results[packageKey(item)] = { state: "failed", installed: null, remote: null, message: errorMessage(e) }; }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(4, queue.length) }, worker));
+      return results;
+    }, (results) => {
+      setVersions((old) => ({ ...old, ...results }));
+      const values = Object.values(results);
+      const count = (state: PackageUpdate["state"]) => values.filter((x) => x.state === state).length;
+      setNotice(`检查 ${values.length} 个包：${count("different")} 个有差异，${count("current")} 个相同，${count("failed") + count("unavailable")} 个未能比较。`);
+    });
+  }
+  function openResource(resource: Resource, edit = false) {
+    run(() => rpcResource({ ...scope, id: resource.id }), (content) => {
+      if (edit) setEditor({ ...content, original: content.text, title: resource.path, resource });
+      else setResourcePreview({ id: resource.id, text: content.text });
+    });
+  }
+  function changeInvocation(resource: Resource, enabled: boolean) {
+    void prepare(async () => {
+      const content = await rpcResource({ ...scope, id: resource.id });
+      return rpcPrepareResource({ ...scope, id: resource.id, text: setModelInvocation(content.text, enabled), revision: content.revision });
+    });
+  }
+  function toggleResources(resources: Resource[], enabled: boolean) {
+    changeDocument("settings", (current) => resources.reduce((acc, resource) => resourceLoading(acc, resource, enabled, project), current));
+  }
+  function resourceEnabled(resource: Resource) {
+    if (!edits.includes("settings")) return resource.enabled;
+    const key = resource.kind === "skill" ? "skills" : "extensions";
+    let path = resource.path;
+    let rules = stringList(settings[key]);
+    if (resource.packageSource && resource.packageRoot) {
+      const root = resource.packageRoot.replace(/\\/g, "/").replace(/\/$/, "");
+      path = path.replace(/\\/g, "/");
+      if (!path.startsWith(`${root}/`)) return resource.enabled;
+      path = path.slice(root.length + 1);
+      const entry = Array.isArray(settings.packages) ? settings.packages.find((entry) => sourceOf(entry) === resource.packageSource || (project && resource.scope === "global" && sourceOf(entry) === resource.packageRoot)) : undefined;
+      rules = isObject(entry) ? stringList(entry[key]) : [];
+    }
+    const rule = rules.findLast((rule) => rule === `+${path}` || rule === `-${path}`);
+    return rule ? rule.startsWith("+") : resource.enabled;
+  }
+  function openSource(kind: DocumentKind) {
+    const current = doc(kind); if (!current) return;
     try {
-      const content = await rpcResource({ ...scope, id: resource.id }); if (!mounted.current) return;
-      if (toggleInvocation !== undefined) {
-        setBusy(false);
-        const next = setModelInvocation(content.text, toggleInvocation);
-        await prepare(() => rpcPrepareResource({ ...scope, id: resource.id, text: next, revision: content.revision }));
-      } else setEditor({ title: resource.path, text: content.text, original: content.text, revision: content.revision, resource, readOnly: resource.kind === "extension" });
+      const staged = entityToDocument();
+      if (staged) {
+        saveDraft(staged.kind, staged.value);
+        setSelection(entityKey(staged.name));
+      }
+      setEntity(null);
+      const draft = staged?.kind === kind ? staged.value : text(kind);
+      setEditor({ title: current.path, text: draft, original: draft, revision: current.revision, kind });
+    } catch (e) { setError(errorMessage(e)); }
+  }
+  const sourceButton = (kind: DocumentKind, label: string) => <View style={{ alignSelf: "flex-start" }}><Button label={label} theme={theme} disabled={blocked || !doc(kind) || doc(kind)?.revision === "unreadable" || (project && kind === "models")} onPress={() => openSource(kind)} /></View>;
+  const probeInput = (kind: "models" | "mcp") => ({ confirmed: true as const, revision: doc(kind)?.revision ?? "", preferencesRevision: doc("preferences")?.revision ?? "" });
+  const canProbe = (kind: "models" | "mcp") => !blocked && !!doc(kind) && !doc(kind)?.error && !doc("preferences")?.error && !edits.includes(kind) && !edits.includes("preferences") && !entityDirty;
+  const checkModels = () => ask("读取 Pi 模型目录？", "使用宿主已保存的 Pi 配置与认证。Pi 解析凭据时可能执行配置里的 !command。不会发送模型请求。", "读取目录", () => run(() => rpcCatalog(probeInput("models")), setInventory));
+  const checkModel = (model: CatalogModel) => ask("发送模型测试请求？", `Pi 将向 ${model.provider}/${model.id} 发送一条固定测试消息，可能产生费用。不会发送工作区内容或加载扩展。`, "发送测试", () => run(() => rpcTest({ ...probeInput("models"), provider: model.provider, id: model.id }), (value) => setNotice(`模型响应正常 · ${value.elapsedMs} ms`)));
+  const mcpRaw = objectOrEmpty(text("mcp")); const localServers = isObject(mcpRaw.mcpServers) ? mcpRaw.mcpServers : {};
+  const servers = effectiveMcp(project ? objectOrEmpty(snapshot?.globalMcp ?? "{}") : {}, mcpRaw);
+  const providers = providerEntries(objectOrEmpty(text("models")));
+  const modelsDocument = objectOrEmpty(text("models"));
+  const models = modelCatalog(modelsDocument, inventory ?? subscriptions?.models ?? []);
+  const modelPatterns = stringList(settings.enabledModels ?? (project ? global.enabledModels : undefined));
+  const readSubscriptions = (refresh?: string) => run(() => rpcSubscriptions({ ...probeInput("models"), refresh, patterns: modelPatterns }), setSubscriptions);
+  async function reloadAfterAuth() {
+    if (running.current) return;
+    begin(); setSubscriptions(null); setInventory(null);
+    try {
+      // Pi can write a device ID to global settings as part of login.
+      const value = await rpcSubscriptions({ ...probeInput("models"), patterns: modelPatterns });
+      if (!mounted.current) return;
+      await load(scope, []);
+      if (mounted.current) setSubscriptions(value);
     } catch (e) { if (mounted.current) setError(errorMessage(e)); }
-    finally { if (mounted.current) setBusy(false); }
+    finally { finish(); }
   }
-  function toggleResource(resource: Resource, enabled: boolean) {
-    try { saveDocument("settings", resourceLoading(text("settings"), resource, enabled, Boolean(workspaceId))); }
-    catch (e) { setError(errorMessage(e)); }
+  const askSubscriptions = (refresh?: string) => ask(refresh ? "刷新订阅模型？" : "读取订阅目录？", refresh ? "Pi 会连接供应商并更新本机目录，可能刷新 OAuth 凭据。" : "Pi 将读取已保存的认证和本地目录；解析凭据可能运行已配置的 !command。", refresh ? "刷新目录" : "读取目录", () => readSubscriptions(refresh));
+  function overrideModel(model: CatalogModel, key: string, value: unknown) {
+    const provider = isObject(modelsDocument.providers) ? modelsDocument.providers[model.provider] : undefined;
+    const entry = isObject(provider) && isObject(provider.modelOverrides) ? provider.modelOverrides[model.id] : undefined;
+    const overrides = isObject(entry) ? { ...entry } : {};
+    if (value === undefined) delete overrides[key]; else overrides[key] = value;
+    changeProperty("models", ["providers", model.provider, "modelOverrides", model.id], Object.keys(overrides).length ? overrides : undefined);
   }
-  const scopeHint = workspaceId ? "项目覆盖保存到工作区 .pi；未设置的字段继承全局配置。读取不会授予 Pi 项目信任。" : "全局设置适用于该宿主的所有 Pi 项目。";
-  const filter = (value: string) => value.toLowerCase().includes(search.toLowerCase());
-  const documentActions = (kind: DocumentKind, label: string) => <SettingsCard>
-    <SettingsAction label={label} hint={doc(kind)?.path} actionLabel="查看 / 编辑原始配置" disabled={blocked || !readable(kind) || (kind === "models" && Boolean(workspaceId))} onPress={() => setEditor({ title: doc(kind)!.path, kind, text: text(kind), original: text(kind), revision: doc(kind)!.revision })} />
-    {doc(kind)?.error && <SettingsRow label="文件需要处理" error={doc(kind)?.error} hint="不会将无效或不可读文件当成空配置。可读的无效文本可显式修复后审阅 diff。" />}
-  </SettingsCard>;
-  return <ScrollView contentContainerStyle={{ padding: layout.compact ? 16 : 28, gap: 22, maxWidth: 1180, width: "100%", alignSelf: "center" }} style={{ flex: 1, backgroundColor: c.surface0 }}>
-    <View style={{ gap: 8 }}>
-      <Text style={{ color: c.foreground, fontSize: 24, fontWeight: "600" }}>Pi 设置</Text>
-      <Text style={muted}>管理 {host.label} 上的模型、技能、插件与 MCP。所有改动均先生成预览，默认确认 diff 后才写入。</Text>
-      <Text style={muted}>只编辑配置，不启动 Pi 会话、不连接 MCP、不执行配置中的 !command。保存后请在 Pi 中 /reload 或开启新会话。</Text>
+  const resources = snapshot?.resources ?? []; const packages = snapshot?.packages ?? [];
+  const visibleResources = matchingResources(resources, tab === "skills" ? "skill" : "extension", search).filter((resource) => resourceFilter === "all" || (resourceFilter === "enabled") === resourceEnabled(resource));
+  const settingsLocked = blocked || !writable("settings");
+  const canManagePackages = !settingsLocked && !edits.includes("settings") && !edits.includes("preferences");
+  const currentResource = selection.startsWith("resource:") ? resources.find((resource) => `resource:${resource.id}` === selection) : undefined;
+  const currentPackage = selection.startsWith("package:") ? packages.find((pkg) => `package:${pkg.source}` === selection) : undefined;
+  const name = selection.startsWith("entity:") ? selection.slice(7) : undefined;
+  const rr = (id: string, label: string, options: { detail?: string; badge?: string; onPress?(): void } = {}) => <ListRow key={id} theme={theme} label={label} detail={options.detail} badge={options.badge}
+    active={selection === id} disabled={blocked} onPress={options.onPress ?? (() => select(id))} />;
+  const emptySearch = <Caption theme={theme}>没有匹配的条目。</Caption>;
+  let list: React.ReactNode; let tools: React.ReactNode; let detail: React.ReactNode;
+  if (tab === "models") {
+    const visible = providers.filter(([name]) => matches(search, name));
+    const provider = providers.find(([entry]) => entry === name);
+    tools = <>
+      <Field theme={theme} search label="搜索供应商" placeholder="搜索供应商" value={search} onChangeText={setSearch} />
+      {!project && <Button label="添加供应商" theme={theme} disabled={blocked || !writable("models")} onPress={() => editEntity("provider", null, { api: "openai-completions", models: [{ id: "" }] })} />}
+    </>;
+    list = <>
+      {rr("defaults", "默认值与模型范围")}{rr("catalog", "可用模型", { badge: String(models.length) })}{rr("subscriptions", "订阅模型", { badge: subscriptions ? String(subscriptions.providers.filter((item) => item.connected).length) : undefined })}
+      <View style={{ padding: 8 }}><Caption theme={theme}>自定义供应商 · {providers.length}</Caption></View>
+      {visible.map(([name, entry]) => rr(entityKey(name), name, { detail: isObject(entry) && typeof entry.api === "string" ? entry.api : undefined,
+        badge: isObject(entry) && Array.isArray(entry.models) ? `${entry.models.length} 个` : undefined,
+        onPress: () => project ? select(entityKey(name)) : editEntity("provider", name, isObject(entry) ? entry : {}) }))}
+      {search && !visible.length ? emptySearch : null}
+      {entity?.kind === "provider" && entity.originalName === null && rr("new", entity.name || "新供应商", { badge: "草稿" })}
+    </>;
+    if (selection === "catalog") detail = <ModelsInventory theme={theme} inventory={models} probeCatalog={inventory} project={project} settings={settings} global={global} disabled={settingsLocked} canProbe={canProbe("models")} reload={checkModels} test={checkModel} changeSettings={(change) => changeDocument("settings", change)} />;
+    else if (selection === "subscriptions") detail = <Subscriptions theme={theme} catalog={subscriptions} document={modelsDocument} patterns={modelPatterns} blocked={blocked} project={project} canRead={canProbe("models")} canScope={!settingsLocked} canOverride={!project && writable("models") && !blocked}
+      load={askSubscriptions} begin={async (provider, action) => (await rpcStart({ ...probeInput("models"), provider, action })).token} interact={(token, request) => rpcAuth({ token, ...request })}
+      setAuthBusy={setAuthBusy} complete={() => { void reloadAfterAuth(); }}
+      toggle={(ref, enabled) => { if (subscriptions) changeDocument("settings", (current) => setProperty(current, ["enabledModels"], toggleSubscriptionModel(subscriptions, modelPatterns, ref, enabled))); }}
+      makeDefault={(model) => changeDocument("settings", (current) => setProperty(setProperty(current, ["defaultProvider"], model.provider), ["defaultModel"], model.id))} changeOverride={overrideModel} />;
+    else if (provider || (selection === "new" && entity?.kind === "provider")) {
+      const item = entity?.kind === "provider" ? entity : { kind: "provider" as const, name: name!, originalName: name!, raw: JSON.stringify(provider?.[1] ?? {}, null, 2), originalRaw: "" };
+      detail = <>
+        <Heading title={item.name || "添加供应商"} theme={theme} detail={project ? "在全局范围编辑供应商。" : undefined} action={item.originalName !== null && !project ? <Button label="删除供应商" theme={theme} disabled={blocked || !writable("models")} onPress={() => removeEntity("models", item.name)} /> : undefined} />
+        <EntityForm key={selection} {...item} existing={item.originalName !== null} value={objectOrNull(item.raw)} theme={theme} project={project} disabled={blocked || !writable("models")}
+          onName={(name) => setEntity({ ...item, name })} onRaw={(raw) => setEntity({ ...item, raw })} onValue={(next) => setEntity({ ...item, raw: JSON.stringify(next, null, 2) })} />
+        {sourceButton("models", "打开 models.json")}
+      </>;
+    } else detail = <ModelDefaults key={doc("settings")?.revision} theme={theme} project={project} disabled={settingsLocked} settings={settings} global={global} update={(key, value) => changeProperty("settings", [key], value)} editSource={sourceButton("settings", "打开 settings.json")} />;
+  } else if (tab === "skills" || tab === "plugins") {
+    const skills = tab === "skills";
+    const filteredPackages = packages.filter((pkg) => matches(search, pkg.source, pkg.version ?? undefined));
+    const targets = skills ? visibleResources.flatMap((resource) => {
+      const target = skillTarget(resource, workspaceId); return target ? [target] : [];
+    }) : packages.map((pkg) => ({ ...scope, source: pkg.source }));
+    const eligible = new Set(targets.filter(({ source }) => canCheckPackage(source)).map(packageKey)).size;
+    const selectedTarget = currentResource ? skillTarget(currentResource, workspaceId) : undefined;
+    const checkableSkill = skills && selectedTarget && canCheckPackage(selectedTarget.source) ? selectedTarget : undefined;
+    tools = <>
+      <Field theme={theme} search label={skills ? "搜索技能" : "搜索包或扩展"} placeholder={skills ? "搜索技能" : "搜索包或扩展"} value={search} onChangeText={setSearch} />
+      <View style={row}>
+        <Button label={skills ? "添加技能" : "添加插件"} theme={theme} disabled={blocked} onPress={() => openAdd("search")} />
+        <Button label={skills ? "批量操作" : "检查全部插件更新"} theme={theme} disabled={blocked || (skills ? !visibleResources.length : !eligible)} onPress={() => { if (skills) setBulkOpen(true); else checkPackages(targets); }} />
+        {!skills && <Button label="Pi 内置扩展" theme={theme} disabled={blocked} onPress={() => select("builtins")} />}
+        {sourceButton("settings", "settings.json")}
+      </View>
+      <SettingsSelect label={skills ? "筛选技能" : "筛选扩展"} value={resourceFilter} options={[{ label: "全部状态", value: "all" }, { label: "已启用", value: "enabled" }, { label: "已停用", value: "disabled" }]} onValueChange={setResourceFilter} disabled={blocked} />
+      {skills && <Modal open={bulkOpen} title="批量操作" onOpenChange={setBulkOpen}><Modal.Content>
+        <Caption theme={theme}>当前筛选结果：{visibleResources.length} 项技能，{eligible} 个可查更新的来源。</Caption>
+        <View style={row}>
+          <Button label="检查技能更新" theme={theme} disabled={blocked || !eligible} onPress={() => { setBulkOpen(false); checkPackages(targets); }} />
+          <Button label="启用筛选结果" theme={theme} disabled={settingsLocked || visibleResources.every(resourceEnabled)} onPress={() => { setBulkOpen(false); toggleResources(visibleResources.filter((r) => !resourceEnabled(r)), true); }} />
+          <Button label="停用筛选结果" theme={theme} disabled={settingsLocked || !visibleResources.some(resourceEnabled)} onPress={() => { setBulkOpen(false); toggleResources(visibleResources.filter(resourceEnabled), false); }} />
+        </View>
+      </Modal.Content></Modal>}
+    </>;
+    list = <>
+      {!skills && <>
+        <View style={{ padding: 8 }}><Caption theme={theme}>当前范围的包 · {filteredPackages.length}</Caption></View>
+        {filteredPackages.map((pkg) => rr(`package:${pkg.source}`, pkg.source, { detail: pkg.version ?? undefined, badge: checkBadge(versions[packageKey({ ...scope, source: pkg.source })]) ?? (pkg.enabled ? undefined : "停用") }))}
+      </>}
+      <View style={{ padding: 8 }}><Caption theme={theme}>{skills ? "技能" : "扩展"} · {visibleResources.length}</Caption></View>
+      {visibleResources.map((resource) => {
+        const target = skills ? skillTarget(resource, workspaceId) : undefined;
+        return rr(`resource:${resource.id}`, resource.name, { detail: resource.packageSource ?? (resource.scope === "global" ? "全局" : "项目"), badge: (target ? checkBadge(versions[packageKey(target)]) : undefined) ?? (resourceEnabled(resource) ? undefined : "停用") });
+      })}
+      {!visibleResources.length && (skills || !filteredPackages.length) ? emptySearch : null}
+    </>;
+    if (selection === "add") detail = <>
+      <Heading title={skills ? "添加技能" : "添加插件"} theme={theme} />
+      <View accessibilityRole="tablist" style={row}>
+        <TextTab label="查找或安装包" active={addMethod === "search"} disabled={blocked} theme={theme} onPress={() => setAddMethod("search")} />
+        <TextTab label="引用本地路径" active={addMethod === "local"} disabled={blocked} theme={theme} onPress={() => setAddMethod("local")} />
+      </View>
+      {addMethod === "local" ? <ReferencePath key={tab} theme={theme} kind={skills ? "skills" : "extensions"} current={stringList(settings[skills ? "skills" : "extensions"])} blocked={settingsLocked} onChange={(value) => changeProperty("settings", [skills ? "skills" : "extensions"], value)} /> :
+        <PackageInstall theme={theme} blocked={blocked} canAct={canManagePackages} search={(query) => rpcSearch({ query })} install={(source) => packageAction("install", source)} isInstalled={(source) => packages.some((pkg) => pkg.source === source)} />}
+    </>;
+    else if (!skills && selection === "builtins") detail = <>
+      <Heading title="Pi 内置扩展" detail="项目中的显式规则覆盖全局。" theme={theme} />
+      {["mcp", "llama.cpp", "codemode", "tool-search"].map((name) => {
+        const rules = stringList(settings.extensions); const inherited = project ? stringList(global.extensions) : [];
+        const rule = [...inherited, ...rules].filter((value) => value === `+builtin:${name}` || value === `-builtin:${name}`).at(-1);
+        return <SettingsSwitch key={name} label={name} value={rule !== `-builtin:${name}`} disabled={settingsLocked} onValueChange={(enabled) => changeProperty("settings", ["extensions"], [...rules.filter((value) => value !== `+builtin:${name}` && value !== `-builtin:${name}`), `${enabled ? "+" : "-"}builtin:${name}`])} />;
+      })}
+    </>;
+    else if (currentResource) detail = <ResourceDetail key={currentResource.id} theme={theme} resource={currentResource} enabled={resourceEnabled(currentResource)} blocked={blocked} canLoad={!settingsLocked} canEdit={!blocked} change={(value) => toggleResources([currentResource], value)} toggleInvocation={(value) => changeInvocation(currentResource, value)} open={() => openResource(currentResource, true)} previewText={() => openResource(currentResource)} preview={resourcePreview?.id === currentResource.id ? resourcePreview : undefined}
+      update={checkableSkill ? versions[packageKey(checkableSkill)] : undefined} onCheck={checkableSkill ? () => checkPackages([checkableSkill]) : undefined}
+      onUpdate={checkableSkill && checkableSkill.workspaceId === scope.workspaceId && canManagePackages ? () => packageAction("update", checkableSkill.source) : undefined} />;
+    else if (currentPackage) detail = <PackageDetail key={currentPackage.source} pkg={currentPackage} theme={theme} settings={settings} resources={resources.filter((resource) => resource.packageSource === currentPackage.source && resource.scope === (project ? "project" : "global"))} blocked={settingsLocked} canAct={canManagePackages} update={versions[packageKey({ ...scope, source: currentPackage.source })]}
+      onCheck={() => checkPackages([{ ...scope, source: currentPackage.source }])} onAction={(action) => packageAction(action, currentPackage.source)}
+      openResource={(resource) => select(`resource:${resource.id}`, resource.kind === "skill" ? "skills" : "plugins")}
+      setFilters={(key, rules) => {
+        const current = Array.isArray(settings.packages) ? settings.packages : [];
+        const index = current.findIndex((entry) => sourceOf(entry) === currentPackage.source); if (index < 0) return;
+        const entry = current[index]; changeProperty("settings", ["packages", index], { ...(isObject(entry) ? entry : { source: currentPackage.source }), [key]: rules });
+      }} />;
+    else detail = <Caption theme={theme}>{skills ? "选择技能查看详情。" : project ? "选择包或扩展查看详情。全局包请在全局范围管理。" : "选择包或扩展查看详情。"}</Caption>;
+  } else {
+    const visible = Object.entries(servers).filter(([name, value]) => matches(search, name, isObject(value) ? `${value.command ?? ""} ${value.url ?? ""}` : undefined)
+      && (resourceFilter === "all" || (resourceFilter === "disabled") === (isObject(value) && value.enabled === false)));
+    const entry = name && Object.hasOwn(servers, name) && isObject(servers[name]) ? servers[name] : undefined;
+    const mcpWritable = writable("mcp") && !blocked;
+    tools = <>
+      <Field theme={theme} search label="搜索服务器" placeholder="搜索服务器" value={search} onChangeText={setSearch} />
+      <SettingsSelect label="筛选服务器" value={resourceFilter} options={[{ label: "全部状态", value: "all" }, { label: "已启用", value: "enabled" }, { label: "已停用", value: "disabled" }]} onValueChange={setResourceFilter} disabled={blocked} />
+      <View style={row}><Button label="添加 MCP 服务器" theme={theme} disabled={!mcpWritable} onPress={() => { if (selection !== "add") openAdd("manual"); else setInDetail(true); }} />
+        <Button label="代码模式" theme={theme} disabled={blocked} onPress={() => select("codemode")} />{sourceButton("mcp", "mcp.json")}</View>
+    </>;
+    list = <>
+      <View style={{ padding: 8 }}><Caption theme={theme}>服务器 · {visible.length}</Caption></View>
+      {visible.map(([name, value]) => {
+        const entry = isObject(value) ? value : {};
+        const state = edits.includes("mcp") ? undefined : Object.hasOwn(mcpResults, name) ? mcpResults[name]?.state : undefined;
+        return rr(entityKey(name), name, { detail: `${project && !Object.hasOwn(localServers, name) ? "继承 · " : ""}${entry.url ? "HTTP" : entry.command ? "stdio" : "覆盖"}`,
+          badge: entry.enabled === false ? "停用" : state === "connected" ? "已连接" : state === "needs-auth" ? "需认证" : state === "failed" ? "失败" : undefined,
+          onPress: () => editEntity("mcp", name, isObject(localServers[name]) && Object.hasOwn(localServers, name) ? localServers[name] : entry.enabled === false ? { enabled: false } : {}) });
+      })}
+      {!visible.length ? emptySearch : null}
+    </>;
+    if (selection === "codemode") detail = <McpCodeMode theme={theme} project={project} settings={settings} global={global} mcp={mcpRaw} globalMcp={objectOrEmpty(snapshot?.globalMcp ?? "{}")}
+      settingsLocked={settingsLocked} mcpLocked={!mcpWritable} changeSettings={(path, value) => changeProperty("settings", path, value)} changeMcp={(path, value) => changeProperty("mcp", path, value)} />;
+    else if (selection === "add") {
+      const item: EntityDraft = entity ?? { kind: "mcp", name: "", originalName: null, raw: mcpSeed, originalRaw: mcpSeed };
+      detail = <>
+        <Heading title="添加 MCP 服务器" theme={theme} />
+        <View accessibilityRole="tablist" style={row}>
+          <TextTab label="手动配置" active={addMethod === "manual"} disabled={blocked} theme={theme} onPress={() => setAddMethod("manual")} />
+          <TextTab label="导入 JSON" active={addMethod === "json"} disabled={blocked} theme={theme} onPress={() => { if (stageEntity()) setAddMethod("json"); }} />
+        </View>
+        {addMethod === "json" ? <>
+          <Caption theme={theme}>合并 mcpServers，不覆盖同名服务器。</Caption>
+          <CodeInput label="要导入的 MCP JSON" text={importText} onChangeText={setImportText} theme={theme} readOnly={!mcpWritable} />
+          <View style={{ alignSelf: "flex-start" }}><Button label="合并到草稿" theme={theme} disabled={!mcpWritable || !importText.trim()} onPress={() => {
+            try { const value = mergeMcpImport(text("mcp"), importText); validateConfig("mcp", value, project); saveDraft("mcp", value); setImportText(""); setNotice("已合并到草稿。保存后生效。"); }
+            catch (e) { setError(errorMessage(e)); }
+          }} /></View>
+        </> : <EntityForm {...item} existing={false} value={objectOrNull(item.raw)} project={project} theme={theme} disabled={!mcpWritable}
+          onName={(name) => setEntity({ ...item, name })} onRaw={(raw) => setEntity({ ...item, raw })} onValue={(next) => setEntity({ ...item, raw: JSON.stringify(next, null, 2) })} />}
+      </>;
+    } else if (entry) {
+      const raw = JSON.stringify(name && Object.hasOwn(localServers, name) ? localServers[name] : entry?.enabled === false ? { enabled: false } : {}, null, 2);
+      const item = entity?.kind === "mcp" ? entity : { kind: "mcp" as const, name: name!, originalName: name!, raw, originalRaw: raw };
+      const probe = name && Object.hasOwn(mcpResults, name) ? mcpResults[name] : undefined;
+      const resultIsSaved = edits.includes("mcp") || entityDirty;
+      detail = <>
+        <Heading title={item.name || "添加 MCP 服务器"} theme={theme} detail={name && project && !Object.hasOwn(localServers, name) ? "修改启用状态或工具规则会创建项目覆盖。" : undefined} action={name && Object.hasOwn(localServers, name) ? <Button label="删除服务器" theme={theme} disabled={!mcpWritable} onPress={() => removeEntity("mcp", name)} /> : undefined} />
+        {name && !project && <View style={row}><Button label="测试连接" theme={theme} disabled={!canProbe("mcp") || entry?.enabled === false} onPress={() => ask("测试 MCP 连接？", "Pi 会运行该服务器的 stdio 命令或连接到它的 HTTP 地址，并列出工具。仅使用保存的全局条目，不复用 OAuth 凭据。", "开始测试", () => run(() => rpcProbe({ ...probeInput("mcp"), name }), (value) => setMcpResults((old) => ({ ...old, [name]: value }))))} />
+          {probe && <Caption theme={theme}>{resultIsSaved ? "保存前的测试：" : ""}{probe.state === "connected" ? `连接成功 · ${probe.tools.length} 个工具` : probe.state === "needs-auth" ? "需要认证。此测试不复用 OAuth 凭据，请在宿主的 Pi CLI 中登录并验证连接。" : "连接失败。请检查服务地址、命令和凭据。"}</Caption>}
+        </View>}
+        {probe?.state === "connected" && probe.tools.length > 0 && <Caption theme={theme} selectable>{probe.tools.join(" · ")}</Caption>}
+        <EntityForm key={selection} {...item} existing={item.originalName !== null} value={objectOrNull(item.raw)} project={project} theme={theme} disabled={!mcpWritable} tools={probe?.tools}
+          onName={(name) => setEntity({ ...item, name })} onRaw={(raw) => setEntity({ ...item, raw })} onValue={(next) => setEntity({ ...item, raw: JSON.stringify(next, null, 2) })} />
+      </>;
+    } else detail = <Caption theme={theme}>选择服务器查看配置。{project ? "连接测试在全局范围进行。" : "保存配置不会启动服务器。"}</Caption>;
+  }
+  const relevant = tab === "models" ? ["models", "settings"] as const : tab === "mcp" ? ["mcp", "settings"] as const : ["settings"] as const;
+  const invalid = relevant.filter((kind) => doc(kind)?.error);
+  return <View style={{ flex: 1, minHeight: 0, backgroundColor: c.surface0 }}>
+    <View style={{ paddingHorizontal: layout.compact ? 10 : 16, borderBottomWidth: 1, borderBottomColor: c.border, backgroundColor: c.surface1 }}>
+      <View style={{ ...row, justifyContent: "space-between", paddingVertical: 6 }}>
+        <View style={{ flex: layout.compact ? undefined : 1, width: layout.compact ? "100%" : undefined, minWidth: 96 }}><Heading theme={theme} title="Pi 设置" detail={layout.compact ? undefined : host.label} /></View>
+        <Pressable accessibilityRole="button" accessibilityLabel="全局 / 项目工作区" accessibilityState={{ disabled: blocked || dirty, expanded: scopeOpen }} disabled={blocked || dirty}
+          onPress={() => setScopeOpen(true)} style={{ flex: layout.compact ? 1 : undefined, minWidth: layout.compact ? 140 : 235, maxWidth: layout.compact ? undefined : 535, flexShrink: 1, minHeight: 34, paddingHorizontal: 8, paddingVertical: 5, borderWidth: 1, borderColor: c.border, borderRadius: 5, justifyContent: "center", opacity: blocked || dirty ? 0.6 : 1 }}>
+          <Text style={{ color: c.foreground, fontSize: 13 }}>{workspaceId ? `项目 · ${workspaces.find((w) => w.id === workspaceId)?.name ?? workspaceId}` : "全局范围"} ▾</Text>
+        </Pressable>
+        <Modal open={scopeOpen} title="全局 / 项目工作区" onOpenChange={setScopeOpen}><Modal.Content>
+          {[{ id: "", name: "全局范围", directory: "" }, ...workspaces].map((workspace) => <Pressable key={workspace.id} accessibilityRole="button" accessibilityLabel={workspace.name} accessibilityState={{ selected: workspace.id === workspaceId }}
+            onPress={() => { setScopeOpen(false); if (workspace.id === workspaceId) return; setEntity(null); setWorkspaceId(workspace.id); setSelection(empty[tab]); setInDetail(false); setSearch(""); setResourceFilter("all"); setImportText(""); setNotice(null); }}
+            style={{ paddingHorizontal: 8, paddingVertical: 6, borderRadius: 5, backgroundColor: workspace.id === workspaceId ? c.surface2 : undefined }}>
+            <Text style={{ color: c.foreground, fontSize: 14, fontWeight: "500" }}>{workspace.name}</Text>
+            {workspace.directory ? <Caption theme={theme}>{workspace.directory}</Caption> : null}
+          </Pressable>)}
+        </Modal.Content></Modal>
+        <Button label="刷新" theme={theme} disabled={blocked} onPress={() => {
+          if (dirty) ask("放弃未保存的草稿？", "此操作仅丢弃本页草稿，然后重新读取配置。", "放弃草稿并重新读取", () => { setEntity(null); setSelection(empty[tab]); setInDetail(false); void load(); });
+          else void load();
+        }} />
+      </View>
+      <View style={{ ...row, gap: 4 }}>{tabs.map((item) => <TextTab key={item.value} label={item.label} active={tab === item.value} disabled={blocked} theme={theme} onPress={() => switchTab(item.value)} />)}</View>
     </View>
-    <SettingsSection title="配置范围">
-      <SettingsCard>
-        <SettingsSelect label="全局 / 项目工作区" value={workspaceId} disabled={blocked || dirty}
-          options={[{ label: "全局", value: "" }, ...workspaces.map((w) => ({ label: `${w.name} · ${w.directory}`, value: w.id }))]}
-          onValueChange={(value) => { setWorkspaceId(value); setSearch(""); setNotice(null); }} />
-        <SettingsRow label={scopeHint} hint={snapshot ? `Agent：${snapshot.agentDir}${workspaceId ? `\n工作区：${snapshot.directory}` : ""}` : "正在确定宿主配置目录…"} />
-        <SettingsAction label={dirty ? "有未保存的草稿；先保存或放弃后才能切换范围" : "从磁盘重新读取"} hint="不会静默覆盖其他客户端的修改。"
-          actionLabel={dirty ? "放弃草稿并刷新" : "刷新"} disabled={blocked} onPress={() => { if (dirty) setDiscardOpen(true); else void load(); }} />
-      </SettingsCard>
-    </SettingsSection>
-    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>{tabs.map((item) => <Button key={item.value} label={item.label} onPress={() => { setTab(item.value); setSearch(""); }} theme={theme} active={tab === item.value} disabled={blocked} />)}</View>
-    {loading && <Text style={muted}>正在读取配置与资源…</Text>}
-    {busy && <Text style={muted}>正在准备或应用操作；联网包操作最长需要约 3 分钟，请勿重复点击。</Text>}
-    {error && <View style={{ gap: 8 }}><Text accessibilityRole="alert" selectable style={{ color: c.statusDanger, lineHeight: 20 }}>{error}</Text><Text style={muted}>错误不会被标为成功；草稿仍保留。若有版本冲突，请取消预览并重新读取。</Text></View>}
-    {notice && <Text accessibilityLiveRegion="polite" style={{ color: c.statusSuccess, lineHeight: 20 }}>{notice}</Text>}
     {snapshot && snapshot.warnings.length > 0 && <ConfigWarnings key={`${workspaceId}:${snapshot.agentDir}`} warnings={snapshot.warnings} theme={theme} layout={layout} />}
-    {snapshot && !loading && <>
-      {tab === "models" && <>
-        <SettingsSection title={workspaceId ? "项目模型默认值" : "全局模型默认值"}>
-          <SettingsCard>
-            <SettingsInput key={`provider-${doc("settings")?.revision}`} label="默认供应商" initialValue={typeof settings.defaultProvider === "string" ? settings.defaultProvider : ""}
-              placeholder={workspaceId && typeof global.defaultProvider === "string" ? `继承 ${global.defaultProvider}` : "例如 anthropic"} disabled={blocked || Boolean(doc("settings")?.error)} onChangeText={(value) => changeProperty("settings", ["defaultProvider"], value || undefined)} />
-            <SettingsInput key={`model-${doc("settings")?.revision}`} label="默认模型 ID" initialValue={typeof settings.defaultModel === "string" ? settings.defaultModel : ""}
-              placeholder={workspaceId && typeof global.defaultModel === "string" ? `继承 ${global.defaultModel}` : "例如 claude-sonnet-4-5"} disabled={blocked || Boolean(doc("settings")?.error)} onChangeText={(value) => changeProperty("settings", ["defaultModel"], value || undefined)} />
-            <SettingsSelect label="默认思考等级" hint={workspaceId ? `全局：${String(global.defaultThinkingLevel ?? "medium（Pi 默认）")}` : "实际可用等级由模型能力决定。"} value={typeof settings.defaultThinkingLevel === "string" ? settings.defaultThinkingLevel : "inherit"}
-              options={[{ label: workspaceId ? "继承全局" : "使用 Pi 默认值", value: "inherit" }, ...["off", "minimal", "low", "medium", "high", "xhigh", "max"].map((value) => ({ label: value, value }))]}
-              onValueChange={(value) => changeProperty("settings", ["defaultThinkingLevel"], value === "inherit" ? undefined : value)} disabled={blocked || Boolean(doc("settings")?.error)} />
-            <SettingsInput key={`enabled-${doc("settings")?.revision}`} label="启用模型范围" hint="逗号分隔，支持 provider/model 与 glob；清空表示不覆盖，[] 可在原始配置中显式设置。"
-              initialValue={stringList(settings.enabledModels).join(", ")} placeholder={workspaceId ? `继承：${stringList(global.enabledModels).join(", ") || "全部可用模型"}` : "全部可用模型"} onChangeText={(value) => changeProperty("settings", ["enabledModels"], value.trim() ? value.split(",").map((x) => x.trim()).filter(Boolean) : undefined)} disabled={blocked || Boolean(doc("settings")?.error)} />
-            <SettingsAction label="保存模型默认值" actionLabel="保存" disabled={blocked || !drafts.settings} onPress={() => saveDocument("settings")} />
-          </SettingsCard>
-        </SettingsSection>
-        <SettingsSection title="自定义供应商与模型">
-          <Text style={muted}>{workspaceId ? "Pi 原生只读取全局 models.json。这里仅供查看；切换到全局后可管理供应商。项目可覆盖上方模型默认值。" : "每个供应商可增删模型、修改协议、地址、密钥引用与原生高级字段。API Key 不校验、不执行。"}</Text>
-          <View style={{ gap: 10 }}>{Object.entries(isObject(objectOrEmpty(text("models")).providers) ? objectOrEmpty(text("models")).providers as JsonObject : {}).map(([name, entry]) => <SettingsCard key={name}>
-            <SettingsRow label={name} hint={isObject(entry) ? `${String(entry.baseUrl ?? "内置端点")} · ${Array.isArray(entry.models) ? entry.models.length : 0} 个自定义模型` : "无效的供应商条目"} />
-            <SettingsAction label="供应商配置" actionLabel={workspaceId ? "仅全局可编辑" : "编辑"} disabled={blocked || Boolean(workspaceId)} onPress={() => setEntity({ kind: "provider", name, value: isObject(entry) ? entry : {}, existing: true })} />
-            <SettingsAction label="移除此供应商配置（不会删除 auth.json 凭据）" actionLabel="删除" disabled={blocked || Boolean(workspaceId)} onPress={() => setDeleteEntity({ kind: "provider", name })} />
-          </SettingsCard>)}</View>
-          {!workspaceId && <Button label="添加供应商" theme={theme} disabled={blocked || Boolean(doc("models")?.error)} onPress={() => setEntity({ kind: "provider", name: "", value: { baseUrl: "https://api.example.com/v1", api: "openai-completions", apiKey: "${API_KEY}", models: [{ id: "model-id" }] }, existing: false })} />}
-          {documentActions("models", "models.json")}
-        </SettingsSection>
-        {documentActions("settings", "原生设置（含逐模型思考等级与其他选项）")}
-      </>}
-      {(tab === "skills" || tab === "plugins") && <>
-        <TextInput accessibilityLabel="搜索技能或插件" placeholder="按名称、路径或来源筛选" placeholderTextColor={c.foregroundMuted} value={search} onChangeText={setSearch}
-          style={{ color: c.foreground, backgroundColor: c.surface1, borderWidth: 1, borderColor: c.border, borderRadius: 7, padding: 12 }} />
-        {tab === "plugins" && <SettingsSection title={workspaceId ? "项目插件包" : "全局插件包"}>
-          <Text style={muted}>插件包可包含 extensions、skills、prompts 和 themes。安装 / 检查更新先下载到临时目录，应用前统一审阅。卸载只删除 Pi 管理的安装目录和本范围声明。</Text>
-          <SettingsCard><SettingsInput label="npm / Git 源" initialValue={source} placeholder="npm:@scope/pi-tools 或 git:github.com/user/repo@tag" disabled={blocked} onChangeText={setSource} />
-            <SettingsAction label="安装插件包" hint="下载需要网络；不运行 npm 安装脚本。请只安装你信任的代码。" actionLabel="下载并准备安装" disabled={blocked || !source.trim()} onPress={() => packageAction("install", source.trim())} /></SettingsCard>
-          {snapshot.packages.filter((p) => filter(p.source)).map((pkg) => <SettingsCard key={pkg.source}>
-            <SettingsRow label={pkg.source} hint={`${pkg.version ? `版本 ${pkg.version} · ` : ""}${pkg.path ?? "尚未安装 / 路径不可用"}`} />
-            <SettingsSwitch label="启用此包的全部资源" hint="停用会保存现有筛选，重新启用时恢复；不卸载文件。"
-              value={pkg.enabled} disabled={blocked} onValueChange={(enabled) => packageAction(enabled ? "enable" : "disable", pkg.source)} />
-            <SettingsAction label="检查并准备更新" hint="已固定版本的 npm 包不会自动升级；修改源版本后可重新安装。" actionLabel="检查 / 更新" disabled={blocked} onPress={() => packageAction("update", pkg.source)} />
-            <SettingsAction label="卸载包（保留其他范围配置）" actionLabel="准备卸载" disabled={blocked} onPress={() => packageAction("remove", pkg.source)} />
-          </SettingsCard>)}
-          {snapshot.packages.length === 0 && <Text style={muted}>此范围尚未配置插件包。项目继承的全局包可在全局范围管理。</Text>}
-          <Button label="资源筛选与本地路径引用" theme={theme} disabled={blocked} onPress={() => setEditor({ title: "settings.json · packages / extensions", kind: "settings", text: text("settings"), original: text("settings"), revision: doc("settings")!.revision })} />
-          <SettingsCard>{["mcp", "llama.cpp", "codemode", "tool-search"].map((name) => <SettingsSwitch key={name} label={`Pi 内置：${name}`} value={(() => {
-              const localRules = stringList(settings.extensions); const inheritedRules = workspaceId ? stringList(global.extensions) : [];
-              const rule = [...inheritedRules, ...localRules].filter((value) => value === `+builtin:${name}` || value === `-builtin:${name}`).at(-1);
-              return rule !== `-builtin:${name}`;
-            })()} disabled={blocked || Boolean(doc("settings")?.error)}
-            hint="切换内置扩展；项目显式规则覆盖全局规则。" onValueChange={(enabled) => {
-              const rules = stringList(settings.extensions).filter((rule) => rule !== `+builtin:${name}` && rule !== `-builtin:${name}`);
-              rules.push(`${enabled ? "+" : "-"}builtin:${name}`); saveDocument("settings", setProperty(text("settings"), ["extensions"], rules));
-            }} />)}</SettingsCard>
-        </SettingsSection>}
-        <SettingsSection title={tab === "skills" ? "已发现的技能" : "独立扩展与包内扩展"}>
-          <Text style={muted}>{tab === "skills" ? "发现 Pi 目录、.agents/skills、配置路径和已安装包内技能。作用域开关写入 settings.json，不删除技能。自动调用开关会修改原始 SKILL.md，影响该文件的所有使用者。" : "扩展代码不会在此页面加载。启停是 Pi 资源筛选规则；项目可以覆盖继承的全局规则。"}</Text>
-          {snapshot.resources.filter((resource) => resource.kind === (tab === "skills" ? "skill" : "extension") && filter(`${resource.name} ${resource.path} ${resource.packageSource ?? ""}`)).map((resource) => <SettingsCard key={resource.id}>
-            <SettingsRow label={resource.name} hint={`${resource.scope === "global" ? "全局" : "项目"}${resource.packageSource ? ` · ${resource.packageSource}` : ""}\n${resource.path}${resource.description ? `\n${resource.description}` : ""}`} />
-            <SettingsSwitch label="在当前范围加载此资源" value={resource.enabled} onValueChange={(enabled) => toggleResource(resource, enabled)} disabled={blocked || Boolean(doc("settings")?.error)} />
-            {resource.kind === "skill" && <SettingsSwitch label="允许模型自动调用" hint="关闭后仍可通过 /skill:name 手动调用；修改技能文件，不是项目覆盖。" value={resource.modelInvocation} disabled={blocked} onValueChange={(enabled) => { void openResource(resource, enabled); }} />}
-            <SettingsAction label={resource.kind === "skill" ? "技能内容" : "扩展源码（只读）"} actionLabel={resource.kind === "skill" ? "查看 / 编辑" : "查看"} disabled={blocked} onPress={() => { void openResource(resource); }} />
-          </SettingsCard>)}
-          {!snapshot.resources.some((resource) => resource.kind === (tab === "skills" ? "skill" : "extension")) && <Text style={muted}>没有发现资源。可添加本地路径引用，或到插件页安装包含技能 / 扩展的 Pi 包。</Text>}
-          {documentActions("settings", tab === "skills" ? "技能路径 / 包资源筛选" : "扩展路径 / 包资源筛选")}
-        </SettingsSection>
-        {tab === "skills" && <SettingsSection title="安装或更新技能包"><SettingsCard>
-          <SettingsInput label="技能包源" placeholder="npm:package 或 git:github.com/user/skills" initialValue={source} disabled={blocked} onChangeText={setSource} />
-          <SettingsAction label="通过 Pi 包安装技能" hint="支持包含 skills/ 或 pi.skills 清单的 Pi 包；已安装包在插件页检查更新、卸载与筛选。" actionLabel="下载并准备安装" disabled={blocked || !source.trim()} onPress={() => packageAction("install", source.trim())} />
-        </SettingsCard></SettingsSection>}
-      </>}
-      {tab === "mcp" && <SettingsSection title={workspaceId ? "项目 MCP（含全局继承）" : "全局 MCP"}>
-        <Text style={muted}>管理 Pi 原生 mcp.json 的 stdio / HTTP 配置和工具暴露方式。项目同名条目替换全局条目；无传输字段的条目仅覆盖 enabled / exposure / toolExposure。此页面不连接服务器或执行认证流程。</Text>
-        {Object.entries(workspaceId ? effectiveMcp(objectOrEmpty(snapshot.globalMcp), objectOrEmpty(text("mcp"))) : effectiveMcp({}, objectOrEmpty(text("mcp")))).map(([name, entry]) => {
-          const localServers = objectOrEmpty(text("mcp")).mcpServers; const local = isObject(localServers) && Object.hasOwn(localServers, name);
-          return <SettingsCard key={name}>
-            <SettingsRow label={name} hint={`${workspaceId && !local ? "继承全局 · " : ""}${isObject(entry) ? String(entry.command ?? entry.url ?? "项目覆盖") : "无效配置"}`} />
-            <SettingsSwitch label="启用服务器" value={!isObject(entry) || entry.enabled !== false} disabled={blocked || Boolean(doc("mcp")?.error)} onValueChange={(enabled) => {
-              const raw = local && isObject(localServers) && isObject(localServers[name]) ? localServers[name] : {};
-              saveDocument("mcp", setProperty(text("mcp"), ["mcpServers", name], { ...raw, enabled }));
-            }} />
-            <SettingsSelect label="工具暴露" value={isObject(entry) && typeof entry.exposure === "string" ? entry.exposure : "codemode"} options={["codemode", "deferred", "direct", "hidden"].map((value) => ({ value, label: value }))} disabled={blocked || Boolean(doc("mcp")?.error)} onValueChange={(exposure) => {
-              const raw = local && isObject(localServers) && isObject(localServers[name]) ? localServers[name] : {}; saveDocument("mcp", setProperty(text("mcp"), ["mcpServers", name], { ...raw, exposure }));
-            }} />
-            <SettingsAction label="编辑服务器配置" actionLabel={workspaceId && !local ? "创建项目覆盖" : "编辑"} disabled={blocked} onPress={() => setEntity({ kind: "mcp", name, value: local && isObject(localServers) && isObject(localServers[name]) ? localServers[name] : workspaceId ? { enabled: true } : isObject(entry) ? entry : {}, existing: true })} />
-            <SettingsAction label={workspaceId ? "删除项目条目后恢复继承全局" : "删除服务器配置（保留认证文件）"} actionLabel="删除" disabled={blocked || !local} onPress={() => setDeleteEntity({ kind: "mcp", name })} />
-          </SettingsCard>;
-        })}
-        <Button label="添加 MCP 服务器" theme={theme} disabled={blocked || Boolean(doc("mcp")?.error)} onPress={() => setEntity({ kind: "mcp", name: "", value: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "."], exposure: "codemode" }, existing: false })} />
-        {documentActions("mcp", "mcp.json（支持粘贴整个 mcpServers 配置）")}
-      </SettingsSection>}
-      {tab === "preferences" && <SettingsSection title="页面与安全设置">
-        <SettingsCard>
-          <SettingsSwitch label="写入前显示 diff 并二次确认" hint="默认开启。关闭后保存、启停、安装与更新会在完成预检后自动应用；仍然检查版本冲突。关闭此开关本身也须按原设置确认。"
-            value={objectOrEmpty(text("preferences")).confirmDiff !== false} disabled={blocked || Boolean(doc("preferences")?.error)} onValueChange={(value) => changeProperty("preferences", ["confirmDiff"], value)} />
-          <SettingsInput key={`agent-${doc("preferences")?.revision}`} label="Pi agent 目录" hint={`留空自动发现：${snapshot.defaultAgentDir}。支持绝对路径与 ~/；这里操作的是选定宿主，不是客户端本机。`}
-            initialValue={snapshot.preferences.agentDir} placeholder={snapshot.defaultAgentDir} onChangeText={(value) => changeProperty("preferences", ["agentDir"], value)} disabled={blocked || Boolean(doc("preferences")?.error)} />
-          <SettingsInput key={`executable-${doc("preferences")?.revision}`} label="Pi 可执行文件" hint="默认 pi，必须支持原生 Pi 包命令；仅一个可执行文件路径，不接受 shell 命令或参数。建议 Pi 1.2.0+。"
-            initialValue={snapshot.preferences.piExecutable} onChangeText={(value) => changeProperty("preferences", ["piExecutable"], value)} disabled={blocked || Boolean(doc("preferences")?.error)} />
-          <SettingsAction label="保存页面设置" actionLabel="保存" disabled={blocked || !drafts.preferences} onPress={() => saveDocument("preferences")} />
-        </SettingsCard>
-        <Text style={muted}>本页偏好保存在默认 agent 目录的 zeonest-pi-settings.json；不会向 Pi settings.json 注入 UI 字段。目录覆盖只影响这个管理页面，不改变 Paseo provider 启动环境。</Text>
-        {documentActions("preferences", "页面偏好原始文件")}
-      </SettingsSection>}
-    </>}
-    {entity && !preview && <EntityEditor initial={entity} theme={theme} busy={busy} onClose={() => setEntity(null)} onSave={saveEntity} />}
-    <Modal open={editor !== null && !preview} title={editor?.readOnly ? "查看资源" : "编辑配置"} onOpenChange={(open) => { if (!open && !busy) { if (editor?.text !== editor?.original && !editor?.readOnly) { setError("草稿已保留；使用「放弃编辑」或保存后关闭。"); } else setEditor(null); } }}>
+    {error && <Text accessibilityRole="alert" selectable style={{ color: c.statusDanger, paddingHorizontal: 12, paddingVertical: 8 }}>{error}</Text>}
+    {invalid.map((kind) => <View key={kind} style={{ ...row, paddingHorizontal: 12, paddingVertical: 5 }}><View style={{ flex: 1, minWidth: 120 }}><Caption theme={theme}>{doc(kind)?.error}</Caption></View>{sourceButton(kind, "修复原始配置")}</View>)}
+    {snapshot ? <Pane theme={theme} compact={layout.compact} inDetail={inDetail} onBack={() => { if (!blocked && stageEntity()) setInDetail(false); }} tools={tools} list={list} detail={detail} revision={`${tab}:${selection}`} /> :
+      <View style={{ flex: 1, padding: 16 }}><Caption theme={theme}>{loading ? "正在读取配置…" : "无法读取配置。请刷新重试。"}</Caption></View>}
+    <View style={{ ...row, justifyContent: "space-between", paddingHorizontal: layout.compact ? 10 : 16, paddingVertical: 8, borderTopWidth: 1, borderTopColor: c.border, backgroundColor: c.surface1 }}>
+      <View style={{ flex: 1, minWidth: 112 }}><Text accessibilityLiveRegion="polite" numberOfLines={2} style={{ fontSize: 12, color: notice ? c.statusSuccess : c.foregroundMuted }}>{busy ? "正在处理…" : notice ?? (dirty ? "有未保存的草稿" : project ? snapshot?.directory ?? "项目范围" : "全局范围")}</Text></View>
+      {entityDirty && <Button label="撤销条目编辑" theme={theme} disabled={blocked} onPress={() => { setEntity(null); setError(null); if (selection === "new") { setSelection(empty[tab]); setInDetail(false); } }} />}
+      <Button label="保存" theme={theme} disabled={blocked || !dirty} onPress={saveAll} primary />
+    </View>
+    <Modal open={editor !== null && !preview} title={editor?.resource ? "编辑技能" : "编辑原始配置"} onOpenChange={(open) => { if (!open && !busy && editor?.text === editor?.original) setEditor(null); }}>
       <Modal.Content>
-        <Text selectable style={muted}>{editor?.title}</Text>
-        <Text style={muted}>{editor?.resource?.kind === "skill" ? "修改源 SKILL.md，影响该文件的所有使用者。" : "未知字段与注释保留；只会写入这里展示的文件。不要在共享屏幕中暴露凭据。"}</Text>
-        {editor && <CodeInput text={editor.text} theme={theme} readOnly={editor.readOnly || busy} onChangeText={(value) => setEditor({ ...editor, text: value })} />}
-        {error && <Text style={{ color: c.statusDanger }}>{error}</Text>}
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
-          <Button label={editor?.readOnly ? "关闭" : "放弃编辑"} theme={theme} disabled={busy} onPress={() => setEditor(null)} />
-          {!editor?.readOnly && <Button label="保存并预览改动" theme={theme} disabled={busy || editor?.text === editor?.original} onPress={() => {
+        <Caption theme={theme} selectable>{editor?.title}</Caption>
+        <Caption theme={theme}>{editor?.resource ? "保存会修改技能源文件。" : "原始配置可能含凭据；不要共享屏幕。"}</Caption>
+        {editor && <CodeInput text={editor.text} theme={theme} readOnly={busy} onChangeText={(text) => setEditor({ ...editor, text })} />}
+        {error && <Text accessibilityRole="alert" style={{ color: c.statusDanger }}>{error}</Text>}
+        <View style={row}>
+          <Button label="放弃编辑" theme={theme} disabled={busy} onPress={() => setEditor(null)} />
+          <Button label={editor?.resource ? "保存技能" : "加入草稿"} theme={theme} disabled={busy || editor?.text === editor?.original} primary onPress={() => {
             if (!editor) return;
-            if (editor.kind) saveDocument(editor.kind, editor.text);
+            if (editor.kind) { saveDraft(editor.kind, editor.text); setEditor(null); }
             else if (editor.resource) void prepare(() => rpcPrepareResource({ ...scope, id: editor.resource!.id, text: editor.text, revision: editor.revision }));
-          }} />}
+          }} />
         </View>
       </Modal.Content>
     </Modal>
-    <Modal open={discardOpen} title="放弃未保存的草稿？" onOpenChange={setDiscardOpen}><Modal.Content>
-      <Text style={muted}>只丢弃本页未保存的编辑，不修改磁盘配置。</Text>
-      <Button label="放弃草稿并重新读取" theme={theme} onPress={() => { setDiscardOpen(false); setEntity(null); setEditor(null); void load(); }} />
-    </Modal.Content></Modal>
-    <Modal open={deleteEntity !== null && !preview} title="准备删除配置" onOpenChange={(open) => { if (!open && !busy) setDeleteEntity(null); }}><Modal.Content>
-      <Text style={muted}>将删除 {deleteEntity?.name} 的{deleteEntity?.kind === "provider" ? "供应商" : "服务器"}配置。不会删除 auth.json 或 mcp-auth.json；下一步仍按 diff 确认设置处理。</Text>
-      <Button label="准备删除" theme={theme} disabled={busy} onPress={removeEntity} />
-    </Modal.Content></Modal>
-    <DiffModal preview={preview} theme={theme} busy={busy} error={error} onCancel={() => { void cancelPreview(); }} onCommit={() => { if (preview) void apply(preview, true); }} />
-  </ScrollView>;
+    <Modal open={confirmation !== null} title={confirmation?.title ?? "确认操作"} onOpenChange={(open) => { if (!open) setConfirmation(null); }}>
+      <Modal.Content><Caption theme={theme}>{confirmation?.message}</Caption><View style={row}>
+        <Button label="取消" theme={theme} onPress={() => setConfirmation(null)} />
+        {confirmation && <Button label={confirmation.label} theme={theme} onPress={confirmation.run} primary />}
+      </View></Modal.Content>
+    </Modal>
+    <DiffModal preview={preview} theme={theme} busy={busy} error={error} onCancel={() => { void cancelPreview(); }} onCommit={() => { if (preview && !running.current) void apply(preview, true); }} />
+  </View>;
+}
+
+function TextTab({ label, active, disabled, theme, onPress }: { label: string; active: boolean; disabled: boolean; theme: PluginSurfaceProps["theme"]; onPress(): void }) {
+  const c = theme.colors;
+  return <Pressable accessibilityRole="tab" accessibilityLabel={label} accessibilityState={{ selected: active, disabled }} disabled={disabled} onPress={onPress} style={{ minHeight: 36, justifyContent: "center", paddingHorizontal: 10, borderBottomWidth: 2, borderBottomColor: active ? c.accent : "transparent" }}>
+    <Text style={{ color: active ? c.foreground : c.foregroundMuted, fontSize: 13, fontWeight: active ? "600" : "400" }}>{label}</Text>
+  </Pressable>;
 }

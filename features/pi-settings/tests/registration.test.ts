@@ -7,7 +7,7 @@ import { listWorkspaces, readSnapshot } from "../shared/contracts";
 test("configuration RPCs register while business is disabled and teardown blocks late initialization", async () => {
   const handlers = new Map<string, (input: any, context: any) => any>();
   const cleanup = contributeSettings({ handle: (contract: { name: string }, handler: (input: any, context: any) => any) => handlers.set(contract.name, handler) } as unknown as PluginServerContext);
-  assert.equal(handlers.size, 8);
+  assert.equal(handlers.size, 17);
   cleanup(); cleanup();
   await assert.rejects(async () => handlers.get(readSnapshot.name)!({}, { paseo: {} }), /服务已停止/);
 });

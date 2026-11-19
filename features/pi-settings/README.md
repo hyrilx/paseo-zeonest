@@ -1,21 +1,20 @@
 # Pi 设置
 
-在 Paseo 左侧侧边栏提供「Pi 设置」页面，管理选定宿主上的 Pi 原生配置。也可从 Zeonest 功能配置入口进入；新增功能默认关闭，关闭时配置页面和支撑配置的 RPC 仍然可用。启用后的侧边栏与 Command Center 入口随 Zeonest 整体重载生效。
+在 Paseo 侧边栏或 Command Center 打开「Pi 设置」，管理选定宿主上的 Pi 原生配置。Zeonest 的子功能配置入口只管理本插件的偏好，例如 agent 目录、Pi 可执行文件和 diff 确认。子功能默认关闭；关闭时仍可编辑这些偏好。启停侧边栏与 Command Center 入口需要重载 Zeonest。
 
-面向原生 MCP、托管 npm/git 目录和包命令的 **Pi 1.2.0+**，Paseo SDK 保持 **0.15.4**。不内嵌、安装或启动另一份 Pi SDK。页面的目录覆盖不改变 Paseo provider 启动 Pi 时使用的环境变量。
+原生 MCP 配置和托管 npm/git 包面向 **Pi 1.2.0+**。模型请求和 MCP 连接检查使用宿主的 Pi CLI；订阅管理需要能从配置的可执行文件定位到 **Pi 1.5.2 npm 安装目录**。Paseo SDK 保持 **0.15.4**。页面中的目录覆盖不改变 Paseo 启动 Pi 时使用的环境变量。
 
 ## 页面能力
 
-按 [agegr/pi-web](https://github.com/agegr/pi-web) 的设置分区与列表/详情管理方式组织，调研基于 `174bff967807cdb59abb0204198d3d7cc19c862d`。这是使用 Paseo 原生 React Native Settings 和 Modal 重新实现的配置管理页，不导入参考项目的 Next.js 服务或浏览器组件。
+参考 [agegr/pi-web](https://github.com/agegr/pi-web) `1e5357377a5a4f3055a941399530502ecc84232d` 的设置页。宽屏左侧搜索和选条目，右侧编辑详情；compact 下先看列表，进入详情后可返回。底部始终可保存，模型、技能、插件和 MCP 之间切换时保留未保存的配置草稿。界面使用 Paseo、React Native 和宿主主题。
 
 | 分区 | 能力 |
 | --- | --- |
-| 配置范围 | 全局 / 所选宿主的项目工作区，包含工作区分页；使用工作区实际目录，worktree 配置不写回主仓库 |
-| 模型 | 默认 provider、model、思考等级、启用模型模式；全局增删供应商和单个自定义模型，配置协议、地址、密钥引用、上下文窗口与输出上限；原始 JSON 支持 modelOverrides、费用和其他 Pi 原生选项 |
-| 技能 | 发现、搜索、查看/编辑 SKILL.md；当前范围的加载规则和源文件的自动调用开关；通过 npm/git Pi 包安装技能，包更新/卸载在插件分区操作 |
-| 插件 | 查看所选范围的 Pi 包、安装路径和版本；联网安装、检查并准备更新、卸载、启停；停用保存资源筛选备份，重新启用时还原；独立扩展只读查看和加载开关；Pi 内置扩展开关 |
-| MCP | stdio / HTTP 服务器增删改、启停、exposure、完整 JSON 导入；可编辑 args、env、headers、oauth、toolExposure 等字段；显示全局继承与项目覆盖 |
-| 页面设置 | diff 二次确认开关、agent 目录覆盖、Pi 可执行文件位置；无效偏好文件可显式修复 |
+| 配置范围 | 在右上角选择全局或项目。选择器显示工作区名称和实际目录，写入 worktree 时不改主仓库配置 |
+| 模型 | 搜索目录、设置默认模型、编辑启用范围、发送固定测试请求。可刷新订阅目录、登录或退出订阅、逐个切换模型和覆盖上下文窗口。自定义模型可编辑协议、地址、请求头、图片限制、兼容选项和思考等级映射；订阅模型可编辑 Pi 支持的覆盖项 |
+| 技能 | 在列表筛选、批量启停或检查筛选结果所属包的更新；预览、编辑 `SKILL.md` 和设置自动调用。从「添加技能」搜索或安装包、引用本地路径 |
+| 插件 | 查看包版本、资源和加载规则，在当前范围单个或批量检查版本，预检安装、更新、卸载与启停；管理本地扩展和 Pi 内置扩展。从「添加插件」查找、按源安装或引用本地路径 |
+| MCP | 从「添加 MCP 服务器」手动配置或合并导入 JSON；在列表筛选状态，在详情编辑传输、认证和暴露规则，测试已保存并启用的全局服务器。代码模式提供启动策略、工具模式、内联预算和 MCP 按需启用设置，不检测宿主沙箱 |
 
 Pi **不支持项目级 `models.json`**。项目范围只编辑模型默认值、思考等级和启用范围，供应商文件仅在全局范围可编辑。项目 MCP 同名完整配置替换全局配置；没有传输字段的项目条目只覆盖 `enabled`、`exposure`、`toolExposure`。
 
@@ -25,7 +24,7 @@ Pi **不支持项目级 `models.json`**。项目范围只编辑模型默认值�
 
 ## 文件与配置生效
 
-自动发现全局目录：宿主进程 `PI_CODING_AGENT_DIR`，否则 `~/.pi/agent`。可在页面设置中用绝对路径或 `~/` 覆盖。
+自动发现全局目录：宿主进程 `PI_CODING_AGENT_DIR`，否则 `~/.pi/agent`。可在 Zeonest 的 Pi 设置功能偏好中用绝对路径或 `~/` 覆盖。
 
 - 全局：`<agent-dir>/settings.json`、`models.json`、`mcp.json`。
 - 项目：`<workspace>/.pi/settings.json`、`.pi/mcp.json`。
@@ -39,10 +38,10 @@ settings/models 使用 JSONC 属性编辑保留无关字段、注释、缩进和
 
 ## diff 与写入流程
 
-所有正式配置写入都经过同一个 `prepare → preview → commit` 路径，包括普通保存、资源开关、技能内容/自动调用、供应商/MCP 增删、包声明及页面偏好。
+正式配置文件编辑经过 `prepare → preview → commit`，包括普通保存、资源开关、技能内容、供应商/MCP 编辑、包声明及功能偏好。订阅登录、退出和目录刷新单独确认，由 Pi SDK 写入认证和目录缓存，不经过配置 diff。
 
 1. 读取文件与内容 revision，解析并校验新内容；准备阶段不改正式配置。
-2. 服务端保存精确的新旧文本，返回文件路径、unified diff、增删行数和一个随机确认 token。弹窗默认展开 diff；可以暂时隐藏，避免在共享屏幕中泄露密钥。
+2. 服务端保存精确的新旧文本，返回文件路径、unified diff、增删行数和一个随机确认 token。弹窗默认收起完整 diff；查看前请确认没有共享屏幕，以免显示密钥。
 3. diff 二次确认默认开启。关闭它本身仍按**旧设置**确认；关闭后自动提交相同预检产生的 token，不绕过路径和并发校验。
 4. 应用前再次检查目录、符号链接、文件 revision 和安装树内容指纹。其他客户端/进程已经修改文件时拒绝覆盖，保留草稿让用户重新读取。
 5. 正式配置采用同目录临时文件与原子 rename；全局配置使用 0600，已有项目文件保留权限。多文件/安装树发生可捕获的中途失败时尝试回滚；回滚不覆盖后来出现的外部改动，不能完整回滚时明确报告需人工恢复的路径。
@@ -53,7 +52,7 @@ settings/models 使用 JSONC 属性编辑保留无关字段、注释、缩进和
 
 ## 联网安装和安全边界
 
-页面中的「下载并准备安装」「检查 / 更新」「准备卸载」在临时目录运行宿主的 Pi 包命令。它们只把所选包声明及对应托管安装目录放入暂存 agent，使用空项目目录；不会复制 auth.json、mcp-auth.json 或加载全局扩展。
+安装、准备更新和卸载在临时目录运行宿主的 Pi 包命令。它们只把所选包声明及对应托管安装目录放入暂存 agent，使用空项目目录；不会复制 auth.json、mcp-auth.json 或加载全局扩展。
 
 - 使用 argv 数组执行，不经 shell；只接受 `npm:`、`git:` 和 HTTPS Git 源。不会调用 Pi 自更新命令。
 - npm 生命周期脚本通过命令参数及环境变量禁用；不使用用户 settings.json 中的自定义 npm wrapper。
@@ -64,15 +63,26 @@ settings/models 使用 JSONC 属性编辑保留无关字段、注释、缩进和
 
 暂存是写入流程隔离，**不是安全沙箱**。Pi/npm/git 仍具有 daemon 用户的系统权限，可能访问宿主的 registry/Git 凭据和网络。下载的插件/技能在未来由 Pi 加载时也拥有 Pi 的完整权限。需要安装脚本的包可能无法工作，本页面不会自动降级成执行脚本。
 
-相较参考页面，本实现不提供 provider 登录、凭据刷新、模型在线连通性测试、技能市场检索、MCP 连接测试/工具调用/OAuth 登录等运行时流程；认证仍使用 Pi 原生 CLI/TUI。可配置 MCP OAuth 字段，但不读取或修改 token 文件。非标准 MCP 适配器的私有配置不在管理范围。旧式 npm 全局安装目录仅显示为未托管，不会擅自卸载系统级 npm 包。
+「搜索 npm」和「检查版本」只读取公共元数据。npm 返回未固定版本的包的最新版；未固定的公共 GitHub 源比较本地 HEAD 和默认分支提交。检查不下载包、不执行 Git、不使用私有注册表凭据。技能按其所属包检查，同一包只查一次；本地路径、固定版本和其他 Git 源没有远端比较结果。npm 搜索只返回带 `pi-package` 关键词的包。旧式 npm 全局安装目录显示为未托管，本页不会卸载其中的包。
+
+### 运行检查与认证
+
+- 读取目录使用宿主 Pi 的已保存配置和认证，不发送模型请求。Pi 解析凭据时可能执行配置中的 `!command`。测试模型只发送固定提示词，可能产生费用；不会发送工作区上下文或加载扩展。
+- MCP 测试只读取选中的已保存、已启用的全局条目。测试在临时目录运行 Pi，可能执行 stdio 命令或连接 HTTP 地址，只列出工具，不调用工具，也不复用 `mcp-auth.json`。依赖 OAuth 登录状态或工作目录相对路径的服务，请用实际会话中的 Pi CLI 验证。项目 MCP 不在页面内运行。
+- 订阅目录初次读取不发送模型消息；刷新会请求选中的供应商，Pi 可能更新 OAuth 凭据。在全局范围可启动 Pi 原生 OAuth 登录，根据提示打开浏览器、输入设备代码或提交回调；退出只移除所选供应商保存的 OAuth 凭据。Zeonest 不返回 access/refresh token，不覆盖现有 API Key 凭据。当前使用的 Pi 安装不受支持时，可在宿主用 `pi auth` 管理连接。
+- 订阅模型沿用 Pi 的启用范围：空列表或无匹配代表全部可用；页面会阻止停用最后一个模型。停用 glob 命中的单个模型时，该规则会转为仍启用模型的精确项，并保留已解析的思考等级；之后新增的模型不会自动加入该规则。项目可修改模型范围，但订阅连接和上下文覆盖属于全局配置。
+- MCP OAuth 登录仍由 Pi CLI/TUI 管理。页面只编辑 OAuth 客户端参数和凭据引用。
 
 ## 代码入口
 
 - `client/index.ts`：可关闭的原生侧边栏、screen、Command Center 注册。
-- `client/settings.tsx`：始终可用的 Zeonest 子功能配置入口。
-- `client/page.tsx`、`components.tsx`：原生设置页、编辑器与 diff Modal。
+- `client/settings.tsx`：独立的 Zeonest 子功能偏好入口。
+- `client/page.tsx`、`client/layout.tsx`、`client/components.tsx`：设置页布局、草稿、保存与 diff 弹窗。
+- `client/models.tsx`、`client/entity.tsx`、`client/resources.tsx`：模型、供应商/MCP 与资源编辑界面。
 - `server/settings.ts`：始终可用的配置 RPC，惰性创建服务并清理资源。
-- `server/service.ts`、`files.ts`、`discovery.ts`：配置预检/提交、文件事务、资源发现与包暂存。
+- `server/service.ts`、`server/files.ts`、`server/discovery.ts`：配置预检与提交、文件事务、资源发现与包暂存。
+- `server/inspect.ts`：运行 Pi 检查和读取 npm/GitHub 公共元数据。
+- `client/subscriptions.tsx`、`server/subscriptions.ts`、`server/subscription-worker.ts`：通过宿主 Pi SDK 读取或刷新订阅目录、处理 OAuth。
 - `shared/`：RPC/schema 和纯配置文本处理；不依赖壳或其他子功能。
 
 运行依赖 `diff`、`jsonc-parser`、`minimatch`、`yaml` 随 bundle 打包；React/Paseo/Zod 保持宿主 external。React test renderer 仅用于功能 UI 行为测试，不进入运行包。
@@ -83,15 +93,13 @@ settings/models 使用 JSONC 属性编辑保留无关字段、注释、缩进和
 npm run check
 npm pack --dry-run --ignore-scripts
 
-# 可选的真实 Pi CLI 契约测试（只使用临时 agent 与 localhost 测试 registry）
+# 可选的真实 Pi CLI/SDK 契约测试（临时 agent，测试服务均在本地）
 ZEONEST_PI_CLI=/absolute/path/to/pi/dist/cli.js \
-  node --import tsx --test features/pi-settings/tests/package-cli.test.ts
+  node --import tsx --test features/pi-settings/tests/{inspect-cli,package-cli,subscriptions}.test.ts
 ```
 
-自动化覆盖：配置 diff/确认开关、取消/过期不写入、冲突拒写、项目隔离、MCP 继承、JSONC/未知字段保留、技能 YAML、资源规则、包筛选备份、安装目录暂存及回滚、服务 teardown、分页、真实 React 保存/取消/失败交互、模型编辑、警告折叠/限高/范围切换及主题 token。
+自动化覆盖配置预检/diff/确认、取消与冲突拒写、作用域隔离、资源规则、包暂存与回滚，以及模型选择、技能批量操作、npm 搜索、MCP 测试和导入的界面交互。
 
-开发时在 macOS / Node 26.12.0 / Pi 1.2.0 上执行了真实 CLI 的 npm 安装/更新/卸载契约测试，使用仅有测试 fixture 的本地 registry，验证安装脚本与扩展均未运行；不修改正式 Pi 配置。常规 `npm run check` 在未设置 `ZEONEST_PI_CLI` 时显式跳过此宿主相关测试。Git 远端、需要构建脚本的第三方包、Windows/Linux 未实机验证。
+在 macOS / Pi 1.5.2 上，以隔离配置验证了真实 CLI 的模型目录、固定模型请求、stdio MCP 工具发现和包安装、更新、卸载，以及真实 SDK 的订阅目录读取和模型范围解析。登录、刷新和退出使用模拟供应商验证，未连接真实订阅或使用日常 Pi 配置。未设置 `ZEONEST_PI_CLI` 时，常规检查跳过三项真实 CLI/SDK 测试。
 
-主动 LSP 探测时多数 TS/TSX 文件没有可用的 language client；不将空诊断缓存视为通过，使用统一 TypeScript 检查和构建补充验证。
-
-**未安装、启用或重载插件；未执行真实 Paseo 的宽屏、compact/mobile、明暗主题及出错状态验收。** React/主题 token 测试不替代真实宿主检查。获准安装后应额外检查：侧边栏选定宿主、工作区目录/继承提示、窄屏编辑器、包含密钥的 diff、双客户端冲突、断线、取消安装、停用后仍能打开配置，以及 `/reload` 后 Pi 的实际加载结果。
+已用独立浏览器预览检查宽屏、compact、明暗主题和模拟失败状态。**未安装、启用或重载插件，未在真实 Paseo 宿主验收。**
