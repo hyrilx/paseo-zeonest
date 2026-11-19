@@ -7,7 +7,7 @@ description: 在 Zeonest 仓库新增、修改或移除静态集成的 Paseo 子
 
 先读仓库根目录的 `AGENTS.md`、`docs/architecture.md`、`docs/features.md` 和 `docs/development.md`。本 skill 所在目录向上三级为仓库根目录。
 
-开始修改前，必须加载并遵循 [Git 协作技能](../zeonest-git/SKILL.md)，先确定任务分支和独立 worktree；每轮有改动的对话独立提交，获授权合并 main 时将整个任务 squash 为一个提交，推送 main 时一并同步开发分支。后续开发、验证和提交均在自己的 worktree 中执行；主干合并推送、开发分支处理完成后，必须核对并移除本任务创建的开发与集成 worktree。
+开始修改前，必须加载并遵循 [Git 协作技能](../zeonest-git/SKILL.md)，先确定任务分支和独立 worktree；每轮有改动的对话独立提交，获授权合入主干时将整个任务 squash 为一个提交，默认推送 main 并同步开发分支；合入过程复用已有独立 worktree 与有效验证结果，按实际改动补充检查。后续开发、验证和提交均在自己的 worktree 中执行；主干合并推送、开发分支处理完成后，必须核对并移除本任务创建的 worktree。
 
 ## 工作方式
 
