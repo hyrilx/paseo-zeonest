@@ -6,12 +6,15 @@ import type { preferencesSchema } from "../../shared/settings";
 
 const require = createRequire(import.meta.url);
 const compiled = await build({
-  stdin: { contents: `export { registerFileActivity } from './runtime'; export { ActivityView, FileActivityPanel } from './panel'; export { WorkspaceFileActivityPanel, listWorkspaceAgents } from './workspace'; export { FileActivitySettings } from './settings'; export { setSettingsState, setPaseo } from '@getpaseo/plugin/client';`, resolveDir: fileURLToPath(new URL("../../client", import.meta.url)), loader: "tsx" },
+  stdin: { contents: `export { registerFileActivity } from './runtime'; export { ActivityView, FileActivityPanel } from './panel'; export { WorkspaceFileActivityPanel, listWorkspaceAgents } from './workspace'; export { FileActivitySettings } from './settings'; export { setSettingsState, setPaseo } from '@getpaseo/plugin/client'; export { setCopyText } from '@getpaseo/plugin/client/ui'; export { Code } from './code';`, resolveDir: fileURLToPath(new URL("../../client", import.meta.url)), loader: "tsx" },
   bundle: true, write: false, platform: "node", format: "cjs", jsx: "automatic", external: ["react", "react/jsx-runtime", "@tanstack/react-query"],
   plugins: [{ name: "native-host", setup(builder) {
     builder.onResolve({ filter: /^(@getpaseo\/plugin\/client(?:\/ui)?|react-native)$/ }, (args) => ({ path: args.path, namespace: "test-host" }));
     builder.onLoad({ filter: /.*/, namespace: "test-host" }, () => ({ loader: "js", contents:
       `import React from 'react'; const component = name => props => React.createElement(name, props, props.children);
+       export const Platform = { OS: 'web' }, Icon = component('Icon');
+       export const Modal = Object.assign(component('Modal'), {Content:component('ModalContent')});
+       let copy = async () => {}; export const copyText = text => copy(text); export const setCopyText = fn => {copy = fn;};
        export const Text = component('Text'), View = component('View'), Pressable = component('Pressable'), ScrollView = component('ScrollView');
        export const SettingsAction = component('SettingsAction'), SettingsCard = component('SettingsCard'), SettingsRow = component('SettingsRow'), SettingsSection = component('SettingsSection'), SettingsSelect = component('SettingsSelect'), SettingsSwitch = component('SettingsSwitch');
        export const FlatList = props => React.createElement('FlatList', {data:props.data}, props.ListHeaderComponent, props.data.length ? props.data.map(item => React.createElement(React.Fragment, {key:props.keyExtractor(item)}, props.renderItem({item}))) : props.ListEmptyComponent);
@@ -27,11 +30,13 @@ const module = { exports: {} as {
   WorkspaceFileActivityPanel: typeof import("../../client/workspace").WorkspaceFileActivityPanel;
   listWorkspaceAgents: typeof import("../../client/workspace").listWorkspaceAgents;
   FileActivitySettings: typeof import("../../client/settings").FileActivitySettings;
+  Code: typeof import("../../client/code").Code;
+  setCopyText(copy: (text: string) => Promise<void>): void;
   setSettingsState(state: SettingsState<typeof preferencesSchema>): void;
   setPaseo(paseo: PluginClientContext["paseo"]): void;
 } };
 new Function("require", "module", "exports", compiled.outputFiles[0]!.text)(require, module, module.exports);
-export const { registerFileActivity, ActivityView, FileActivityPanel, WorkspaceFileActivityPanel, listWorkspaceAgents, FileActivitySettings, setSettingsState, setPaseo } = module.exports;
+export const { registerFileActivity, ActivityView, FileActivityPanel, WorkspaceFileActivityPanel, listWorkspaceAgents, FileActivitySettings, Code, setCopyText, setSettingsState, setPaseo } = module.exports;
 export function workspaceProps(): PluginWorkspacePanelProps {
   return { ...panelProps(), context: "workspace", params: {} };
 }

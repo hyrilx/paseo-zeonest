@@ -90,18 +90,18 @@ function textOutput(value: unknown): string | undefined {
 function details(tool: ToolItem): FileDetail[] {
   const detail = tool.detail;
   if (detail.type === "read") return [{ path: detail.filePath, kind: "read", content: detail.content, range: readRange(object(detail)) }];
-  if (detail.type === "write") return [{ path: detail.filePath, kind: "edit", content: detail.content, note: "写入操作；记录未说明此前是否存在该文件，归入修改。正文为工具提交的内容。" }];
+  if (detail.type === "write") return [{ path: detail.filePath, kind: "edit", content: detail.content, note: "写入未区分新增或覆盖，按修改记录；正文为提交内容。" }];
   if (detail.type === "edit") {
     const files = detail.unifiedDiff ? patchDetails(detail.unifiedDiff) : [];
     if (files.length) return files;
     const diff = detail.unifiedDiff ?? (detail.oldString !== undefined && detail.newString !== undefined ? snippet(detail.filePath, detail.oldString, detail.newString) : undefined);
     return [{ path: detail.filePath, kind: "edit", diff,
-      note: detail.unifiedDiff ? undefined : "差异来自工具提供的替换片段；行号相对于片段。超过 400000 字符或计算超过 50ms 的片段不在客户端生成 diff。" }];
+      note: detail.unifiedDiff ? undefined : diff ? "替换片段差异，行号相对于片段。" : "未生成片段差异：缺少替换正文、片段过大或计算超时。" }];
   }
   if (detail.type === "search") {
     if (detail.toolName === "web_search") return [];
     return [...new Set(detail.filePaths ?? [])].map((path) => ({ path, kind: "read", range: "搜索：" + detail.query,
-      note: "工具返回的匹配路径；未提供每个文件的确切查看范围。" }));
+      note: "搜索匹配路径，未记录确切查看范围。" }));
   }
   if (detail.type !== "unknown") return [];
   const name = tool.name.toLowerCase().split(/[./]/).at(-1) ?? "";
@@ -113,15 +113,15 @@ function details(tool: ToolItem): FileDetail[] {
   if (["read", "read_file"].includes(name)) return [{ path, kind: "read", content: textOutput(detail.output), range: readRange(input) }];
   if (["delete_file", "remove_file"].includes(name)) return [{ path, kind: "delete", note: "工具未提供删除前的正文。" }];
   if (name === "create_file") return [{ path, kind: "create", content }];
-  if (["write", "write_file"].includes(name)) return [{ path, kind: "edit", content, note: "写入操作；无法从记录确认新增还是覆盖，归入修改。" }];
+  if (["write", "write_file"].includes(name)) return [{ path, kind: "edit", content, note: "写入未区分新增或覆盖，按修改记录。" }];
   if (["edit", "edit_file"].includes(name)) {
     const replacements = Array.isArray(input.edits) ? input.edits : [input];
     return replacements.map((replacement) => {
       const part = object(replacement);
       const before = string(part.oldText) ?? string(part.old_string) ?? string(part.oldString);
       const after = string(part.newText) ?? string(part.new_string) ?? string(part.newString);
-      return { path, kind: "edit", diff: before !== undefined && after !== undefined ? snippet(path, before, after) : undefined,
-        note: "差异来自工具提供的替换片段；行号相对于片段。" };
+      const diff = before !== undefined && after !== undefined ? snippet(path, before, after) : undefined;
+      return { path, kind: "edit", diff, note: diff ? "替换片段差异，行号相对于片段。" : "未生成片段差异：缺少替换正文、片段过大或计算超时。" };
     });
   }
   return [];

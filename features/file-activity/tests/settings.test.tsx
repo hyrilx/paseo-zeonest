@@ -74,5 +74,7 @@ test("loading, invalid and failed reads offer recovery, with data and scroll lim
   assert.equal(resets, 1); assert.match(strings(root), /损坏/);
   await update(root, { ...ready(), status: "error", error: "offline" });
   assert.match(strings(root), /offline/);
-  for (const text of ["SDK 0.15.4", "未提供随对话滚动联动", "不读取磁盘", "已有面板按会话保留", "工作区侧边栏", "查看当前会话文件活动"]) assert.ok(strings(root).includes(text), text);
+  assert.ok(!strings(root).includes("SDK 0.15.4"));
+  await act(async () => control(root, "SettingsAction", "打开方式与记录范围").props.onPress());
+  for (const text of ["SDK 0.15.4", "未提供随对话滚动联动", "不读取磁盘", "已有面板保留各会话", "工作区侧边栏", "查看当前会话文件活动"]) assert.ok(strings(root).includes(text), text);
 });

@@ -10,13 +10,14 @@ import type { PluginAgentPanelContribution, PluginClientContext, PluginCommandCe
 import type { Observe } from "../client/panel";
 import { preferencesSchema } from "../shared/settings";
 import { WorkspaceFileActivityPanel, listWorkspaceAgents, registerFileActivity, setPaseo, setSettingsState, workspaceProps } from "./fixtures/host";
+import { button, pick, picker } from "./fixtures/interactions";
 import { deferred, fakeAgent, flush, record, tool, user } from "./fixtures/timeline";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 type Paseo = PluginClientContext["paseo"];
 type DirectoryPage = Awaited<ReturnType<Paseo["agents"]["list"]>>;
 type WorkspaceContribution = Extract<PluginWorkspacePanelContribution, { context?: "workspace" }>;
-const control = (root: ReactTestRenderer, type: string, label: string) => root.root.findAll((node) => String(node.type) === type && node.props.label === label)[0]!;
+
 const choice = (id: string) => ({ id, label: "会话 " + id });
 const entry = (id: string, workspaceId = "w", archivedAt: string | null = null) => ({ agent: { id, workspaceId, title: id, provider: "pi", archivedAt } });
 const directory = (entries: ReturnType<typeof entry>[], nextCursor: string | null = null): DirectoryPage => ({ requestId: "r", entries, pageInfo: { nextCursor, prevCursor: null, hasMore: nextCursor !== null } } as unknown as DirectoryPage);
@@ -101,28 +102,28 @@ test("workspace panel requires an explicit choice for multiple agents, preserves
   const loadAgents = async () => [choice("a"), choice("b")];
   const view = await mount(<WorkspaceFileActivityPanel {...props} observe={host.observe} loadAgents={loadAgents} />);
   assert.deepEqual(host.refs, []); assert.match(JSON.stringify(view.root.toJSON()), /请选择要查看的会话/);
-  await act(async () => control(view.root, "SettingsSelect", "会话").props.onValueChange("a"));
-  await act(async () => control(view.root, "SettingsSelect", "查看范围").props.onValueChange("all"));
-  await act(async () => control(view.root, "SettingsSelect", "会话").props.onValueChange("b"));
-  assert.equal(control(view.root, "SettingsSelect", "查看范围").props.value, "latest");
-  await act(async () => control(view.root, "SettingsSelect", "排序").props.onValueChange("path"));
-  await act(async () => control(view.root, "SettingsSelect", "会话").props.onValueChange("a"));
-  assert.equal(control(view.root, "SettingsSelect", "查看范围").props.value, "all");
-  assert.equal(control(view.root, "SettingsSelect", "排序").props.value, "time");
+  await pick(view.root, "会话", "a");
+  await act(async () => button(view.root, "全会话").props.onPress());
+  await pick(view.root, "会话", "b");
+  assert.equal(button(view.root, "最新轮").props.accessibilityState.checked, true);
+  await pick(view.root, "排序", "path");
+  await pick(view.root, "会话", "a");
+  assert.equal(button(view.root, "全会话").props.accessibilityState.checked, true);
+  assert.equal(picker(view.root, "排序").props.value, "time");
   assert.deepEqual(host.refs, ["a", "b", "a"]); assert.deepEqual(host.released, ["a", "b"]);
   assert.ok(!JSON.stringify(saved).includes("private body"));
   await view.stop();
   props.tab = { ...props.tab, state: saved };
   const restored = await mount(<WorkspaceFileActivityPanel {...props} observe={host.observe} loadAgents={loadAgents} />);
-  assert.equal(control(restored.root, "SettingsSelect", "会话").props.value, "a");
-  assert.equal(control(restored.root, "SettingsSelect", "查看范围").props.value, "all");
+  assert.equal(picker(restored.root, "会话").props.value, "a");
+  assert.equal(button(restored.root, "全会话").props.accessibilityState.checked, true);
   await restored.stop();
 });
 test("single-agent workspace auto-selects; invalid persisted state falls back safely", async () => {
   for (const state of [null, { selectedAgentId: 123, views: { unsafe: "bad" } }]) {
     const host = setup(); const props = workspaceProps(); props.tab = { ...props.tab, state };
     const view = await mount(<WorkspaceFileActivityPanel {...props} observe={host.observe} loadAgents={async () => [choice("a")]} />);
-    assert.equal(control(view.root, "SettingsSelect", "会话").props.value, "a"); assert.deepEqual(host.refs, ["a"]);
+    assert.equal(picker(view.root, "会话").props.value, "a"); assert.deepEqual(host.refs, ["a"]);
     await view.stop();
   }
 });
@@ -132,14 +133,14 @@ test("workspace loading, error/retry and empty directory states are actionable",
   assert.match(JSON.stringify(view.root.toJSON()), /正在读取工作区会话/);
   await act(async () => { pending.reject(new Error("offline")); await flush(); }); await settle();
   assert.match(JSON.stringify(view.root.toJSON()), /会话列表读取失败.*offline/);
-  await act(async () => { control(view.root, "SettingsAction", "重新读取会话列表").props.onPress(); await flush(); }); await settle();
+  await act(async () => { button(view.root, "重新读取会话列表").props.onPress(); await flush(); }); await settle();
   assert.match(JSON.stringify(view.root.toJSON()), /当前工作区没有可用会话/); assert.deepEqual(host.refs, []);
   await view.stop();
 });
 test("unavailable persisted selection never silently switches to another agent", async () => {
   const host = setup(); const props = workspaceProps(); props.tab = { ...props.tab, state: { selectedAgentId: "missing", views: {} } };
   const view = await mount(<WorkspaceFileActivityPanel {...props} observe={host.observe} loadAgents={async () => [choice("a")]} />);
-  assert.equal(control(view.root, "SettingsSelect", "会话").props.value, "missing"); assert.deepEqual(host.refs, []);
+  assert.equal(picker(view.root, "会话").props.value, "missing"); assert.deepEqual(host.refs, []);
   assert.match(JSON.stringify(view.root.toJSON()), /所选会话当前不可用/); await view.stop();
 });
 test("plugin cleanup aborts workspace directory requests and ignores their late results", async () => {

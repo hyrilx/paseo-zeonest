@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { Text, View } from "react-native";
 import { usePaseo, useTabState, type PluginClientContext, type PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
-import { SettingsAction, SettingsCard, SettingsSelect } from "@getpaseo/plugin/client/ui";
+import { Action, Picker } from "./controls";
 import { useQuery } from "@tanstack/react-query";
 import { z } from "zod";
 import { FileActivityPanel, viewSchema, type Observe } from "./panel";
@@ -53,19 +53,20 @@ export function WorkspaceFileActivityPanel(props: PluginWorkspacePanelProps & { 
   };
   const colors = props.theme.colors;
   return <View style={{ flex: 1, minHeight: 0, backgroundColor: colors.surface0 }}>
-    <View style={{ padding: props.layout.compact ? 8 : 12, gap: 8 }}>
-      <SettingsCard>
-        <SettingsSelect label="会话" value={agentId} options={[
+    <View style={{ paddingHorizontal: props.layout.compact ? 8 : 12, paddingVertical: 4, gap: 4, borderBottomWidth: 1, borderBottomColor: colors.border }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+        <View style={{ flex: 1, minWidth: 0 }}><Picker label="会话" value={agentId} colors={colors} compact={props.layout.compact} options={[
           { label: "选择会话", value: "" },
           ...(!available && agentId ? [{ label: "所选会话（当前不可用）", value: agentId }] : []),
           ...agents.map((agent) => ({ label: agent.label, value: agent.id })),
-        ]} onValueChange={(selectedAgentId) => setState({ ...state, selectedAgentId })} />
-        <SettingsAction label="重新读取会话列表" actionLabel="刷新" disabled={query.isFetching} onPress={() => { void query.refetch(); }} />
-      </SettingsCard>
+        ]} onChange={(selectedAgentId) => setState({ ...state, selectedAgentId })} /></View>
+        <Action label="重新读取会话列表" text="" icon="RefreshCw" colors={colors} compact={props.layout.compact}
+          disabled={query.isFetching} onPress={() => { void query.refetch(); }} />
+      </View>
       {query.isPending ? <Text style={{ color: colors.foregroundMuted }}>正在读取工作区会话…</Text> : null}
       {query.isError ? <Text accessibilityLiveRegion="polite" style={{ color: colors.statusDanger }}>会话列表读取失败：{query.error.message}</Text> : null}
       {!query.isPending && !query.isError && !agents.length ? <Text style={{ color: colors.foregroundMuted }}>当前工作区没有可用会话。</Text> : null}
-      {!agentId && agents.length > 1 ? <Text style={{ color: colors.foregroundMuted }}>请选择要查看的会话。侧边栏入口不提供当前会话 ID。</Text> : null}
+      {!agentId && agents.length > 1 ? <Text style={{ color: colors.foregroundMuted }}>请选择要查看的会话。</Text> : null}
       {agentId && !available && !query.isPending ? <Text style={{ color: colors.statusWarning }}>所选会话当前不可用，请重新选择或刷新列表。</Text> : null}
     </View>
     {available ? <FileActivityPanel key={props.host.id + ":" + props.workspaceId + ":" + agentId} {...props} context="agent" agentId={agentId} params={{ agentId }} tab={tab} observe={props.observe} /> : null}

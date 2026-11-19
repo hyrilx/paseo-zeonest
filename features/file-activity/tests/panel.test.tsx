@@ -6,12 +6,13 @@ import type { PluginAgentPanelContribution, PluginClientContext, SettingsState }
 import { preferencesSchema } from "../shared/settings";
 import { createTimelineStore, type TimelineStore } from "../client/timeline";
 import { ActivityView, FileActivityPanel, panelProps, registerFileActivity, setPaseo, setSettingsState } from "./fixtures/host";
+import { button, pick, picker } from "./fixtures/interactions";
 import { deferred, fakeAgent, flush, page, record, tool, user } from "./fixtures/timeline";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const defaults = preferencesSchema.parse({});
 const control = (root: ReactTestRenderer, type: string, label: string) => root.root.findAll((node) => String(node.type) === type && node.props.label === label)[0]!;
-const button = (root: ReactTestRenderer, label: string) => root.root.findAll((node) => String(node.type) === "Pressable" && node.props.accessibilityLabel === label)[0]!;
+
 const data = (root: ReactTestRenderer) => root.root.findAll((node) => String(node.type) === "FlatList")[0]!.props.data as { path: string }[];
 const initial = () => [user(1, "first", "第一项任务"), record(tool("r", { type: "read", filePath: "a", offset: 2, limit: 3, content: "read" }), 2, "first"),
   user(3, "second", "第二项任务"), record(tool("e", { type: "edit", filePath: "z", oldString: "old", newString: "new" }), 4, "second")];
@@ -31,14 +32,14 @@ test("latest tracks new turns, manual holds the selection and all covers loaded 
   assert.deepEqual(data(root).map((item) => item.path), ["z"]);
   await act(async () => source.set({ ...source.get(), records: [...initial(), user(5, "third"), record(tool("n", { type: "read", filePath: "new" }), 6, "third")] }));
   assert.deepEqual(data(root).map((item) => item.path), ["new"]);
-  await act(async () => control(root, "SettingsSelect", "查看范围").props.onValueChange("manual"));
-  await act(async () => control(root, "SettingsSelect", "轮次").props.onValueChange("first"));
+  await act(async () => button(root, "手动选轮").props.onPress());
+  await pick(root, "轮次", "first");
   await act(async () => source.set({ ...source.get(), records: [...source.get().records, user(7, "fourth")] }));
   assert.deepEqual(data(root).map((item) => item.path), ["a"]);
   await act(async () => button(root, "下一轮").props.onPress());
   assert.deepEqual(data(root).map((item) => item.path), ["z"]);
   await act(async () => button(root, "上一轮").props.onPress());
-  await act(async () => control(root, "SettingsSelect", "查看范围").props.onValueChange("all"));
+  await act(async () => button(root, "全会话").props.onPress());
   assert.equal(data(root).length, 3);
   assert.ok(!JSON.stringify(saved).includes("第一项任务"));
   assert.ok(!JSON.stringify(saved).includes("old"));
@@ -51,25 +52,25 @@ test("manual defaults lock the initial turn; evicted selections never silently s
   assert.deepEqual(data(root).map((item) => item.path), ["z"]);
   await act(async () => source.set({ ...source.get(), records: [user(5, "new")], partial: true }));
   assert.deepEqual(data(root), []);
-  assert.equal(control(root, "SettingsSelect", "轮次").props.value, "second");
+  assert.equal(picker(root, "轮次").props.value, "second");
   assert.match(JSON.stringify(root.toJSON()), /所选轮次不在已加载历史/);
 });
 test("category/order controls, details, range and in-panel turn jump work without timeline navigation", async (t) => {
   const source = sourceWithRecords(); const root = await render(source); t.after(async () => { await act(async () => root.unmount()); });
   await act(async () => button(root, "修改 z").props.onPress());
-  assert.match(JSON.stringify(root.toJSON()), /-old/);
-  await act(async () => control(root, "SettingsSelect", "查看范围").props.onValueChange("all"));
-  await act(async () => control(root, "SettingsSelect", "排序").props.onValueChange("path"));
+  assert.match(JSON.stringify(root.toJSON()), /"old"/);
+  await act(async () => button(root, "全会话").props.onPress());
+  await pick(root, "排序", "path");
   assert.deepEqual(data(root).map((item) => item.path), ["a", "z"]);
-  await act(async () => control(root, "SettingsSwitch", "降序").props.onValueChange(true));
+  await act(async () => button(root, "降序").props.onPress());
   assert.deepEqual(data(root).map((item) => item.path), ["z", "a"]);
   await act(async () => button(root, "修改").props.onPress());
   assert.deepEqual(data(root).map((item) => item.path), ["a"]);
   await act(async () => button(root, "查询 a").props.onPress());
   assert.match(JSON.stringify(root.toJSON()), /起始行 2/);
   await act(async () => button(root, "查看第 1 轮的活动").props.onPress());
-  assert.equal(control(root, "SettingsSelect", "查看范围").props.value, "manual");
-  assert.equal(control(root, "SettingsSelect", "轮次").props.value, "first");
+  assert.equal(button(root, "手动选轮").props.accessibilityState.checked, true);
+  assert.equal(picker(root, "轮次").props.value, "first");
 });
 test("invalid persisted tab state falls back; empty/error/partial states remain visible in compact and light themes", async (t) => {
   const source = createTimelineStore(); const props = panelProps();
@@ -82,12 +83,25 @@ test("invalid persisted tab state falls back; empty/error/partial states remain 
   assert.match(JSON.stringify(root.toJSON()), /正在读取文件活动/);
   await act(async () => source.set({ records: [], status: "error", partial: true, warning: "历史缺页" }));
   assert.match(JSON.stringify(root.toJSON()), /历史缺页/);
-  await act(async () => control(root, "SettingsAction", "重新读取会话历史").props.onPress());
+  await act(async () => button(root, "重新读取会话历史").props.onPress());
   assert.equal(retries, 1);
   await act(async () => source.set({ records: [], status: "ready", partial: false, warning: "" }));
   assert.match(JSON.stringify(root.toJSON()), /当前范围没有可识别/);
   for (const label of ["新增", "删除", "修改", "查询"]) await act(async () => button(root, label).props.onPress());
   assert.match(JSON.stringify(root.toJSON()), /请选择要显示的活动类别/);
+});
+test("toolbar exposes selected states, per-kind counts and a compact unsuccessful filter", async (t) => {
+  const source = sourceWithRecords(); source.set({ ...source.get(), records: [...initial(), record(tool("failed", { type: "edit", filePath: "failed.ts" }, "failed"), 5, "second")] });
+  const root = await render(source); t.after(async () => { await act(async () => root.unmount()); });
+  assert.equal(button(root, "最新轮").props["aria-checked"], true);
+  assert.equal(button(root, "修改").props["aria-checked"], true);
+  assert.equal(data(root).length, 2);
+  await act(async () => button(root, "显示未完成请求").props.onPress());
+  assert.equal(data(root).length, 1);
+  assert.equal(button(root, "显示未完成请求").props["aria-checked"], false);
+  assert.equal(button(root, "修改").findAll((node) => String(node.type) === "Text").at(-1)!.children.join(""), "1");
+  await act(async () => button(root, "手动选轮").props.onPress());
+  assert.equal(button(root, "下一轮").props.disabled, true);
 });
 test("agent panel unmount and plugin cleanup release observers, including pending release", async () => {
   const host = fakeAgent(); host.setRead(async () => page(initial()));

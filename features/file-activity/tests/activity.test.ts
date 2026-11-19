@@ -14,7 +14,7 @@ test("native reads retain requested ranges, edits are fragment diffs, ambiguous 
   assert.match(projection.activities[1]!.note!, /片段/);
   assert.equal(projection.activities[2]!.kind, "edit");
   assert.equal(projection.activities[2]!.content, "");
-  assert.match(projection.activities[2]!.note!, /未说明/);
+  assert.match(projection.activities[2]!.note!, /新增或覆盖/);
 });
 test("apply_patch expands multi-file create/edit/delete and move without filesystem reads", () => {
   const patch = "*** Begin Patch\n*** Add File: new file.txt\n+hello\n+world\n*** Update File: old.txt\n*** Move to: moved.txt\n@@\n-old\n+new\n*** Delete File: gone.txt\n*** End Patch";
