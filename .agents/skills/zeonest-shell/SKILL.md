@@ -7,7 +7,7 @@ description: 维护 Zeonest 的最小 Paseo 容器外壳、原生功能管理页
 
 先读仓库根目录的 `AGENTS.md`、`docs/architecture.md`、`docs/development.md`。本 skill 所在目录向上三级为仓库根目录。
 
-开始修改前，必须加载并遵循 [Git 协作技能](../zeonest-git/SKILL.md)，先确定任务分支和独立 worktree，新建分支推送远端并设置 upstream；每轮有改动的对话独立提交并同步开发分支，获授权合并 main 时将整个任务 squash 为一个提交，推送 main 时一并同步开发分支。后续开发、验证和提交均在自己的 worktree 中执行；主干合并推送、开发分支处理完成后，必须核对并移除本任务创建的开发与集成 worktree。
+开始修改前，必须加载并遵循 [Git 协作技能](../zeonest-git/SKILL.md)，先确定任务分支和独立 worktree；每轮有改动的对话独立提交，获授权合并 main 时将整个任务 squash 为一个提交，推送 main 时一并同步开发分支。后续开发、验证和提交均在自己的 worktree 中执行；主干合并推送、开发分支处理完成后，必须核对并移除本任务创建的开发与集成 worktree。
 
 ## 保持职责
 
