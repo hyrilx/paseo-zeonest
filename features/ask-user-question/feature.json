@@ -1,0 +1,11 @@
+{
+  "id": "ask-user-question",
+  "name": "问答选项回顾",
+  "description": "在已完成的 ask_user_question 折叠块中保留全部选项、说明和用户答案。",
+  "version": "0.1.2",
+  "tags": [
+    "界面",
+    "Pi"
+  ],
+  "author": "Zeonest"
+}

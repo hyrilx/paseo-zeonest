@@ -31,6 +31,7 @@
   },
   "devDependencies": {
     "@getpaseo/plugin": "0.15.4",
+    "@tanstack/react-query": "5.90.21",
     "@types/node": "^22.19.0",
     "@types/react": "~19.2.0",
     "@types/react-test-renderer": "^19.3.1",
