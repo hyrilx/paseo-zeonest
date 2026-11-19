@@ -1,11 +1,13 @@
 ---
 name: zeonest-feature
-description: 在 Zeonest 仓库新增、修改或移除静态集成的 Paseo 子功能；处理原生贡献、配置页、元信息和验证。涉及 UI 时必须使用相关前端技能和 agent-browser 进行视觉辅助开发与验收。
+description: 在 Zeonest 仓库新增、修改或移除静态集成的 Paseo 子功能；处理原生贡献、配置页、元信息和验证。开发前必须使用 zeonest-git 管理任务分支、worktree 与逐轮提交。涉及 UI 时必须使用相关前端技能和 agent-browser 进行视觉辅助开发与验收。
 ---
 
 # Zeonest 子功能开发
 
 先读仓库根目录的 `AGENTS.md`、`docs/architecture.md`、`docs/features.md` 和 `docs/development.md`。本 skill 所在目录向上三级为仓库根目录。
+
+开始修改前，必须加载并遵循 [Git 协作技能](../zeonest-git/SKILL.md)，先确定任务分支和独立 worktree；每轮有改动的对话独立提交，获授权合并 main 时将整个任务 squash 为一个提交。后续开发、验证和提交均在自己的 worktree 中执行。
 
 ## 工作方式
 
