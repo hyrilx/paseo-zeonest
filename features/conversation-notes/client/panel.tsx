@@ -1,125 +1,166 @@
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { Pressable, Text, View, type TextInput as NativeTextInput } from "react-native";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { Platform, Pressable, StyleSheet, Text, View, type TextInput as NativeTextInput } from "react-native";
 import type { PluginButtonContentProps } from "@getpaseo/plugin/client";
-import { copyText, Icon, ScrollView, TextInput } from "@getpaseo/plugin/client/ui";
+import { copyText, Icon, Markdown, TextInput } from "@getpaseo/plugin/client/ui";
 import { MAX_NOTE_LENGTH } from "../shared/contracts";
-import { toMarkdown } from "./blocks";
-import type { Cursor, SessionNote } from "./note";
+import { formatMarkdown, toggleTaskMarker, type Format, type Selection, type TaskMarker } from "./markdown";
+import type { SessionNote } from "./note";
+import { previewMarkdown, type PreviewPart } from "./preview";
+
+type Colors = PluginButtonContentProps["theme"]["colors"];
+const shortcuts: { format: Format; icon: string; label: string }[] = [
+  { format: "bold", icon: "Bold", label: "加粗" },
+  { format: "heading", icon: "Heading", label: "标题" },
+  { format: "strike", icon: "Strikethrough", label: "删除线" },
+  { format: "bullet", icon: "List", label: "无序列表" },
+  { format: "checklist", icon: "ListTodo", label: "待办列表" },
+  { format: "toggle-task", icon: "SquareCheck", label: "切换勾选状态" },
+];
+const styles = StyleSheet.create({
+  panel: { maxWidth: "100%", gap: 6 },
+  header: { flexDirection: "row", alignItems: "center", gap: 8 },
+  row: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 2 },
+  button: { alignItems: "center", justifyContent: "center", minHeight: 30, paddingHorizontal: 8, borderRadius: 5 },
+  label: { fontSize: 13, lineHeight: 18 },
+  hint: { fontSize: 12, lineHeight: 16 },
+  body: { borderWidth: 1, borderRadius: 7 },
+  toolbar: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", paddingHorizontal: 3, borderBottomWidth: 1 },
+  editor: { paddingHorizontal: 9, paddingVertical: 7, fontSize: 14, lineHeight: 20, textAlignVertical: "top" },
+  preview: { paddingHorizontal: 9, paddingVertical: 7, gap: 4 },
+  list: { gap: 2 },
+  item: { flexDirection: "row", alignItems: "flex-start", gap: 4 },
+  itemBody: { flex: 1, minWidth: 0, gap: 4 },
+  bullet: { minWidth: 22, textAlign: "center", fontSize: 13, lineHeight: 23 },
+  checkbox: { width: 17, height: 17, alignItems: "center", justifyContent: "center", borderWidth: 1, borderRadius: 4 },
+  quote: { borderLeftWidth: 2, paddingLeft: 9, gap: 4 },
+});
+function Preview({ parts, colors, toggle }: { parts: PreviewPart[]; colors: Colors; toggle(marker: TaskMarker): void }) {
+  return parts.map((part, index) => {
+    if (part.kind === "text") return <Text key={index} selectable style={[styles.label, { color: colors.foreground }]}>{part.markdown}</Text>;
+    if (part.kind === "markdown") return <Markdown key={index}>{part.markdown}</Markdown>;
+    if (part.kind === "quote") return <View key={index} style={[styles.quote, { borderLeftColor: colors.border }]}>
+      <Preview parts={part.content} colors={colors} toggle={toggle} />
+    </View>;
+    return <View key={index} style={styles.list}>{part.items.map(({ bullet, task, content }, item) =>
+      <View key={item} style={styles.item}>
+        {task ? <Pressable accessibilityRole="checkbox" accessibilityLabel={task.label} accessibilityState={{ checked: task.checked }}
+          aria-checked={task.checked} onPress={() => toggle(task)} hitSlop={3}
+          style={{ width: 24, minHeight: 24, alignItems: "center", justifyContent: "center" }}>
+          <View style={[styles.checkbox, { borderColor: task.checked ? colors.accent : colors.foregroundMuted,
+            backgroundColor: task.checked ? colors.accent : undefined }]}>
+            {task.checked && <Icon name="Check" size={12} color={colors.accentForeground} />}
+          </View>
+        </Pressable> : <Text accessibilityElementsHidden importantForAccessibility="no" style={[styles.bullet, { color: colors.foregroundMuted }]}>{bullet}</Text>}
+        <View style={styles.itemBody}><Preview parts={content} colors={colors} toggle={toggle} /></View>
+      </View>)}</View>;
+  });
+}
 
 export function NotesPanel({ note, theme, layout, close }: PluginButtonContentProps & { note: SessionNote }) {
-  const { status, blocks, conflict } = useSyncExternalStore(note.subscribe, note.get, note.get);
+  const { status, markdown, conflict } = useSyncExternalStore(note.subscribe, note.get, note.get);
   const { colors } = theme;
-  const [cursor, setCursor] = useState<Cursor | null>(null);
-  const [selected, setSelected] = useState<number>();
+  const [mode, setMode] = useState<"edit" | "preview">("edit");
   const [copyFeedback, setCopyFeedback] = useState("");
-  const inputs = useRef(new Map<number, NativeTextInput>());
+  const [requested, setRequested] = useState<{ selection: Selection; focus: boolean }>();
+  const input = useRef<NativeTextInput>(null);
+  const selection = useRef<Selection>(null);
+  const preview = useMemo(() => mode === "preview" && markdown.trim() ? previewMarkdown(markdown) : [], [mode, markdown]);
   useEffect(() => note.mount(), [note]);
   useLayoutEffect(() => {
-    if (!cursor) return;
-    inputs.current.get(cursor.id)?.focus();
-    setCursor(null);
-  }, [cursor]);
+    if (!requested) return;
+    if (requested.focus) input.current?.focus();
+    setRequested(undefined);
+  }, [requested]);
 
-  const action = (label: string, onPress: () => void, icon?: "X" | "Plus" | "Trash2", iconOnly = false) =>
+  function format(kind: Format) {
+    const current = note.get().markdown;
+    const next = formatMarkdown(current, selection.current ?? { start: current.length, end: current.length }, kind);
+    if (next.markdown === current) return;
+    selection.current = next.selection;
+    note.edit(next.markdown);
+    setRequested({ selection: next.selection, focus: true });
+  }
+  function selectMode(next: typeof mode) {
+    if (mode === next) return;
+    if (next === "edit" && selection.current) setRequested({ selection: selection.current, focus: false });
+    setMode(next);
+  }
+
+  const iconButton = (label: string, icon: string, onPress: () => void, key?: string) =>
+    <Pressable key={key} accessibilityRole="button" accessibilityLabel={label} onPress={onPress}
+      style={({ pressed }) => [styles.button, { minWidth: layout.compact ? 39 : 32, minHeight: layout.compact ? 36 : 30,
+        paddingHorizontal: 0, backgroundColor: pressed ? colors.surface2 : undefined }]}>
+      <Icon name={icon} size={16} color={colors.foregroundMuted} />
+    </Pressable>;
+  const action = (label: string, onPress: () => void) =>
     <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress}
-      style={({ pressed }) => ({ minHeight: 44, minWidth: 44, paddingHorizontal: 8, borderRadius: 6,
-        justifyContent: "center", alignItems: "center", flexDirection: "row", gap: 5, backgroundColor: pressed ? colors.surface2 : undefined })}>
-      {icon && <Icon icon={icon} size={16} color={colors.foregroundMuted} />}
-      {!iconOnly && <Text style={{ color: colors.accent, fontSize: 13 }}>{label}</Text>}
+      style={({ pressed }) => [styles.button, { backgroundColor: pressed ? colors.surface2 : undefined }]}>
+      <Text style={[styles.label, { color: colors.accent }]}>{label}</Text>
     </Pressable>;
 
-  async function copy(markdown: string, label: string) {
-    try { await copyText(markdown); setCopyFeedback(`已复制${label}`); }
+  async function copy(text: string, label: string) {
+    try { await copyText(text); setCopyFeedback(`已复制${label}`); }
     catch { setCopyFeedback("复制失败，请重试"); }
   }
 
   const blocked = status === "loading" || status === "load-error";
   const statusText = {
-    loading: "正在读取笔记…", "load-error": "读取失败", ready: "已同步到宿主",
-    pending: "待保存", saving: "正在保存…", "save-error": "保存失败，草稿已保留",
-    "too-long": `笔记超过 ${MAX_NOTE_LENGTH.toLocaleString("zh-CN")} 字符，请缩短后保存`,
-    conflict: "宿主已有新版本，草稿已保留",
+    loading: "读取中…", "load-error": "读取失败", ready: "", pending: "待保存", saving: "保存中…",
+    "save-error": "保存失败，草稿已保留", "too-long": `上限 ${MAX_NOTE_LENGTH.toLocaleString("zh-CN")} 字符，草稿未保存`,
+    conflict: "宿主有新版本，草稿已保留",
   }[status];
   const statusColor = status === "load-error" || status === "save-error" ? colors.statusDanger
     : status === "conflict" || status === "too-long" ? colors.statusWarning : colors.foregroundMuted;
-
   let recovery: ReactNode;
   if (conflict && status !== "saving") {
-    const overLimit = toMarkdown(blocks).length > MAX_NOTE_LENGTH;
-    recovery = <>
-      {status === "too-long" && <Text style={{ color: colors.statusWarning }}>草稿与宿主版本仍有冲突。</Text>}
-      <View style={{ flexDirection: "row", flexWrap: "wrap", columnGap: 4 }}>
-        {action("复制草稿", () => { void copy(toMarkdown(blocks), "草稿"); })}
-        {action("复制宿主版本", () => { void copy(conflict.markdown, "宿主版本"); })}
-        {action("放弃草稿，读取宿主版", note.keepServer)}
-        {!overLimit && action(status === "save-error" ? "重试替换宿主版" : "用草稿替换宿主版", () => { void note.useDraft(); })}
-      </View>
-    </>;
-  } else if (status === "save-error" || status === "too-long") {
-    recovery = <View style={{ flexDirection: "row", flexWrap: "wrap", columnGap: 4 }}>
-      {status === "save-error" && action("重试保存", () => { void note.flush(); })}
-      {action("复制草稿", () => { void copy(toMarkdown(blocks), "草稿"); })}
+    recovery = <View style={styles.row}>
+      {action("复制草稿", () => { void copy(markdown, "草稿"); })}
+      {action("复制宿主版", () => { void copy(conflict.markdown, "宿主版"); })}
+      {action("放弃草稿，读取宿主版", note.keepServer)}
+      {markdown.length <= MAX_NOTE_LENGTH && action(status === "save-error" ? "重试替换宿主版" : "用草稿替换宿主版", () => { void note.useDraft(); })}
     </View>;
-  } else if (status === "load-error") {
-    recovery = <View style={{ alignItems: "flex-start" }}>{action("重新读取", () => { void note.loadAgain(); })}</View>;
-  }
+  } else if (status === "save-error" || status === "too-long") {
+    recovery = <>
+      {status === "save-error" && action("重试保存", () => { void note.flush(); })}
+      {action("复制草稿", () => { void copy(markdown, "草稿"); })}
+    </>;
+  } else if (status === "load-error") recovery = action("重新读取", () => { void note.loadAgain(); });
 
-  return <View testID="zeonest-conversation-notes" style={{ width: layout.compact ? undefined : 386, maxWidth: "100%", gap: 6 }}>
-    <View style={{ borderBottomWidth: 1, borderBottomColor: colors.border, paddingBottom: 4,
-      flexDirection: "row", alignItems: "center", gap: 9 }}>
-      <Icon icon="FileText" size={17} color={colors.foregroundMuted} />
-      <Text accessibilityRole="header" style={{ flex: 1, color: colors.foreground, fontSize: 16, fontWeight: "600" }}>会话笔记</Text>
-      {action("关闭笔记", close, "X", true)}
+  return <View testID="zeonest-conversation-notes" style={[styles.panel, { width: layout.compact ? undefined : 386 }]}>
+    <View style={styles.header}>
+      {layout.compact ? null : <Text accessibilityRole="header" style={{ color: colors.foreground, fontSize: 14, fontWeight: "600" }}>会话笔记</Text>}
+      {!blocked && <View accessibilityRole="tablist" accessibilityLabel="笔记模式" style={[styles.row, { padding: 2, backgroundColor: colors.surface1, borderRadius: 6 }]}>
+        {(["edit", "preview"] as const).map((item) => <Pressable key={item} accessibilityRole="tab" accessibilityState={{ selected: mode === item }}
+          accessibilityLabel={item === "edit" ? "编辑" : "预览"} aria-selected={mode === item} onPress={() => selectMode(item)}
+          style={[styles.button, { minHeight: layout.compact ? 30 : 24, backgroundColor: mode === item ? colors.surface2 : undefined }]}>
+          <Text style={[styles.label, { color: mode === item ? colors.foreground : colors.foregroundMuted }]}>{item === "edit" ? "编辑" : "预览"}</Text>
+        </Pressable>)}
+      </View>}
+      <View style={{ flex: 1 }} />
+      {layout.compact ? null : iconButton("关闭笔记", "X", close)}
     </View>
-    {!blocked && <>
-      <ScrollView style={{ maxHeight: layout.compact ? 248 : 296 }} keyboardShouldPersistTaps="handled"
-        contentContainerStyle={{ paddingVertical: 4, gap: 3 }}>
-        {blocks.map((block, index) => {
-          const heading = block.kind === "heading";
-          const inputStyle = { paddingHorizontal: 8, paddingVertical: 10, fontSize: heading ? 20 : 15,
-            fontWeight: heading ? "700" : "400", lineHeight: heading ? 26 : 22 } as const;
-          return <View key={block.id} style={{ flexDirection: "row", gap: 3, alignItems: "flex-start",
-            borderRadius: 6, backgroundColor: selected === block.id ? colors.surface1 : undefined }}>
-            {block.kind === "task" ? <Pressable accessibilityRole="checkbox" accessibilityLabel={block.text || "待办"}
-              aria-checked={block.checked} accessibilityState={{ checked: block.checked }} onPress={() => note.toggle(block.id)}
-              style={{ width: 44, height: 44, alignItems: "center", justifyContent: "center" }}>
-              <View style={{ width: 18, height: 18, alignItems: "center", justifyContent: "center",
-                borderColor: block.checked ? colors.accent : colors.foregroundMuted, borderWidth: 1, borderRadius: 4,
-                backgroundColor: block.checked ? colors.accent : undefined }}>
-                {block.checked && <Icon icon="Check" size={13} color={colors.accentForeground} />}
-              </View>
-            </Pressable> : block.kind === "bullet" ? <Text accessible={false}
-              style={{ width: 24, textAlign: "center", paddingTop: 11, color: colors.foregroundMuted, fontSize: 16 }}>•</Text> : null}
-            <View style={{ flex: 1, minWidth: 0, minHeight: 44 }}>
-              {/* Measure wrapped lines without relying on TextInput's platform-specific scroll height. */}
-              <Text aria-hidden accessibilityElementsHidden importantForAccessibility="no-hide-descendants" pointerEvents="none" selectable={false}
-                style={{ ...inputStyle, opacity: 0 }}>{block.text || "\u00a0"}</Text>
-              <TextInput ref={(input) => { if (input) inputs.current.set(block.id, input); else inputs.current.delete(block.id); }}
-                accessibilityLabel={`第 ${index + 1} 块 · ${{ paragraph: "正文", heading: "标题", task: "待办", bullet: "列表" }[block.kind]}`}
-                multiline submitBehavior="newline" textAlignVertical="top" value={block.text}
-                selection={cursor?.id === block.id ? { start: cursor.offset, end: cursor.offset } : undefined}
-                onFocus={() => setSelected(block.id)}
-                onChangeText={(value) => { const target = note.edit(block.id, value); if (target) setCursor(target); }}
-                placeholder={block.kind === "task" ? "待办" : heading ? "标题" : block.kind === "bullet" ? "列表项"
-                  : blocks.length === 1 ? "记下这场会话的结论…" : undefined}
-                placeholderTextColor={colors.foregroundMuted}
-                style={{ ...inputStyle, position: "absolute", top: 0, bottom: 0, left: 0, right: 0,
-                  width: "100%", height: "100%", color: colors.foreground,
-                  textDecorationLine: block.kind === "task" && block.checked ? "line-through" : "none" }} />
-            </View>
-          </View>;
-        })}
-      </ScrollView>
-      <View style={{ borderTopColor: colors.border, borderTopWidth: 1, flexDirection: "row", flexWrap: "wrap",
-        alignItems: "center", justifyContent: "space-between", paddingTop: 2 }}>
-        {action("添加一块", () => setCursor(note.append()), "Plus")}
-        {blocks.some((block) => block.id === selected) && action("删除当前块", () => { if (selected !== undefined) note.remove(selected); }, "Trash2", true)}
-      </View>
-    </>}
-    <Text accessibilityLiveRegion="polite" style={{ color: statusColor, fontSize: 12, lineHeight: 17 }}>{statusText}</Text>
-    {recovery}
-    {copyFeedback ? <Text accessibilityLiveRegion="polite" style={{ color: colors.foregroundMuted, fontSize: 12 }}>{copyFeedback}</Text> : null}
-    {status === "ready" && blocks.length === 1 && !blocks[0]?.text && blocks[0]?.kind === "paragraph" &&
-      <Text style={{ color: colors.foregroundMuted, fontSize: 12, lineHeight: 17 }}>用 # 加空格写标题，- 加空格写列表；在列表项开头输入 [ ] 加空格添加待办。</Text>}
+    {!blocked && <View style={[styles.body, { borderColor: colors.border }]}>
+      {mode === "edit" ? <>
+        <View accessibilityRole="toolbar" accessibilityLabel="Markdown 格式" style={[styles.toolbar, { borderBottomColor: colors.border }]}>
+          {shortcuts.map(({ format: kind, icon, label }) => iconButton(label, icon, () => format(kind), kind))}
+        </View>
+        <TextInput testID="conversation-notes-editor" ref={input} accessibilityLabel="笔记正文" multiline submitBehavior="newline"
+          autoCapitalize="none" autoCorrect={false} spellCheck={false} value={markdown}
+          selection={requested?.selection} onSelectionChange={({ nativeEvent }) => { selection.current = nativeEvent.selection; }}
+          onChangeText={note.edit} placeholder="写 Markdown…" placeholderTextColor={colors.foregroundMuted}
+          style={[styles.editor, { color: colors.foreground, height: layout.compact ? 240 : 270,
+            fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }) }]} />
+      </> : <View style={styles.preview}>
+        {preview.length ? <Preview parts={preview} colors={colors} toggle={(marker) => {
+          if (note.get().markdown === markdown) note.edit(toggleTaskMarker(markdown, marker));
+        }} /> : <Text style={[styles.hint, { color: colors.foregroundMuted }]}>还没有笔记</Text>}
+      </View>}
+    </View>}
+    {statusText || copyFeedback ? <View style={styles.row}>
+      {statusText ? <Text accessibilityLiveRegion="polite" style={[styles.hint, { color: statusColor }]}>{statusText}</Text> : null}
+      {!conflict && recovery}
+      {copyFeedback ? <Text accessibilityLiveRegion="polite" style={[styles.hint, { color: colors.foregroundMuted }]}>{copyFeedback}</Text> : null}
+    </View> : null}
+    {conflict && recovery}
   </View>;
 }

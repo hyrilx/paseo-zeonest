@@ -18,7 +18,9 @@ const compiled = await build({
     builder.onLoad({ filter: /.*/, namespace: "test-host" }, () => ({ loader: "js", contents: `
       import React from 'react'; const make = name => props => React.createElement(name, props, props.children);
       export const Text = make('Text'), View = make('View'), Pressable = make('Pressable');
-      export const TextInput = make('TextInput'), ScrollView = make('ScrollView'), Icon = make('Icon');
+      export const TextInput = React.forwardRef((props, ref) => React.createElement('TextInput', { ...props, ref }));
+      export const Icon = make('Icon'), Markdown = make('Markdown');
+      export const Platform = { select: options => options.default }, StyleSheet = { create: styles => styles };
       export const copyText = async () => {};
     ` }));
   } }],
@@ -100,11 +102,30 @@ test("native pills follow the session directory and keep a failed draft in its o
   assert.equal(textbox().props.value, "A 的草稿");
   assert.match(JSON.stringify(root.toJSON()), /保存失败，草稿已保留/);
   fail = false;
-  await act(async () => { root.root.findAll((node) => node.type === ("Pressable" as never) && node.props.accessibilityLabel === "重试保存")[0]!.props.onPress(); });
+  const press = (matches: (props: Record<string, unknown>) => boolean) =>
+    root.root.findAll((node) => node.type === ("Pressable" as never) && matches(node.props))[0]!.props.onPress();
+  await act(async () => { press((button) => button.accessibilityLabel === "重试保存"); });
   assert.deepEqual(writes.map(({ sessionId, markdown }) => [sessionId, markdown]), [["a", "A 的草稿"], ["a", "A 的草稿"]]);
   assert.equal(registered.get("a")?.button.label, "笔记 ·");
   assert.equal(content("a"), A, "presence updates the registration without remounting its content");
+  await act(async () => { textbox().props.onChangeText("# A\n\n记录\n- [ ] 查资料"); });
+  await act(async () => {
+    const position = textbox().props.value.indexOf("记录");
+    textbox().props.onSelectionChange({ nativeEvent: { selection: { start: position, end: position + 2 } } });
+    press((button) => button.accessibilityLabel === "加粗");
+  });
+  assert.equal(textbox().props.value, "# A\n\n**记录**\n- [ ] 查资料");
+  const tab = (label: string) => press((button) => button.accessibilityRole === "tab" && button.accessibilityLabel === label);
+  await act(async () => { tab("预览"); });
+  assert.equal(root.root.findAllByType("TextInput" as never).length, 0);
+  const checkbox = () => root.root.findAll((node) => node.type === ("Pressable" as never) && node.props.accessibilityRole === "checkbox")[0]!;
+  assert.equal(checkbox().props["aria-checked"], false);
+  await act(async () => { checkbox().props.onPress(); });
+  assert.equal(checkbox().props["aria-checked"], true);
+  await act(async () => { tab("编辑"); });
+  assert.equal(textbox().props.value, "# A\n\n**记录**\n- [x] 查资料");
   await act(async () => { mounted = false; root.unmount(); observer.snapshot(entries("b") as Parameters<Observer["snapshot"]>[0]); });
+  assert.equal(writes[2]?.markdown, "# A\n\n**记录**\n- [x] 查资料");
   assert.equal(registered.has("a"), false);
   await stop();
   presence.resolve({ present: ["b"] });

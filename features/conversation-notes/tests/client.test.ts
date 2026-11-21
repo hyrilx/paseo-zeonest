@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test, { type TestContext } from "node:test";
-import { toMarkdown } from "../client/blocks";
+import { formatMarkdown, taskMarkers } from "../client/markdown";
 import { createSessionNote, type SessionNote } from "../client/note";
 import { MAX_NOTE_LENGTH, type Note, type SaveInput, type SaveResult } from "../shared/contracts";
 import { deferred } from "./deferred";
 
 const blank: Note = { revision: null, markdown: "" };
 const saved = (markdown: string): Note => ({ revision: randomUUID(), markdown });
-const text = (note: SessionNote) => toMarkdown(note.get().blocks);
-const edit = (note: SessionNote, value: string) => note.edit(note.get().blocks[0]!.id, value);
+const text = (note: SessionNote) => note.get().markdown;
+const edit = (note: SessionNote, value: string) => note.edit(value);
 function until(note: SessionNote, predicate: (state: ReturnType<SessionNote["get"]>) => boolean) {
   if (predicate(note.get())) return Promise.resolve();
   return new Promise<void>((resolve) => {
@@ -24,7 +24,7 @@ function create(t: TestContext, id: string, transport: Parameters<typeof createS
 }
 
 test("closing with a pending checkbox saves Markdown and a new client reopens it as checked", async (t) => {
-  let stored = saved("# 决定\n- [ ] 查资料");
+  let stored = saved("# 决定\r\n\r\n- [ ] 查**资料**  \r\n");
   const read = async () => stored;
   const save = async (request: SaveInput): Promise<SaveResult> => {
     assert.equal(request.sessionId, "a"); assert.equal(request.expectedRevision, stored.revision);
@@ -32,15 +32,15 @@ test("closing with a pending checkbox saves Markdown and a new client reopens it
   };
   const left = create(t, "a", { read, save });
   const close = left.mount(); await ready(left);
-  left.toggle(left.get().blocks[1]!.id);
+  const original = text(left);
+  left.edit(formatMarkdown(original, { start: original.indexOf("查"), end: original.indexOf("查") }, "toggle-task").markdown);
   assert.equal(left.get().status, "pending");
   close(); await ready(left);
-  assert.equal(stored.markdown, "# 决定\n- [x] 查资料");
+  assert.equal(stored.markdown, "# 决定\r\n\r\n- [x] 查**资料**  \r\n");
   const right = create(t, "a", { read, save });
   right.mount(); await ready(right);
-  assert.deepEqual(right.get().blocks.map(({ id: _id, ...block }) => block), [
-    { kind: "heading", text: "决定" }, { kind: "task", checked: true, text: "查资料" },
-  ]);
+  assert.equal(text(right), stored.markdown);
+  assert.deepEqual(taskMarkers(text(right)).map(({ checked }) => checked), [true]);
   assert.equal(right.get().hasContent, true);
 });
 

@@ -1,5 +1,4 @@
 import { MAX_NOTE_LENGTH, type Note, type SaveInput, type SaveResult } from "../shared/contracts";
-import { editBlock, emptyBlock, parseMarkdown, toMarkdown, type Block, type BlockContent } from "./blocks";
 
 interface Transport {
   read(sessionId: string): Promise<Note>;
@@ -8,18 +7,15 @@ interface Transport {
 type Status = "loading" | "load-error" | "ready" | "pending" | "saving" | "save-error" | "too-long" | "conflict";
 interface Snapshot {
   status: Status;
-  blocks: readonly Block[];
+  markdown: string;
   hasContent: boolean;
   hasDraft: boolean;
   conflict: Note | null;
 }
-export type Cursor = { id: number; offset: number };
 
 export function createSessionNote(sessionId: string, transport: Transport, delay = 600) {
   const listeners = new Set<() => void>();
-  let nextId = 0;
-  const newBlock = (content: BlockContent): Block => ({ ...content, id: ++nextId });
-  let snapshot: Snapshot = { status: "loading", blocks: [newBlock(emptyBlock())], hasContent: false, hasDraft: false, conflict: null };
+  let snapshot: Snapshot = { status: "loading", markdown: "", hasContent: false, hasDraft: false, conflict: null };
   let base: Note | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let saving: Promise<void> | undefined;
@@ -37,7 +33,7 @@ export function createSessionNote(sessionId: string, transport: Transport, delay
     base = note;
     loaded = true;
     saveUnconfirmed = false;
-    publish({ status: "ready", blocks: parseMarkdown(note.markdown).map(newBlock),
+    publish({ status: "ready", markdown: note.markdown,
       hasContent: !!note.markdown.trim(), hasDraft: false, conflict: null });
   }
   async function load() {
@@ -59,13 +55,12 @@ export function createSessionNote(sessionId: string, transport: Transport, delay
     stopTimer();
     timer = setTimeout(() => { timer = undefined; void flush(); }, delay);
   }
-  function change(blocks: readonly Block[]) {
-    if (disposed || !base || snapshot.status === "loading" || snapshot.status === "load-error") return;
-    const markdown = toMarkdown(blocks);
+  function edit(markdown: string) {
+    if (disposed || !base || snapshot.status === "loading" || snapshot.status === "load-error" || markdown === snapshot.markdown) return;
     const hasDraft = !!snapshot.conflict || !!saving || saveUnconfirmed || markdown !== base.markdown;
     stopTimer();
     if (!hasDraft) {
-      publish({ blocks, hasDraft, status: "ready", conflict: null });
+      publish({ markdown, hasDraft, status: "ready", conflict: null });
       return;
     }
     let status: Status;
@@ -74,13 +69,13 @@ export function createSessionNote(sessionId: string, transport: Transport, delay
     else if (saving) status = "saving";
     else if (snapshot.status === "save-error") status = "save-error";
     else { status = "pending"; schedule(); }
-    publish({ blocks, hasDraft, status });
+    publish({ markdown, hasDraft, status });
   }
   async function flush(expected?: Note) {
     stopTimer();
     if (disposed || !base || !snapshot.hasDraft || (snapshot.conflict && !expected)) return;
     if (saving) return saving;
-    const markdown = toMarkdown(snapshot.blocks);
+    const { markdown } = snapshot;
     if (markdown.length > MAX_NOTE_LENGTH) {
       publish({ status: "too-long" });
       return;
@@ -105,7 +100,7 @@ export function createSessionNote(sessionId: string, transport: Transport, delay
       }
       base = result.note;
       loaded = true;
-      const current = toMarkdown(snapshot.blocks);
+      const current = snapshot.markdown;
       const hasDraft = current !== base.markdown;
       const status = !hasDraft ? "ready" : current.length > MAX_NOTE_LENGTH ? "too-long" : "pending";
       publish({ status, hasContent: !!base.markdown.trim(), hasDraft, conflict: null });
@@ -140,26 +135,7 @@ export function createSessionNote(sessionId: string, transport: Transport, delay
       };
     },
     async loadAgain() { await load(); },
-    edit(id: number, text: string): Cursor | null {
-      const index = snapshot.blocks.findIndex((block) => block.id === id);
-      if (index < 0) return null;
-      const edited = editBlock(snapshot.blocks[index]!, text);
-      const blocks = edited.blocks.map((content, i): Block => i === 0 ? { ...content, id } : newBlock(content));
-      change([...snapshot.blocks.slice(0, index), ...blocks, ...snapshot.blocks.slice(index + 1)]);
-      return edited.focus && { id: blocks[edited.focus.index]!.id, offset: edited.focus.offset };
-    },
-    toggle(id: number) {
-      change(snapshot.blocks.map((block) => block.id === id && block.kind === "task" ? { ...block, checked: !block.checked } : block));
-    },
-    append() {
-      const block = newBlock(emptyBlock());
-      change([...snapshot.blocks, block]);
-      return { id: block.id, offset: 0 };
-    },
-    remove(id: number) {
-      const remaining = snapshot.blocks.filter((block) => block.id !== id);
-      change(remaining.length ? remaining : [newBlock(emptyBlock())]);
-    },
+    edit,
     flush: () => flush(),
     keepServer() {
       if (snapshot.status !== "saving" && snapshot.conflict) {
