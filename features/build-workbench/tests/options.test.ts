@@ -32,6 +32,7 @@ test("form options roundtrip quoted arguments, literal shell syntax, and empty s
 
 test("stack options compile to native arguments without changing the chosen operation", (t) => {
   const { root, put } = fixture(t);
+  const selectedTool = { ...tool, env: { HOME: root } };
   put("package.json", '{"packageManager":"pnpm@11.0.0","scripts":{"build":"fixture"},"dependencies":{"@tauri-apps/cli":"^2"}}');
   put("src-tauri/tauri.conf.json", '{"build":{"frontendDist":"../dist"}}');
   put("src-tauri/Cargo.toml", '[package]\nname = "desktop"\n');
@@ -47,13 +48,13 @@ test("stack options compile to native arguments without changing the chosen oper
   };
   const mode = buildArguments(root, pick("pnpm"), ["--label", "two words", ""], tool);
   assert.deepEqual(mode.args, ["run", "build", "--label", "two words", ""]);
-  const cargo = buildArguments(root, pick("cargo"), ["--profile", "fast", "--features=ui,fast", "--target", "targets/custom.json", "--target=x86_64-unknown-linux-gnu"], tool);
+  const cargo = buildArguments(root, pick("cargo"), ["--profile", "fast", "--features=ui,fast", "--target", "targets/custom.json", "--target=x86_64-unknown-linux-gnu"], selectedTool);
   assert.deepEqual(cargo.args, ["build", "--package", "fixture", "--message-format=json-render-diagnostics", "--profile", "fast", "--features=ui,fast", "--target", "targets/custom.json", "--target=x86_64-unknown-linux-gnu"]);
   assert.deepEqual(cargo.outputs, []);
   assert.throws(() => buildArguments(root, pick("cargo"), ["--target", "../outside.json"], tool), /有效的参数值/u);
   assert.throws(() => buildArguments(root, pick("cargo"), ["--manifest-path", "another/Cargo.toml"], tool), /不支持选项/u);
-  const tauri = buildArguments(root, pick("tauri"), ["--release", "--features", "desktop", "--config", "tauri.extra.json", "--", "--locked"], tool);
-  assert.deepEqual(tauri.args, ["exec", "tauri", "build", "--no-bundle", "--features", "desktop", "--config", "tauri.extra.json", "--", "--locked"]);
+  const tauri = buildArguments(root, pick("tauri"), ["--release", "--features", "desktop", "--config", "tauri.extra.json", "--", "--locked"], selectedTool);
+  assert.deepEqual(tauri.args, ["exec", join(root, "node_modules/.bin/tauri"), "build", "--no-bundle", "--features", "desktop", "--config", "tauri.extra.json", "--", "--locked"]);
   assert.deepEqual(tauri.outputs, ["dist"]);
   assert.throws(() => buildArguments(root, pick("tauri"), ["--bundles", "dmg"], tool), /不支持选项/u);
   const cmake = pick("cmake");

@@ -1,8 +1,9 @@
-import { mkdirSync, opendirSync, writeFileSync, rmSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { mkdirSync, opendirSync, realpathSync, writeFileSync, rmSync } from "node:fs";
+import { dirname, relative, resolve } from "node:path";
 import type { ProjectTarget } from "./projects";
 import { misePin } from "./mise";
-import { at, digest, inside, projectDirs, readText, resolveWithin } from "./paths";
+import { at, digest, inside, missing, projectDirs, readBounded, readText, resolveWithin } from "./paths";
+import { canonicalWrite } from "./rust-projects";
 
 const dirFor = (project: string, preset?: string) => `.zeonest-build/cmake/${digest(preset ? JSON.stringify([project, preset]) : project).slice(0, 20)}`;
 const replyFor = (dir: string) => `${dir}/.cmake/api/v1/reply`;
@@ -54,7 +55,8 @@ export function discoverCmake(root: string, notices: string[], targets: ProjectT
           const first = /^CMAKE_CONFIGURATION_TYPES:[^=\n]+=([^;\r\n]+)/mu.exec(cache)?.[1];
           const selected = model.configurations.length === 1 ? model.configurations[0] : kind === "Ninja Multi-Config" ? defaults || first : undefined;
           for (const item of model.targets) {
-            targets.push({ ...base, name: label(item.name), cmake: { dir: built, stamp, preset, target: item.name, configurations: item.outputs, tool: marker.tool }, outputs: selected === undefined ? [] : item.outputs[selected] ?? [] });
+            targets.push({ ...base, stamp: digest(JSON.stringify([stamp, marker.result])), name: label(item.name), cmake: { dir: built, stamp, preset, target: item.name, configurations: item.outputs,
+              writePaths: item.writes, defaultConfig: selected, tool: marker.tool }, outputs: selected === undefined ? [] : item.outputs[selected] ?? [] });
           }
         } catch (error) { notices.push(`${source}：${(error as Error).message}`); }
       }
@@ -66,14 +68,16 @@ function configurePresets(root: string, project: string, notices: string[]) {
   const inputs = new Map<string, string>();
   const names = new Set<string>();
   const visited = new Set<string>();
-  const pending = [at(project, "CMakePresets.json"), at(project, "CMakeUserPresets.json")];
+  const pending = ["CMakePresets.json", "CMakeUserPresets.json"].map((file) => resolve(resolveWithin(root, project), file));
+  const initial = new Set(pending);
   for (let i = 0; i < pending.length && visited.size < 24; i++) {
     const path = pending[i]!;
     if (visited.has(path)) continue;
     visited.add(path);
     try {
-      const text = readText(root, path);
-      if (text === undefined) continue;
+      let text: string;
+      try { text = readBounded(realpathSync(path), 512 * 1024); }
+      catch (e) { if (initial.has(path) && missing(e)) continue; throw e; }
       inputs.set(path, digest(text));
       const doc = JSON.parse(text) as { include?: unknown; configurePresets?: { name?: unknown; hidden?: unknown }[] };
       if (Array.isArray(doc?.configurePresets)) {
@@ -82,14 +86,14 @@ function configurePresets(root: string, project: string, notices: string[]) {
         }
       }
       const includes = typeof doc?.include === "string" ? [doc.include] : Array.isArray(doc?.include) ? doc.include : [];
-      for (const file of includes.slice(0, 24)) {
-        if (typeof file !== "string" || isAbsolute(file) || /\$/u.test(file)) continue;
-        const parent = path.slice(0, path.lastIndexOf("/") + 1);
-        const rel = relative(root, join(root, parent, file));
-        if (rel && inside(root, join(root, parent, file))) pending.push(rel);
+      if (includes.length > 24) throw new Error("CMake preset 引用超过读取范围");
+      for (const file of includes) {
+        if (typeof file !== "string" || /\$/u.test(file)) throw new Error("当前无法确认动态 CMake preset 引用");
+        pending.push(resolve(dirname(path), file));
       }
-    } catch (error) { notices.push(`${path}：${(error as Error).message}`); }
+    } catch (error) { notices.push(`${path}：${(error as Error).message}；不复用 preset 配置。`); return { inputs: [], names: [] }; }
   }
+  if (pending.some((path) => !visited.has(path))) { notices.push("CMake preset 引用超过读取范围"); return { inputs: [], names: [] }; }
   return { inputs: [...inputs], names: [...names].slice(0, 16) };
 }
 
@@ -98,7 +102,8 @@ function fileApiResult(root: string, dir: string, project: string) {
   const handle = opendirSync(resolveWithin(root, reply));
   const indexes: string[] = [];
   try {
-    for (let i = 0, item; i < 2048 && (item = handle.readSync()); i++) {
+    for (let i = 0, item; (item = handle.readSync()); i++) {
+      if (i >= 2048) throw new Error("CMake File API reply 超出读取范围，请重新配置");
       if (item.isFile() && /^index-[\w.-]+\.json$/u.test(item.name)) indexes.push(item.name);
     }
   } finally { handle.closeSync(); }
@@ -113,41 +118,56 @@ function fileApiResult(root: string, dir: string, project: string) {
   if (!basename(model)) throw new Error("未找到 CMake codemodel-v2");
   const files = index?.reply?.["cmakeFiles-v1"]?.jsonFile;
   if (!basename(files)) throw new Error("未找到 CMake cmakeFiles-v1");
-  const records = parse<{ inputs?: { path?: unknown; isGenerated?: boolean; isCMake?: boolean }[] }>(files)?.inputs;
-  if (!Array.isArray(records) || records.length > 4096) throw new Error("CMake 配置输入超出读取范围");
+  const records = parse<{ inputs?: { path?: unknown }[] }>(files)?.inputs;
+  if (!Array.isArray(records) || records.length > 4096) throw new Error("CMake 配置输入超出读取范围，请重新配置");
   const source = resolveWithin(root, project);
-  const inputs = records.flatMap((record) => {
-    if (record?.isGenerated || record?.isCMake || typeof record?.path !== "string") return [];
+  const build = resolveWithin(root, dir);
+  let total = 0;
+  const inputs = records.map((record) => {
+    if (typeof record?.path !== "string" || !record.path || record.path.length > 4096) throw new Error("无法确认 CMake 配置输入，请重新配置");
+    // cmakeFiles paths are relative to the source directory, including generated inputs.
     const abs = resolve(source, record.path);
-    if (!inside(root, abs)) return [];
-    const rel = relative(root, abs);
-    const text = readText(root, rel);
-    return [[rel, text === undefined ? null : digest(text)]];
+    try {
+      const real = realpathSync(abs);
+      const text = readBounded(real, 1024 * 1024);
+      total += Buffer.byteLength(text);
+      if (total > 16 * 1024 * 1024) throw new Error("CMake 配置输入超过 16 MiB");
+      return [abs, real, digest(text)];
+    } catch (error) { throw new Error(`无法确认 CMake 配置输入：${abs}，请重新配置`, { cause: error }); }
   });
   type Entry = { name?: unknown; jsonFile?: unknown };
   const document = parse<{ configurations?: { name?: string; targets?: Entry[] }[] }>(model);
   const configurations = document?.configurations;
   if (!Array.isArray(configurations) || !configurations.length) throw new Error("File API 未返回构建配置");
-  const targets = new Map<string, Record<string, string[]>>();
+  if (configurations.length > 32 || configurations.some((item) => !Array.isArray(item?.targets) || item.targets.length > 512)) throw new Error("CMake File API 构建配置或目标列表超过读取范围");
+  const targets = new Map<string, { outputs: Record<string, string[]>; writes: Record<string, string[]> }>();
   for (const config of configurations.slice(0, 32)) {
     if (!config || typeof config.name !== "string" || !/^([\w][\w.+-]{0,63})?$/u.test(config.name) || !Array.isArray(config.targets)) continue;
-    for (const item of config.targets.slice(0, 96)) {
+    for (const item of config.targets) {
       if (typeof item?.name !== "string" || !/^[\w][\w.+-]{0,127}$/u.test(item.name) || !basename(item.jsonFile)) continue;
       const detail = parse<{ type?: string; artifacts?: { path?: string }[] }>(item.jsonFile);
       if (!detail || !["EXECUTABLE", "STATIC_LIBRARY", "SHARED_LIBRARY", "MODULE_LIBRARY"].includes(detail.type ?? "")) continue;
-      const outputs = (Array.isArray(detail.artifacts) ? detail.artifacts : []).slice(0, 8).flatMap((item) => {
-        const path = item?.path;
-        if (typeof path !== "string") return [];
-        const rel = isAbsolute(path) ? relative(root, path) : at(dir, path);
-        try { resolveWithin(root, rel); return [rel]; }
-        catch { return []; }
-      });
-      const existing = targets.get(item.name) ?? Object.create(null) as Record<string, string[]>;
-      existing[config.name] = outputs;
+      const artifacts = Array.isArray(detail.artifacts) ? detail.artifacts : [];
+      if (artifacts.length > 64) throw new Error("CMake File API 产物超过读取范围");
+      const outputPaths: string[] = [];
+      const writes: string[] = [];
+      for (const item of artifacts) {
+        if (typeof item?.path !== "string" || !item.path || item.path.length > 4096) continue;
+        const abs = resolve(build, item.path);
+        const real = canonicalWrite(abs);
+        writes.push(real);
+        if (!inside(root, abs) || !inside(root, real)) continue;
+        const rel = relative(root, abs);
+        try { if (rel) { resolveWithin(root, rel); outputPaths.push(rel); } }
+        catch { /* External or linked artifacts participate in locks, not browsing. */ }
+      }
+      const existing = targets.get(item.name) ?? { outputs: Object.create(null) as Record<string, string[]>, writes: Object.create(null) as Record<string, string[]> };
+      existing.outputs[config.name] = [...new Set(outputPaths)];
+      existing.writes[config.name] = [...new Set(writes)];
       targets.set(item.name, existing);
     }
   }
-  return { configurations: configurations.slice(0, 32).map((c) => c?.name), inputs, targets: [...targets].map(([name, outputs]) => ({ name, outputs })) };
+  return { configurations: configurations.map((c) => c?.name), inputs, targets: [...targets].map(([name, paths]) => ({ name, ...paths })) };
 }
 
 export function prepareCmake(root: string, base: string, dir: string) {

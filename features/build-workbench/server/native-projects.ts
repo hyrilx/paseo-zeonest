@@ -1,9 +1,9 @@
 import { accessSync, constants, opendirSync, statSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { relative } from "node:path";
 import { PROBE_TARGET_LIMIT } from "../shared/contracts";
 import type { ProjectTarget } from "./projects";
 import { misePin } from "./mise";
-import { at, digest, inside, projectDirs, readText, resolveWithin } from "./paths";
+import { at, digest, projectDirs, readText, resolveWithin } from "./paths";
 
 export type Gradle = { wrapper?: string; jar?: string; volatile?: boolean };
 export type Xcode = { kind: "workspace" | "project"; derived: string; volatile?: boolean };
@@ -34,27 +34,53 @@ function scanInputs(root: string, project: string, extension: RegExp, hidden = f
 }
 
 function gradleInputs(root: string, project: string, settings: string) {
-  // Collect build files, catalogs, and convention-plugin sources under this root.
-  const results = scanInputs(root, project, /(?:\.gradle(?:\.kts)?|\.properties|\.versions\.toml|(?:^|\/)(?:buildSrc|build-logic)\/.*\.(?:kt|groovy|java))$/u);
-  let volatile = results.limited;
-  const includes = [...settings.matchAll(/\bincludeBuild\s*(?:\(\s*)?["']([^"']+)["']/gu)];
-  if (includes.length !== (settings.match(/\bincludeBuild\b/gu)?.length ?? 0) || includes.length > 32) volatile = true;
-  for (const [, path] of includes.slice(0, 32)) {
-    const abs = resolve(root, project, path!);
-    if (!inside(root, abs)) { volatile = true; continue; }
-    const found = scanInputs(root, relative(root, abs) || ".", /\.(?:gradle|kts|kt|groovy|java|toml|properties)$/u);
-    volatile ||= found.limited;
-    results.files.push(...found.files);
+  // Gradle scripts are executable. Persistent reuse is limited to a closed
+  // grammar; a successful regexp search for a few known inputs is not proof.
+  // Only literal module paths and built-in plugins without configuration fit it.
+  const quoted = (s: string) => `(?:"${s}"|'${s}')`;
+  const literal = quoted("[\\w.-]+");
+  const module = quoted(":?[\\w-]+(?::[\\w-]+)*");
+  const list = `${module}(?:\\s*,\\s*${module})*`;
+  const name = `rootProject\\.name\\s*=\\s*${literal}`;
+  const row = new RegExp(`^(?:${name}|include\\s*\\(\\s*${list}\\s*\\)|include\\s+${list})\\s*;?$`, "u");
+  const significant = (text: string) => text.split(/\r?\n/u).map((line) => line.trim()).filter((line) => line && !line.startsWith("//"));
+  let volatile = !significant(settings).every((line) => row.test(line));
+  const dirs = new Set([project]);
+  for (const line of significant(settings)) {
+    if (!line.startsWith("include") || !row.test(line)) continue;
+    for (const [, value] of line.matchAll(/["'](:?[\w-]+(?::[\w-]+)*)["']/gu)) {
+      const parts = value!.replace(/^:/u, "").split(":");
+      for (let length = 1; length <= parts.length; length++) dirs.add(at(project, parts.slice(0, length).join("/")));
+    }
   }
-  for (const [file] of results.files) {
-    if (!/\.gradle(?:\.kts)?$/u.test(file)) continue;
-    try { if (/\bapply\s*(?:\(\s*from\s*=|from\s*:)/u.test(readText(root, file) ?? "")) volatile = true; }
-    catch { volatile = true; }
-  }
-  // The same project can be discovered as a workspace root or as a nested project.
+  const files: [string, string][] = [];
   const directory = resolveWithin(root, project);
-  const files = [...new Map(results.files.map(([file, stamp]) => [relative(directory, resolveWithin(root, file)), stamp]))];
-  return { files: files.sort(([a], [b]) => a.localeCompare(b)), volatile };
+  const exists = (path: string) => {
+    try { statSync(resolveWithin(root, path)); return true; }
+    catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return false; throw e; }
+  };
+  try {
+    for (const extra of ["buildSrc", "gradle/libs.versions.toml", "gradle/gradle-daemon-jvm.properties"]) if (exists(at(project, extra))) volatile = true;
+    for (const dir of [...dirs].slice(0, 128)) {
+      if (!exists(dir)) { volatile = true; continue; }
+      for (const name of ["build.gradle", "build.gradle.kts", "gradle.properties"]) {
+        const path = at(dir, name);
+        const text = readText(root, path, 128 * 1024);
+        if (text === undefined) continue;
+        files.push([relative(directory, resolveWithin(root, path)), digest(text)]);
+        const script = significant(text).join(" ");
+        const plugin = `(?:base|java|java-library|application)`;
+        if (script && (name === "gradle.properties" || !new RegExp(`^plugins\\s*\\{\\s*(?:(?:${plugin}|id\\s*\\(\\s*["']${plugin}["']\\s*\\)|id\\s+["']${plugin}["'])\\s*;?\\s*)*\\}$`, "u").test(script))) volatile = true;
+      }
+    }
+  } catch { volatile = true; }
+  if (dirs.size > 128) volatile = true;
+  // Keep detecting ordinary file changes within one session even for dynamic builds.
+  if (volatile) {
+    const fallback = scanInputs(root, project, /(?:\.gradle(?:\.kts)?|\.properties|\.toml)$/u);
+    for (const [file, stamp] of fallback.files) files.push([relative(directory, resolveWithin(root, file)), stamp]);
+  }
+  return { files: [...new Map(files)].sort(([a], [b]) => a.localeCompare(b)), volatile };
 }
 
 export function discoverGradle(root: string, dirs: string[], notices: string[], targets: ProjectTarget[]) {
@@ -78,7 +104,7 @@ export function discoverGradle(root: string, dirs: string[], notices: string[], 
       }
       const input = gradleInputs(root, project, inputs[0] ?? inputs[1] ?? "");
       if (input.volatile) notices.push(`${source}：无法完整追踪构建逻辑；每次执行目标前需要新探测。`);
-      gradle.volatile = input.volatile;
+      gradle.volatile = input.volatile || index >= 2;
       const miseJava = misePin(project, "java", (path) => readText(root, path));
       const stamp = digest(JSON.stringify([inputs, properties, input.files, miseJava]));
       targets.push({ adapter: "gradle", project, source, cwd: project, requirements: { miseJava }, stamp, gradle, name: "tasks --all", operation: "probe", outputs: [] });

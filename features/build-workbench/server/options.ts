@@ -9,11 +9,12 @@ const identifier = (s: string) => /^[\w][\w.+-]{0,79}$/u.test(s);
 const mode = (s: string) => /^[\w][\w .+-]{0,79}$/u.test(s);
 const flags = (...names: string[]): Record<string, Rule> => Object.fromEntries(names.map((name) => [name, true]));
 
-function parse(args: string[], rules: Record<string, Rule>, extra?: (arg: string) => boolean) {
+function parse(args: string[], rules: Record<string, Rule>, extra?: (arg: string) => boolean, take?: (name: string, tokens: string[]) => void) {
   const applied = new Map<string, string>();
   for (let i = 0; i < args.length; i++) {
+    const start = i;
     const arg = args[i]!;
-    if (extra?.(arg)) continue;
+    if (extra?.(arg)) { take?.(arg, [arg]); continue; }
     const split = arg.indexOf("=");
     const name = split < 0 ? arg : arg.slice(0, split);
     const rule = Object.hasOwn(rules, name) ? rules[name] : undefined;
@@ -30,6 +31,7 @@ function parse(args: string[], rules: Record<string, Rule>, extra?: (arg: string
       } else if (split < 0 && typeof rule === "object") applied.set(name, "");
       else throw new Error(`${name} 缺少有效的参数值`);
     }
+    take?.(name, args.slice(start, i + 1));
   }
   return applied;
 }
@@ -65,19 +67,19 @@ export function gradleOptions(args: string[], probe: boolean) {
   const reserved = /^(?:org\.gradle\.(?:daemon|native)(?:\.|$)|org\.gradle\.java\.home$)/u;
   const flagsByPhase: Record<string, Rule> = probe ? {} : { "--tests": value, "--args": value, "--rerun": true };
   const context: string[] = [];
-  const applied = parse(forwarded, {
+  parse(forwarded, {
     ...flags("--offline", "--refresh-dependencies", "--parallel", "--no-parallel", "--build-cache", "--no-build-cache",
       "--configuration-cache", "--no-configuration-cache", "--configure-on-demand", "--continue", "--rerun-tasks",
       "--stacktrace", "--full-stacktrace", "--info", "--debug", "--warn", "--quiet", "-s", "-i", "-q"),
     "--warning-mode": identifier, "--max-workers": integer,
     "--exclude-task": (s) => /^:?[\w][\w.:-]*$/u.test(s), "-x": (s) => /^:?[\w][\w.:-]*$/u.test(s), ...flagsByPhase,
   }, (arg) => {
-    const name = /^-[PD]([\w][\w.-]*)(?:=.*)?$/u.exec(arg)?.[1];
-    if (!name || reserved.test(name)) return false;
-    context.push(arg);
-    return true;
+    const name = /^-[PD]([\w][\w.-]*)(?:=.*)?$/su.exec(arg)?.[1];
+    return !!name && !reserved.test(name);
+  }, (name, tokens) => {
+    if (!Object.hasOwn(flagsByPhase, name)) context.push(...tokens);
   });
-  return { forwarded, filter, context: [...context, ...[...applied.keys()].filter((arg) => /^(?:--offline|--refresh-dependencies|--configure-on-demand|--(?:no-)?configuration-cache)$/u.test(arg))] };
+  return { forwarded, filter, context };
 }
 
 export function cmakeOptions(args: string[], probe: boolean) {
@@ -104,10 +106,12 @@ export function tauriOptions(root: string, cwd: string, args: string[]) {
   const separator = args.indexOf("--");
   const cli = separator >= 0 ? args.slice(0, separator) : args;
   const cargo = separator >= 0 ? args.slice(separator + 1) : [];
-  const selected = parse(cli, { ...flags("--release", "--debug", "--no-bundle", "--ci", "-v", "--verbose"), "--features": value, "--target": identifier, "--config": configPath });
+  const overlays: string[] = [];
+  const selected = parse(cli, { ...flags("--release", "--debug", "--no-bundle", "--ci", "-v", "--verbose"), "--features": value, "--target": identifier, "--config": configPath }, undefined,
+    (name, tokens) => { if (name === "--config") overlays.push(tokens.length > 1 ? tokens[1]! : tokens[0]!.slice("--config=".length)); });
   if (selected.has("--debug") && selected.has("--release")) throw new Error("Tauri 的 Debug 和 Release 只能选择一个");
   parse(cargo, { ...flags("--locked", "--offline", "--frozen", "--no-default-features", "--all-features"), "--jobs": integer, "-j": integer });
-  return { debug: !selected.has("--release"), target: selected.get("--target"), args: [
+  return { debug: !selected.has("--release"), target: selected.get("--target"), overlays, args: [
     ...cli.filter((arg) => !["--release", "--debug", "--no-bundle"].includes(arg)), ...(cargo.length ? ["--", ...cargo] : []),
   ] };
 }

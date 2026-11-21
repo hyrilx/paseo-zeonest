@@ -11,13 +11,14 @@ import { discoverGradle, discoverXcode } from "./native-projects";
 import type { Gradle, Xcode } from "./native-projects";
 import { misePin } from "./mise";
 
+type JsRequirements = { node?: string; manager?: string; managerEngine?: string; miseNode?: string };
 export type ProjectTarget = Target & {
   cwd: string;
   stamp: string;
-  requirements: { node?: string; manager?: string; managerEngine?: string; miseNode?: string; rust?: string; rustChannel?: string; rustPath?: string; rustIssue?: string; miseCmake?: string; miseJava?: string };
+  requirements: JsRequirements & { install?: JsRequirements; rust?: string; rustChannel?: string; rustPath?: string; rustIssue?: string; miseCmake?: string; miseJava?: string };
   cargo?: { name?: string; workspace: string };
-  cmake?: { dir: string; stamp: string; preset?: string; target?: string; configurations?: Record<string, string[]>; tool?: string };
-  tauri?: { cli?: true; workspace: string; manager?: "npm" | "pnpm" };
+  cmake?: { dir: string; stamp: string; preset?: string; target?: string; configurations?: Record<string, string[]>; writePaths?: Record<string, string[]>; defaultConfig?: string; tool?: string };
+  tauri?: { cli?: true; workspace: string; frontend: string; manager?: "npm" | "pnpm" };
   install?: { cwd: string; lock?: string; workspace?: boolean; required: { from: string; name: string; version: string }[] };
   gradle?: Gradle;
   xcode?: Xcode;
@@ -97,7 +98,9 @@ function packageTools(root: string, project: string, installRoot: string, data: 
     stamp: [declared, pnpm, pnpmLock, npmLock, installConfig, memberConfig, nodePin, pin(manager)],
     requirements: { node: version(object(data.engines).node) ?? version(object(parent.engines).node), miseNode: nodePin,
       managerEngine: version(object(data.engines)[manager]) ?? version(object(parent.engines)[manager]),
-      manager: declared?.split("@")[1]?.split("+sha")[0] ?? pin(manager) } } as const;
+      manager: declared?.split("@")[1]?.split("+sha")[0] ?? pin(manager),
+      install: project === installRoot ? undefined : { node: version(object(parent.engines).node), managerEngine: version(object(parent.engines)[manager]),
+        miseNode: misePin(installRoot, "node", read), manager: version(parent.packageManager)?.split("@")[1]?.split("+sha")[0] ?? misePin(installRoot, manager, read) } } } as const;
 }
 
 export function discoverProjects(root: string): Discovery {
@@ -282,19 +285,20 @@ function discoverTauri(root: string, dirs: string[], jsRoots: Map<string, JsOwne
   const apps = dirs.flatMap((native) => {
     const entries = ["tauri.conf.json", "tauri.conf.json5", "Tauri.toml"].map((name) => at(native, name))
       .flatMap((source) => { const conf = read(source); return conf === undefined ? [] : [{ source, conf }]; });
-    return entries.map((entry) => ({ native, project: native === "." ? "." : dirname(native), ...entry }));
+    return entries.map((entry) => ({ native, project: native === "." ? "." : dirname(native), formats: entries.length, ...entry }));
   });
-  for (const { native, project, source, conf } of apps) {
+  for (const { native, project, source, conf, formats } of apps) {
     const manifest = read(at(native, "Cargo.toml"));
     if (!manifest) { notices.push(`${source}：缺少 Cargo.toml`); continue; }
     try {
-      // The CLI searches from its cwd and offers no stable argument that selects a different Rust app.
-      if (apps.filter((app) => app.native === project || dirname(app.native) === project).length !== 1 || (native !== project && native !== at(project, "src-tauri"))) {
-        throw new Error("无法从 CLI 工作目录唯一绑定此 Rust 应用（支持目录本身或 src-tauri）");
-      }
+      // Explicit CLI bindings distinguish sibling Rust apps, regardless of directory name.
+      if (formats !== 1) throw new Error("同一 Tauri Rust 目录存在多个基础配置，无法确认绑定");
       const pkgText = read(at(project, "package.json"));
+      if (!pkgText && dirs.some((dir) => dir !== project && (project === "." || dir.startsWith(project + "/")) && read(at(dir, "package.json")) !== undefined)) {
+        throw new Error("Tauri 前端目录没有 package.json，但下层存在候选；无法确认 CLI 会选择哪个前端");
+      }
       const pkg = pkgText === undefined ? {} : json(pkgText);
-      const confData = source.endsWith(".toml") ? toml(conf) : object(source.endsWith(".json5") ? JSON5.parse(conf) : json(conf));
+      const confData = tauriConfig(source, conf);
       const frontendOutput = observePath(root, native, str(table(confData.build).frontendDist));
       const cargo = table(toml(manifest).package);
       const owner = jsRoots.get(project);
@@ -314,9 +318,15 @@ function discoverTauri(root: string, dirs: string[], jsRoots: Map<string, JsOwne
       const outputs = frontendOutput ? [frontendOutput] : [];
       targets.push({ adapter: "tauri", project: native, source, cwd: project, name: "build (Debug, no bundle)",
         stamp: digest(JSON.stringify([conf, manifest, wsText, pkgText, parentText, js?.stamp, pin])),
-        tauri: { cli, manager: js?.manager, workspace }, install: js?.install, requirements: { ...js?.requirements, ...rust }, outputs });
+        tauri: { cli, manager: js?.manager, workspace, frontend: project }, install: js?.install, requirements: { ...js?.requirements, ...rust }, outputs });
     } catch (error) { notices.push(`${source}：${(error as Error).message}`); }
   }
+}
+
+export function tauriConfig(file: string, text: string) {
+  const data = file.endsWith(".toml") ? toml(text) : object(file.endsWith(".json5") ? JSON5.parse(text) : json(text));
+  if (table(data.build).runner !== undefined) throw new Error(`${file}：自定义 Tauri build.runner 无法绑定到所选 Cargo`);
+  return data;
 }
 
 function supportedPattern(p: unknown): p is string {

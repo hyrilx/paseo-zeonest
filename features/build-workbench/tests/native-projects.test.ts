@@ -82,21 +82,21 @@ if (args.includes('tasks')) {
   assert.equal(existsSync(workspaceFile("probe-ran")), false, "verification must not execute the Wrapper");
   assert.deepEqual((await run(w, workspace, c)).run.confirmedTargets, [":build", build.name, ":renderer:createDistributable", ":renderer:shadowJar", ":renderer:renderAssets", ":renderer:testDemoReleaseUnitTest"]);
   assert.ok(w.discover(workspace).targets.find((item) => item.name === build.name)?.confirmed);
-  assert.ok(w.discover({ ...workspace, id: "other" }).targets.find((item) => item.name === build.name)?.confirmed);
+  assert.ok(!w.discover({ ...workspace, id: "other" }).targets.some((item) => item.name === build.name));
   const variant = ":renderer:assembleDemoRelease";
   const property = "-PsampleFeature=two words";
   const buildConfig = { ...configuration(w, workspace, build), options: ["--max-workers", "2", property], artifacts: ["sources/renderer/produced"] };
   assert.throws(() => w.preview(workspace, buildConfig), /未确认此目标/u);
-  assert.ok((await run(w, workspace, { ...c, options: [property] })).run.confirmedTargets?.includes(variant));
+  assert.ok((await run(w, workspace, { ...c, options: buildConfig.options })).run.confirmedTargets?.includes(variant));
   const variantTarget = { ...build, name: variant };
   assert.throws(() => w.preview(workspace, { ...buildConfig, target: variantTarget, options: [] }), /未确认此目标/u);
-  assert.deepEqual(w.discover(workspace).targets.find((item) => item.name === variant)?.probeOptions, [property]);
+  assert.deepEqual(w.discover(workspace).targets.find((item) => item.name === variant)?.probeOptions, buildConfig.options);
   assert.throws(() => w.preview(workspace, { ...buildConfig, options: [":renderer:publish"] }), /不支持选项/u);
   const detail = await run(w, workspace, buildConfig);
   assert.ok(detail.artifacts.some((a) => a.path.endsWith("fixture.jar") && a.state === "new"));
   const reopened = new Workbench(store, env);
   t.after(() => reopened.close());
-  assert.ok(reopened.discover(workspace).targets.find((item) => item.name === build.name)?.confirmed);
+  assert.ok(!reopened.discover(workspace).targets.some((item) => item.name === build.name));
   put(workspaceFile("settings.gradle"), settings + "// changed\n");
   assert.ok(!reopened.discover(workspace).targets.find((item) => item.name === build.name));
 });
@@ -118,12 +118,14 @@ test("long Gradle probes keep late build entries beyond log and target limits; o
   const { home, workspace } = fixture(t);
   const file = (name: string) => join(workspace.root, name);
   put(file("settings.gradle"), "include 'app', 'desktop-app'\n");
+  for (const project of ["app", "desktop-app"]) put(file(project + "/build.gradle"), "// fixture");
   put(file("package.json"), JSON.stringify({ scripts: Object.fromEntries(Array.from({ length: WORKSPACE_TARGET_LIMIT + 1 }, (_, i) => ["script" + i, "fixture"])) }));
-  put(file("gradle/wrapper/gradle-wrapper.properties"), "distributionUrl=https://example.test/gradle.zip\n");
-  put(file("gradle/wrapper/gradle-wrapper.jar"), "fixture");
+  const distro = join(home, "gradle");
+  put(join(distro, "lib/gradle-launcher-9.5.1.jar"), "fixture");
   const javaHome = join(home, "jdk");
+  for (const path of ["release", "lib/modules", "lib/server/libjvm.so"]) put(join(javaHome, path), "fixture");
   put(join(javaHome, "bin/java"), 'process.stderr.write("openjdk version \\"21.0.1\\"");', true);
-  put(file("gradlew"), `
+  put(join(distro, "bin/gradle"), `
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
 assert.ok(process.argv.includes('tasks') && process.argv.includes('--all'));
@@ -145,7 +147,7 @@ else if (mode === 'large') {
 }
 `, true);
   const store = join(home, "records");
-  const env = { PATH: [join(javaHome, "bin"), dirname(process.execPath)].join(delimiter), JAVA_HOME: javaHome, HOME: home };
+  const env = { PATH: [join(distro, "bin"), join(javaHome, "bin"), dirname(process.execPath)].join(delimiter), JAVA_HOME: javaHome, HOME: home };
   const w = new Workbench(store, env);
   t.after(() => w.close());
   const key = { adapter: "gradle", project: ".", name: "tasks --all" } as const;

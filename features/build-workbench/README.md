@@ -13,19 +13,21 @@
 | 技术栈 | 发现与构建 |
 | --- | --- |
 | npm/pnpm | 按各自 workspace 成员规则选择包和安装根；pnpm 未声明 `packages` 时只包含根包。选项传给脚本，例如 `--mode staging` 由脚本解释。 |
-| Cargo | 识别 workspace 显式成员及根内路径依赖，从实际启动目录读取配置，支持 Rust `channel` / `path` 固定、profile、features 和 target。产物由 Cargo 报告。 |
-| CMake | 先 configure，再从 File API 选择目标。更换工具或 configure 参数使用独立构建目录。支持 `--config Release --parallel 4`；参数留空时使用 CMake 默认值。 |
-| Tauri | 从 JSON、JSON5 或 TOML 识别能唯一定位的应用，用所选 Rust 工具和项目 JS CLI 或 `cargo-tauri` 构建。默认 Debug，可选 `--release`、features 和 target，保持 `--no-bundle`。 |
-| Gradle | 用 Wrapper 或已安装 Gradle 枚举原生任务，包括自定义组。按所选工具和项目参数探测；截断时使用 `--workbench-task-filter=:模块:` 或任务名片段补查。启动任务前确认实际行为。 |
+| Cargo | 从实际启动目录读取配置、TOML `include` 和输出目录环境变量。识别 workspace 显式成员及根内路径依赖，支持 Rust `channel` / `path` 固定、profile、features 和 target。声明的编译器与所选工具不同时拒绝启动；产物由 Cargo 报告。 |
+| CMake | 先 configure，再从 File API 选择目标。更换工具或 configure 参数使用独立构建目录；File API 列出的配置输入（含外部文件）变化后重新配置。支持 `--config Release --parallel 4`；留空时使用 CMake 默认值。 |
+| Tauri | 显式绑定可确认的 Rust 应用和前端目录，包括非 `src-tauri` 布局。使用所选 Rust 工具及项目 JS CLI 或已选 `cargo-tauri`；绑定冲突或项目 CLI 缺失时不换用其他 CLI。默认 Debug，可选 `--release`、features 和 target，保持 `--no-bundle`。 |
+| Gradle | 用 Wrapper 或已安装 Gradle 枚举原生任务，包括自定义组。探测与运行须使用同一工具及相同顺序的全局选项，例如 `--offline --parallel`。截断时用 `--workbench-task-filter=:模块:` 补查；任务执行专属选项不参与探测匹配。启动前确认任务实际行为。 |
 | Xcode | 从 workspace 或独立工程查询 scheme；有多个本地 Xcode 时可选安装。`-configuration` 留空使用 scheme 默认，仅构建无签名 iOS 模拟器产物。 |
 
 选项栏支持引号和反斜杠，例如 `--label "two words"`。预览显示参数、准备步骤和工具环境调整。切换目标会清空临时选项和手填产物路径，可以主动复制 Gradle 探测参数。
 
-同一宿主上，两个工作区指向同一个实际 Gradle 项目目录时，刷新就能看到已成功探测的任务。缓存位于 `PASEO_HOME/zeonest/build-workbench/gradle-tasks/`，重启工作台或淘汰运行记录后仍可复用；运行记录、日志和配置仍按工作区隔离。项目声明、Wrapper 或 JDK 等工具上下文变化后需要重新探测；不同 `-P`/`-D` 等项目选项各自确认。失败和停止不会替换有效结果。无法完整追踪的构建逻辑仍须在当前工作区会话探测，每份结果最多启动一次。升级前的运行记录不会迁入此缓存。
+同一 daemon 的工作区指向同一个实际 Gradle 项目目录时，可以共享已确认的任务。只有可追踪的声明（简单的字面模块声明和内建插件）与可确认的已安装 Gradle/JDK 组合才写入共享缓存。Wrapper、自定义 catalog、`apply`、动态项目配置、无法确认的初始化脚本和 JVM 设置等仍可探测，但结果仅在发起工作区的当前会话用一次。
 
-产物优先使用 Cargo 或 CMake 原生报告。Gradle、Tauri 和 Xcode 未取得原生路径时可手填要观察的目录；`dist/` 等仅作线索。外部 Cargo 共享输出仍参与冲突排队，不能在面板浏览。项目名、示例模块、构建钩子和 SDK 版本不作为适配条件。
+共享缓存位于 `PASEO_HOME/zeonest/build-workbench/gradle-tasks/`，保存任务名及上下文摘要；另一工作区要自行输入匹配的选项，或使用自己的保存配置。原始 `-P`/`-D`、选项复制、日志和运行历史只对发起工作区可见。共享结果在重启工作台或淘汰历史后仍可复用；声明、工具或环境变化后重新探测。失败与停止不会替换有效结果；旧格式缓存不再读取。
 
-静态扫描有深度和目标数量上限，达到上限时显示提示。还未覆盖所有原生入口和声明：例如 CMake build preset、自定义目标、非 iOS Xcode SDK，以及会另选运行时的 pnpm 或 `devEngines` 配置。执行链有歧义时报告原因；工作台不会拿另一套工具继续。
+产物优先使用 Cargo 或 CMake 原生报告。Gradle、Tauri 和 Xcode 未取得原生路径时可手填要观察的目录；`dist/` 等仅作线索。已知的外部 Cargo/CMake 写入位置仍参与冲突排队，不能在面板浏览。项目名和验收样本的构建钩子不作为适配条件。
+
+静态扫描有深度和目标数量上限。Gradle 的嵌套独立工程用自己的 `settings.gradle[.kts]` 标识；父工程内只有 build 文件的目录不另列为根。CMake 支持扫描范围内的嵌套入口和可读的 configure preset；不展开动态 preset 引用、不运行 build preset 或未确认的自定义目标。暂不覆盖非 iOS Xcode SDK。npm/pnpm 分别核验安装根和脚本包的版本声明；检测到另选 Node 的项目、用户或宿主设置时拒绝验证，不尝试切换。pnpm 展示候选版本，不保证自定义脚本不会自行选择别的运行时。
 
 ## 验收记录
 
@@ -36,9 +38,10 @@
 - 用隔离的真实 Gradle 工程枚举并运行 `:assembleDemoRelease -Pchannel=staging --max-workers 2`，确认任务收到 `staging` 并成功退出；该 fixture 不是 Android APK 构建。用新目录重跑了 CMake preset，Cargo 也通过复验。
 - Fixture 覆盖 npm 失败、pnpm 被停止后的部分安装：再次运行和重启后重试都先准备，不把锁文件、包版本或 PnP 当作就绪证明。另覆盖多套 Xcode、scheme 变更、Tauri 的实际 Node/Cargo 子进程解析、mise 补充 `protoc` 时不覆盖 `cc`，以及跨工作区共享 Cargo 输出排队。
 - Gradle fixture 的 `tasks --all` 输出超过 256 KiB，且包含 600 多个候选。日志滚动后，刷新列表仍可选择并预览尾部的 `:app:assembleDebug` 和 `:desktop-app:createDistributable`。达到单次 256 项和工作区 512 项上限时，面板显示裁剪提示；退出失败、无法解析或取消均保留先前有效的结果。
-- Gradle 缓存 fixture 覆盖同目录跨 workspace ID 共享、独立 checkout 隔离、重启、历史淘汰、日志和配置隔离，以及项目声明、Wrapper、JDK 和用户 Gradle 配置变化后的失效。另验证定向补查可共享，无法完整追踪的结果只在原工作区会话使用一次。用真实 Wrapper `9.5.1` 和 Temurin `17.0.21` 在隔离目录离线探测 `-Pchannel=prod` 的条件任务：另一个 workspace ID 刷新和重建工作台服务后均能看到任务；另一 checkout 不可见，修改构建声明即失效。
+- Gradle 缓存 fixture 覆盖同目录共享、独立 checkout 隔离、重启、历史淘汰、发起方选项复制，以及声明、JDK、发行版与用户 init 变化后的失效。验证共享文件及另一工作区的发现响应不含原始选项，旧格式不被读取。用已安装的 Gradle `9.5.1`、Temurin `17.0.21` 离线复验：静态工程跨工作区并在重启后复用，自定义 catalog 仅当次使用；修改 `variants.toml` 后新探测返回 Green 而非 Blue；缺少 `--parallel` 无法运行只在该选项下注册的任务。
 - 终审复验使用隔离目录：pnpm `12.21.0` 原生命令和工作台对缺失 `packages`、brace、排除规则的成员判断一致；原生安装后脚本使用所选 Node `v26.13.1`。Cargo `1.100.0` 使用固定路径工具链编译隐式成员，原生报告根配置指定的 `outer-output/debug/native-product`，未使用成员目录的配置。
 - Gradle `9.5.1` 离线枚举自定义 `renderAssets`；`conditionalRender` 只在 `-Pchannel=prod` 的上下文可运行。CMake `4.5.1` + Ninja Multi-Config 在留空时生成 `Release/portable`，显式 Debug 生成 `Debug/portable`；被包含的 `.cmake` 文件变动后必须重新配置，切换 Unix Makefiles 使用不同目录。
+- 本轮另用真实 CMake `4.5.1` 在两个隔离 checkout 读取相对和绝对外部 include，以默认 Release 和显式 Debug 生成外部产物，修改外部文件后旧目标失效。真实 Cargo `1.100.0` 的 `metadata` 和离线构建使用 `include` 指定的共享目标及中间目录。两种共享输出的排队以 fixture 验证；外部产物均未对面板开放。pnpm `12.21.0` 复验原生安装和脚本使用绑定的 Node。Tauri 应用引用与 Xcode scheme 以替身测试，未运行真实 Tauri/Xcode 构建。
 - 未在原样本仓库安装依赖或修改配置。
 
 ### paseo-zeonest

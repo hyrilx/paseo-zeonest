@@ -129,12 +129,20 @@ export class Workbench {
     const scoped = resolveWithin(w.root, t.cwd);
     const directory = workspaceRoot(scoped);
     if (directory !== scoped) throw new Error("Gradle 项目目录已变化，请刷新");
-    return { directory, stamp: t.stamp, volatileOwner: t.gradle?.volatile ? JSON.stringify([w.id, w.root]) : undefined };
+    return { directory, stamp: t.stamp, owner: JSON.stringify([w.id, w.root]) };
   }
 
   #nativeResults(w: Workspace, t: ProjectTarget): NativeResult[] {
     const validTool = new Set(toolchains(t, this.environment, new Map(), w.root).map((tool) => tool.signature));
-    if (t.gradle) return this.#gradle.read(this.#gradleScope(w, t), validTool);
+    if (t.gradle) {
+      const scope = this.#gradleScope(w, t);
+      const history = this.#state(w.id).history;
+      return this.#gradle.read(scope, validTool).filter((result) => t.gradle?.volatile ? result.consume : true).map((result) => {
+        const own = history.find((entry) => entry.run.status === "success" && entry.probeRoot === scope.directory &&
+          entry.probeStamp === scope.stamp && entry.probeContext === result.context && entry.probeFilter === result.filter);
+        return { ...result, options: own?.probeOptions };
+      });
+    }
     const key = targetId({ ...t, name: "list schemes" });
     const scopes = new Set<string>();
     const results: NativeResult[] = [];
@@ -218,7 +226,7 @@ export class Workbench {
     if (!tool) throw new Error(toolIssues(t, this.environment).join("；") || "工具不存在或路径已变更，请刷新后重新选择");
     this.#verificationRoot = w.root;
     try {
-      const found = await verifyTool(t, tool, this.#probes, this.accept);
+      const found = await verifyTool(t, tool, this.#probes, this.accept, w.root);
       const updated = this.#lookup(w, c.target);
       const refreshed = toolchains(updated, this.environment, new Map(), w.root).find(({ candidate }) => candidate.id === c.tool);
       if (refreshed?.signature !== tool.signature || updated.stamp !== t.stamp) throw new Error("检查期间工具或项目声明发生变化，请重试");
@@ -247,6 +255,7 @@ export class Workbench {
     const cwd = resolveWithin(w.root, t.cwd);
     const prep = preparation(w.root, t, tool);
     const notes = [...(tool.overrides ?? [])];
+    for (const [name, path] of Object.entries(build.environment ?? {})) notes.push(`${name}=${path}`);
     for (const [name, path] of Object.entries(tool.bindings ?? {})) notes.push(`${name} → ${path}`);
     if (prep.notice) notes.push(prep.notice);
     if (hints.length) notes.push(`产物线索（未经构建工具确认）：${hints.join("、")}`);
@@ -262,12 +271,12 @@ export class Workbench {
     if (build.taskFilter) notes.push(`仅收录匹配 ${build.taskFilter} 的任务`);
     const command: Command = { cwd: t.cwd, source: t.source, argv: [tool.executable, ...args], tool: tool.candidate,
       ...(prep.steps.length ? { preparation: prep.steps.map(({ cwd, invocation }) => ({ cwd, argv: [invocation.executable, ...invocation.args] })) } : {}), ...(notes.length ? { notes } : {}) };
-    const locks = [...new Set([w.root, build.cargo?.targetDir, build.cargo?.buildDir].filter((p): p is string => !!p))];
-    const fingerprint = digest(JSON.stringify([w.root, targetId(t), t.stamp, tool.signature, command, outputs, build.cargo, consume?.id]));
+    const locks = [...new Set([w.root, build.cargo?.targetDir, build.cargo?.buildDir, ...(build.sharedWrites ?? [])].filter((p): p is string => !!p))];
+    const fingerprint = digest(JSON.stringify([w.root, targetId(t), t.stamp, tool.signature, command, outputs, locks, build.cargo, build.planInputs, consume?.id]));
     const configure = build.configureDir && t.cmake ? { base: t.cmake.dir, dir: build.configureDir, stamp: t.cmake.stamp, tool: tool.signature } : undefined;
     const nativeProbe = t.operation && (t.adapter === "gradle" || t.adapter === "xcode") ? { adapter: t.adapter, stamp: t.stamp, context, tool: tool.signature,
       filter: build.taskFilter, options: build.nativeOptions ?? [], gradleScope: t.gradle ? this.#gradleScope(w, t) : undefined } : undefined;
-    const main = { executable: tool.executable, args, cwd, env: tool.env, bindings: tool.bindings, reapAfterExit: !!t.gradle,
+    const main = { executable: tool.executable, args, cwd, env: { ...tool.env, ...build.environment }, bindings: tool.bindings, projectExecutable: build.projectExecutable, reapAfterExit: !!t.gradle,
       bindingDirectory: t.cmake ? join(this.data, "cmake-bin", digest(JSON.stringify(tool.bindings ?? {}))) : undefined };
     const cargoReport = build.cargoReport && build.cargo ? { source: t.cargo?.name ? resolveWithin(w.root, t.source) : undefined, dir: build.cargo.targetDir } : undefined;
     return { command, fingerprint, steps: [...prep.steps.map(({ invocation }) => invocation), main], outputs, hints, configure, nativeProbe, consume, cargoReport, locks };
@@ -415,10 +424,14 @@ export class Workbench {
           if (gradleScope) {
             const current = this.#gradleScope(job.workspace, probe);
             const tools = toolchains(probe, this.environment, new Map(), job.workspace.root);
-            if (current.directory !== gradleScope.directory || current.volatileOwner !== gradleScope.volatileOwner || !tools.some((candidate) => candidate.signature === tool)) {
+            const effective = tools.find((candidate) => candidate.signature === tool);
+            if (current.directory !== gradleScope.directory || !effective) {
               throw new Error("探测期间 Gradle 目录、声明或工具发生变化，请重新探测");
             }
-            this.#gradle.publish(current, { context, tool, filter, options, names: confirmed, limited: reported.limited });
+            const persistent = !!effective.gradlePersistent && !probe.gradle?.volatile && !options.some((opt) => opt.startsWith("-D") || opt.startsWith("-Porg.gradle."));
+            this.#gradle.publish(current, { context, tool, filter, names: confirmed, limited: reported.limited }, persistent);
+            Object.assign(job.entry, { probeStamp: stamp, probeContext: context, probeRoot: current.directory, probeFilter: filter ? digest(filter) : undefined, probeOptions: options });
+            if (!persistent) result += "；构建或工具上下文无法完整追踪，结果仅供当前工作区会话启动一次";
           } else {
             job.entry.probeStamp = stamp;
             job.entry.probeRoot = job.workspace.root;

@@ -1,18 +1,18 @@
-import { opendirSync, realpathSync, statSync } from "node:fs";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { lstatSync, opendirSync, realpathSync, statSync } from "node:fs";
+import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { satisfies, valid, validRange } from "semver";
 import type { Candidate, Configuration } from "../shared/contracts";
-import { digest, resolveWithin } from "./paths";
+import { at, digest, inside, missing, readBounded, readText, resolveWithin } from "./paths";
 import { autoInstallRisk, directories, executable, executables, installedExecutables } from "./mise";
 import { cargoOptions, cmakeOptions, gradleOptions, tauriOptions, xcodeOptions } from "./options";
 import { launch } from "./process";
 import type { Bindings, Invocation, OwnedProcess } from "./process";
 import { cargoContext } from "./rust-projects";
 import { cmakeBuildDir } from "./cmake";
-import type { ProjectTarget } from "./projects";
+import { tauriConfig, type ProjectTarget } from "./projects";
 
-export type Tool = { candidate: Candidate; signature: string; executable: string; env: NodeJS.ProcessEnv; bindings?: Bindings; overrides?: string[]; tauriCargoCli?: string };
+export type Tool = { candidate: Candidate; signature: string; executable: string; env: NodeJS.ProcessEnv; bindings?: Bindings; overrides?: string[]; tauriCargoCli?: string; gradlePersistent?: boolean };
 export type Checks = Map<string, string>;
 
 export function identity(path: string) {
@@ -101,13 +101,47 @@ function gradleEnvironment(env: NodeJS.ProcessEnv, cwd: string) {
   try {
     const dir = opendirSync(initDir);
     try {
-      for (let item, count = 0; (item = dir.readSync()) && count++ < 128;) {
+      for (let item, count = 0; (item = dir.readSync());) {
+        if (count++ === 128) { init.push("truncated"); break; }
         if (/\.gradle(?:\.kts)?$/u.test(item.name)) init.push(optionalIdentity(join(initDir, item.name)));
       }
     } finally { dir.closeSync(); }
   } catch (error) { init.push((error as NodeJS.ErrnoException).code ?? "unavailable"); }
-  const variables = Object.entries(env).filter(([name]) => /^(?:HOME$|ANDROID_SDK_ROOT$|JAVA_OPTS$|JDK_JAVA_OPTIONS$|_JAVA_OPTIONS$|GRADLE_|ORG_GRADLE_PROJECT_)/u.test(name)).sort(([a], [b]) => a.localeCompare(b));
-  return [home, variables, optionalIdentity(initDir), ...init.sort(), ...["gradle.properties", "init.gradle", "init.gradle.kts"].map((file) => optionalIdentity(join(home, file)))];
+  const variables = Object.entries(env).sort(([a], [b]) => a.localeCompare(b));
+  const declarations = ["gradle.properties", "init.gradle", "init.gradle.kts"].map((file) => optionalIdentity(join(home, file)));
+  const safe = isAbsolute(env.HOME ?? "") && declarations.every((entry) => entry === "ENOENT") &&
+    init.every((entry) => entry === "ENOENT") && !["GRADLE_OPTS", "JAVA_OPTS", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "BASH_ENV", "ENV"].some((key) => env[key]) &&
+    !Object.keys(env).some((key) => /^ORG_GRADLE_PROJECT_org\.gradle\./u.test(key));
+  return { identity: [home, variables, optionalIdentity(initDir), ...init.sort(), ...declarations], safe };
+}
+
+function gradleDistribution(launcher: string) {
+  const real = realpathSync(launcher);
+  const home = dirname(dirname(real));
+  const files: string[] = [];
+  let safe = true;
+  let launcherJar = false;
+  function visit(path: string, depth: number) {
+    if (depth > 8 || files.length >= 2048) throw new Error("Gradle 安装超出可追踪范围");
+    const item = lstatSync(path);
+    if (item.isSymbolicLink()) throw new Error("Gradle 安装包含链接");
+    files.push(identity(path));
+    if (!item.isDirectory()) {
+      if (/\/lib\/gradle-launcher-[^/]+\.jar$/u.test(path)) launcherJar = true;
+      return;
+    }
+    const dir = opendirSync(path);
+    try { for (let entry; (entry = dir.readSync());) visit(join(path, entry.name), depth + 1); }
+    finally { dir.closeSync(); }
+  }
+  try {
+    for (const segment of ["lib", "init.d"]) {
+      const path = join(home, segment);
+      if (optionalIdentity(path) !== "ENOENT") visit(path, 0);
+      if (segment === "init.d" && files.some((file) => /\/init\.d\/.*\.gradle(?:\.kts)?:/u.test(file))) safe = false;
+    }
+  } catch { safe = false; }
+  return { identity: files.sort(), safe: safe && launcherJar && real === join(home, "bin/gradle") };
 }
 
 function nativeTools(t: ProjectTarget, env: NodeJS.ProcessEnv, checked: Checks, root: string): Tool[] {
@@ -123,13 +157,19 @@ function nativeTools(t: ProjectTarget, env: NodeJS.ProcessEnv, checked: Checks, 
   const javaExecutables = [...new Set([...preferred, ...installedExecutables("java", env, t.requirements.miseJava), ...systemJdks])]
     .filter((path) => executable(path) && (process.platform !== "darwin" || realpathSync(path) !== "/usr/bin/java") && !autoInstallRisk(path));
   const context = gradleEnvironment(env, resolveWithin(root, t.cwd));
+  // A project-controlled Wrapper may pick a different or customized distribution.
+  // Do not promote its result to a persistent record without a verified launcher chain.
+  const distributions = new Map(gradles.map((gradle) => [gradle, wrapper ? undefined : gradleDistribution(gradle)]));
   return javaExecutables.flatMap((java) => gradles.map((gradle) => {
     const javaHome = dirname(dirname(realpathSync(java)));
     // Gradle's native daemon can detach; keep launcher and forked JVM integration disabled.
     const runEnv = { ...env, JAVA_HOME: javaHome, JAVA_TOOL_OPTIONS: [env.JAVA_TOOL_OPTIONS, "-Dorg.gradle.native=false"].filter(Boolean).join(" ") };
-    const gradleContext = [context, !!wrapper, optionalIdentity(join(javaHome, "release"))];
-    return makeTool(t, checked, [java, gradle, ...(jar ? [jar] : [])], gradle, runEnv,
-      `${wrapper ? "Gradle Wrapper" : gradle} · ${javaHome}`, { java }, [`JAVA_HOME=${javaHome}`, "JAVA_TOOL_OPTIONS 追加 -Dorg.gradle.native=false，让 Gradle 单次运行留在可停止的进程组中"], gradleContext);
+    const distro = distributions.get(gradle);
+    const javaFiles = ["release", "lib/modules", "lib/server/libjvm.dylib", "lib/server/libjvm.so"].map((file) => optionalIdentity(join(javaHome, file)));
+    const gradleContext = [context.identity, !!wrapper, distro?.identity, javaFiles];
+    return { ...makeTool(t, checked, [java, gradle, ...(jar ? [jar] : [])], gradle, runEnv,
+      `${wrapper ? "Gradle Wrapper" : gradle} · ${javaHome}`, { java }, [`JAVA_HOME=${javaHome}`, "JAVA_TOOL_OPTIONS 追加 -Dorg.gradle.native=false，让 Gradle 单次运行留在可停止的进程组中"], gradleContext),
+      gradlePersistent: context.safe && !!distro?.safe && javaFiles.slice(0, 2).every((value) => isAbsolute(value)) && javaFiles.slice(2).some((value) => isAbsolute(value)) };
   })).slice(0, 32);
 }
 
@@ -147,16 +187,14 @@ export function toolchains(t: ProjectTarget, env: NodeJS.ProcessEnv, checked: Ch
     const helpers = !env.PROTOC ? helperBinding("protoc", env) : {};
     const js = tauri?.manager ? jsTools(t, env, tauri.manager) : [];
     return rustPairs(t, env).flatMap(({ cargo, rustc, bin }) => {
-      const rustEnv = { ...env, RUSTC: rustc };
       const bindings = { ...helpers, cargo, rustc, ...(rustCli ? { "cargo-tauri": rustCli } : {}) };
-      const overrides = [`RUSTC=${rustc}`];
       const paths = [cargo, rustc, ...(rustCli ? [rustCli] : [])];
-      if (!tauri) return [makeTool(t, checked, paths, cargo, rustEnv, `Cargo · ${bin}`, bindings, overrides)];
-      if (!tauri.manager) return [{ ...makeTool(t, checked, paths, cargo, rustEnv, `Tauri · ${bin}`, bindings, overrides), tauriCargoCli: rustCli }];
+      if (!tauri) return [makeTool(t, checked, paths, cargo, env, `Cargo · ${bin}`, bindings)];
+      if (!tauri.manager) return [{ ...makeTool(t, checked, paths, cargo, env, `Tauri · ${bin}`, bindings), tauriCargoCli: rustCli }];
       // Tauri's JS CLI launches Cargo by name. Bind it independently of npm/pnpm's install directory.
       return js.map(({ node, manager, env: runtime, bindings: jsBindings, overrides: jsOverrides }) =>
-        makeTool(t, checked, [node, manager, ...paths], manager, { ...runtime, RUSTC: rustc }, `Tauri · ${tauri.manager} · ${bin} · ${dirname(node)} → ${dirname(manager)}`,
-          { ...jsBindings, ...bindings }, [...jsOverrides, ...overrides]));
+        makeTool(t, checked, [node, manager, ...paths], manager, runtime, `Tauri · ${tauri.manager} · ${bin} · ${dirname(node)} → ${dirname(manager)}`,
+          { ...jsBindings, ...bindings }, jsOverrides));
     });
   }
   if (t.adapter !== "npm" && t.adapter !== "pnpm") return [];
@@ -167,6 +205,12 @@ export function toolchains(t: ProjectTarget, env: NodeJS.ProcessEnv, checked: Ch
 // npm/pnpm prepend local package bins after launch. Detect an override before
 // the selected script or CLI can resolve a different runtime than the preview.
 export function assertPackageBindings(invocation: Invocation) {
+  if (invocation.projectExecutable) {
+    const { root, path } = invocation.projectExecutable;
+    if (!executable(path) || !inside(root, realpathSync(path))) {
+      throw new Error("依赖准备后未找到所选项目的 Tauri CLI；检查安装布局后刷新，不使用宿主的同名命令");
+    }
+  }
   const bindings = invocation.bindings;
   if (!bindings?.node) return;
   for (let dir = invocation.cwd;; dir = dirname(dir)) {
@@ -187,6 +231,23 @@ function helperBinding(name: string, env: NodeJS.ProcessEnv): Bindings {
   return helper ? { [name]: helper } : {};
 }
 
+const runtimeSetting = (name: string) => /^(?:usenodeversion|nodeversionforrun|nodeoptionsforrun)$/u.test(name.toLowerCase().replace(/[-_]/gu, ""));
+function assertRuntimeConfig(cwd: string, env: NodeJS.ProcessEnv, manager: string) {
+  const config = new Map(Object.entries(env).map(([name, value]) => [name.toLowerCase(), value]));
+  if ([...config].some(([name, value]) => value && ((name.startsWith("npm_config_") && runtimeSetting(name.slice(11))) ||
+      (name.startsWith("pnpm_") && runtimeSetting(name.slice(5)))))) throw new Error("宿主配置可能替换脚本 Node，无法验证所选运行时");
+  const nodeHome = dirname(dirname(manager));
+  const configFiles = [config.get("npm_config_userconfig") ?? join(env.HOME ?? homedir(), ".npmrc"),
+    config.get("npm_config_globalconfig") ?? join(nodeHome, "etc/npmrc"),
+    join(env.XDG_CONFIG_HOME ?? join(env.HOME ?? homedir(), ".config"), "pnpm/rc")];
+  for (const file of configFiles) {
+    try {
+      const text = readBounded(realpathSync(resolve(cwd, file)), 512 * 1024);
+      if (text.split(/\r?\n/u).some((line) => runtimeSetting(line.split("=", 1)[0]!.trim()))) throw new Error("可能替换脚本 Node");
+    } catch (error) { if (!missing(error)) throw new Error(`无法验证包管理器运行时配置：${file}`, { cause: error }); }
+  }
+}
+
 function jsTools(t: ProjectTarget, env: NodeJS.ProcessEnv, name: "npm" | "pnpm") {
   return installedExecutables("node", env, t.requirements.miseNode).flatMap((node) =>
     installedExecutables(name, env, t.requirements.manager).map((manager) => ({ node, manager,
@@ -204,6 +265,14 @@ export function matchesVersion(found: string, range: string | undefined): boolea
 function matchesMiseVersion(found: string, range: string | undefined) {
   // Labels such as lts or latest are manager selection hints, not semver expressions.
   return !range || validRange(range) === null || matchesVersion(found, range);
+}
+
+function rustContext(root: string, cwd: string, owner: string, tool: Tool) {
+  const context = cargoContext(root, cwd, owner, tool.env, tool.bindings?.rustc);
+  if (context.compiler && (!tool.bindings?.rustc || context.compiler !== realpathSync(tool.bindings.rustc))) {
+    throw new Error(`Cargo 实际编译器 ${context.compiler} 与所选 rustc 不一致；请选择相同工具或调整项目声明`);
+  }
+  return context;
 }
 
 export function buildArguments(root: string, t: ProjectTarget, opts: Configuration["options"], tool: Tool) {
@@ -227,20 +296,48 @@ export function buildArguments(root: string, t: ProjectTarget, opts: Configurati
     }
     if (t.cmake.tool !== tool.signature || !t.cmake.target) throw new Error("构建目录使用了另一套工具或工具已变化，请用当前组合重新配置");
     if (chosen && !Object.hasOwn(t.cmake.configurations ?? {}, chosen)) throw new Error(`当前 File API 未列出此目标的 ${chosen} 配置`);
-    return { args: ["--build", resolveWithin(root, t.cmake.dir), "--target", t.cmake.target, ...opts], outputs: chosen ? t.cmake.configurations![chosen]! : t.outputs };
+    const config = chosen ?? t.cmake.defaultConfig;
+    const writes = t.cmake.writePaths ?? {};
+    const sharedWrites = config === undefined ? Object.values(writes).flat() : writes[config] ?? [];
+    return { args: ["--build", resolveWithin(root, t.cmake.dir), "--target", t.cmake.target, ...opts], outputs: chosen ? t.cmake.configurations![chosen]! : t.outputs, sharedWrites };
   }
   if (t.tauri) {
     const selected = tauriOptions(root, t.cwd, opts);
-    const invoke = t.tauri.manager === "npm" ? ["exec", "--no", "--", "tauri"] : t.tauri.manager === "pnpm" ? ["exec", "tauri"] : ["tauri"];
+    const cwd = resolveWithin(root, t.cwd);
+    if (t.tauri.manager) assertRuntimeConfig(cwd, tool.env, tool.executable);
+    const bindings = { TAURI_APP_PATH: resolveWithin(root, t.project), TAURI_FRONTEND_PATH: resolveWithin(root, t.tauri.frontend) };
+    for (const [name, path] of Object.entries(bindings)) {
+      const value = tool.env[name];
+      if (value === undefined) continue;
+      const supplied = resolve(cwd, value);
+      if (!value || !inside(root, supplied) || resolveWithin(root, relative(root, supplied) || ".") !== path || supplied !== path) {
+        throw new Error(`${name} 与所选 Tauri 应用或前端目录冲突；请移除覆盖后重试`);
+      }
+    }
+    if (tool.env.TAURI_CONFIG !== undefined) throw new Error("无法确认宿主 TAURI_CONFIG 叠加；请使用项目内的 --config 文件");
+    const platformFiles = ["windows", "linux", "macos", "android", "ios"].flatMap((name) =>
+      [`tauri.${name}.conf.json`, `tauri.${name}.conf.json5`, `Tauri.${name}.toml`].map((file) => at(t.project, file)));
+    const explicit = selected.overlays.map((path) => at(t.cwd, path));
+    const inputs = [...platformFiles, ...explicit].map((path) => {
+      const text = readText(root, path);
+      if (text === undefined && explicit.includes(path)) throw new Error(`Tauri 叠加配置不存在：${path}`);
+      if (text !== undefined) tauriConfig(path, text);
+      return [path, text === undefined ? null : digest(text)];
+    });
+    const bins = t.tauri.manager ? [...new Set([t.cwd, t.install?.cwd ?? t.cwd])].map((dir) => resolve(root, dir, "node_modules/.bin/tauri")) : [];
+    const projectCli = bins.find((path) => executable(path)) ?? (t.tauri.manager === "npm" ? bins.at(-1) : bins[0]);
+    const invoke = t.tauri.manager === "npm" ? ["exec", "--no", "--", projectCli!] : t.tauri.manager === "pnpm" ? ["exec", projectCli!] : ["tauri"];
     return { args: [...invoke, "build", ...(selected.debug ? ["--debug"] : []), "--no-bundle", ...selected.args], outputs: t.outputs,
-      cargo: cargoContext(root, t.project, t.tauri.workspace, tool.env) };
+      cargo: rustContext(root, t.project, t.tauri.workspace, tool), environment: bindings, planInputs: inputs,
+      projectExecutable: projectCli ? { root, path: projectCli } : undefined };
   }
   if (t.cargo) {
     cargoOptions(root, t.cwd, opts);
     const report = !opts.some((s) => /^--message-format(?:=|$)/u.test(s));
     return { args: ["build", ...(t.cargo.name ? ["--package", t.cargo.name] : ["--workspace"]), ...(report ? ["--message-format=json-render-diagnostics"] : []), ...opts],
-      outputs: [], cargo: cargoContext(root, t.cwd, t.cargo.workspace, tool.env), cargoReport: report };
+      outputs: [], cargo: rustContext(root, t.cwd, t.cargo.workspace, tool), cargoReport: report };
   }
+  assertRuntimeConfig(resolveWithin(root, t.cwd), tool.env, tool.executable);
   // The package script owns its arguments. npm needs a separator; pnpm forwards everything after the script name.
   return { args: ["run", t.name, ...(opts.length && t.adapter === "npm" ? ["--"] : []), ...opts], outputs: t.outputs };
 }
@@ -251,6 +348,7 @@ export function preparation(root: string, t: ProjectTarget, tool: Tool): { steps
   if (!install || (manager !== "npm" && manager !== "pnpm")) return { steps: [] };
   if (!install.required.length && !install.workspace) return { steps: [], notice: "未声明需安装的依赖" };
   // A package manifest, lock or PnP loader may survive an incomplete install. Let the native manager decide what to reuse.
+  assertRuntimeConfig(resolveWithin(root, install.cwd), tool.env, tool.executable);
   const args = ["install"];
   return { notice: "安装就绪状态无法从文件确认；由包管理器按项目配置复用或准备依赖。",
     steps: [{ cwd: install.cwd, invocation: { executable: tool.executable, args, cwd: resolveWithin(root, install.cwd), env: tool.env, bindings: tool.bindings } }] };
@@ -270,7 +368,7 @@ export async function checkedCommand(invocation: Invocation, owned: Set<OwnedPro
   } finally { clearTimeout(timer); owned.delete(proc); }
 }
 
-export async function verifyTool(t: ProjectTarget, tool: Tool, owned: Set<OwnedProcess>, accept: () => void) {
+export async function verifyTool(t: ProjectTarget, tool: Tool, owned: Set<OwnedProcess>, accept: () => void, root?: string) {
   if (t.xcode) {
     const common = { cwd: tmpdir(), env: tool.env, executable: tool.executable };
     const version = await checkedCommand({ ...common, args: ["-version"] }, owned, accept);
@@ -304,18 +402,19 @@ export async function verifyTool(t: ProjectTarget, tool: Tool, owned: Set<OwnedP
     if (!found || !matchesVersion(found, t.requirements.rust && `>=${t.requirements.rust}`)) throw new Error(`Rust 版本不符合要求：${rv.slice(0, 80)}`);
     const rust = `${cv.split(" ").slice(0, 2).join(" ")} · ${rv.split(" ").slice(0, 2).join(" ")}`;
     if (!t.tauri) return rust;
-    const js = t.tauri.manager && await verifyJs(t, tool, owned, accept, t.tauri.manager);
+    const js = t.tauri.manager && await verifyJs(t, tool, owned, accept, t.tauri.manager, root);
     const cliVersion = tool.tauriCargoCli && await checkedCommand({ ...common, executable: cargo, args: ["tauri", "--version"] }, owned, accept);
     return [js, rust, cliVersion || "Tauri CLI 由项目依赖提供", "目标 SDK 由构建检查"].filter(Boolean).join(" · ");
   }
-  if (t.adapter === "npm" || t.adapter === "pnpm") return verifyJs(t, tool, owned, accept, t.adapter);
+  if (t.adapter === "npm" || t.adapter === "pnpm") return verifyJs(t, tool, owned, accept, t.adapter, root);
   throw new Error("该目标没有可验证的工具链");
 }
 
-async function verifyJs(t: ProjectTarget, tool: Tool, owned: Set<OwnedProcess>, accept: () => void, managerName: string) {
+async function verifyJs(t: ProjectTarget, tool: Tool, owned: Set<OwnedProcess>, accept: () => void, managerName: string, root?: string) {
   const [node, manager] = tool.candidate.paths;
   if (!node || !manager || [node, manager].some(autoInstallRisk)) throw new Error("请选择已安装的 Node 和包管理器。");
   const common = { cwd: tmpdir(), env: tool.env, bindings: tool.bindings, args: ["--version"] };
+  for (const dir of new Set([t.cwd, t.install?.cwd ?? t.cwd])) if (root) assertRuntimeConfig(resolveWithin(root, dir), tool.env, manager);
   const nv = await checkedCommand({ ...common, executable: node }, owned, accept);
   let mv: string;
   if (managerName === "npm") {
@@ -333,5 +432,9 @@ async function verifyJs(t: ProjectTarget, tool: Tool, owned: Set<OwnedProcess>, 
   if (!matchesVersion(nv, t.requirements.node) || !matchesMiseVersion(nv, t.requirements.miseNode) || !matchesVersion(mv, t.requirements.manager) || !matchesVersion(mv, t.requirements.managerEngine)) {
     throw new Error(`版本不符合要求或声明无法验证：Node ${nv.slice(0, 60)} · ${managerName} ${mv.slice(0, 60)}；需要 ${requirement(t)}`);
   }
-  return `Node ${nv} · ${managerName} ${mv}`;
+  const install = t.requirements.install;
+  if (install && (!matchesVersion(nv, install.node) || !matchesMiseVersion(nv, install.miseNode) || !matchesVersion(mv, install.manager) || !matchesVersion(mv, install.managerEngine))) {
+    throw new Error(`版本不满足依赖安装根 ${t.install?.cwd} 的 Node 或 ${managerName} 声明`);
+  }
+  return `Node ${nv} · ${managerName} ${mv}${managerName === "pnpm" ? "（候选版本；脚本使用绑定的 Node）" : ""}`;
 }
