@@ -31,6 +31,7 @@
 - 用不含 mise 的 PATH 启动服务，从 mise 安装发现 CMake `4.5.1`、Ninja `1.13.2` 和 `protobuf` 的 `protoc 36.2`。CMake 在找不到一个可选依赖时仍从 RelWithDebInfo preset 的 File API 发现并构建目标；Cargo fixture 的 `build.rs` 成功调用 `protoc` 生成描述文件。
 - 用隔离的真实 Gradle 工程枚举并运行 `:assembleDemoRelease -Pchannel=staging --max-workers 2`，确认任务收到 `staging` 并成功退出；该 fixture 不是 Android APK 构建。用新目录重跑了 CMake preset，Cargo 也通过复验。
 - Fixture 覆盖 npm 安装失败、pnpm 安装中断后留下部分包文件的情况：重启工作台后重试仍会先安装再构建。另覆盖锁文件更新、包版本不符和 pnpm PnP，以及多套 Xcode、Tauri Rust 候选和可选工具不阻断版本检查。
+- Gradle fixture 的 `tasks --all` 输出超过 256 KiB，且包含 600 多个候选。日志滚动后，刷新列表仍可选择并预览尾部的 `:app:assembleDebug` 和 `:desktop-app:createDistributable`。达到单次 256 项和工作区 512 项上限时，面板显示裁剪提示；退出失败、无法解析或取消均保留先前有效的结果。
 - 在浏览器替身检查宽屏常用选项和 compact 深色下的带引号参数预览。未在原样本仓库安装依赖或修改配置。
 
 ### paseo-zeonest
@@ -61,6 +62,6 @@
 
 ### alkaa
 
-- 该样本待验证 Gradle `:app:assembleDebug`、`:desktop-app:createDistributable`，以及 `ios-app/alkaa.xcworkspace` 的 `alkaa` scheme。首轮因 Wrapper 未缓存而没有运行；该限制已移除，冷 Wrapper 下载在隔离工程通过。样本检查时 Android SDK 只有 `android-37.0` 平台，项目需要 `android-36`。
-- `xcode-select -p` 指向 `/Library/Developer/CommandLineTools`，没有完整 Xcode。该 scheme 的现有构建阶段会调用 Gradle 生成 Kotlin 框架。真实 Gradle launcher/daemon JVM、APK、桌面分发目录及 iOS 模拟器产物均待验；未运行签名、设备或发布任务。
+- 从 Alkaa `8524e062` 导出隔离副本，用临时 Gradle 缓存、Wrapper `9.5.1`、mise Temurin `17.0.21.1` 和本机 Android SDK 36 执行 `tasks --all --offline`。原生命令输出约 810 KB；工作台探测成功、保留 256 个目标并标记为部分结果。刷新后可选择并预览 `:app:assembleDebug` 和 `:desktop-app:createDistributable`，没有运行这两个构建任务，也未修改 Alkaa 的原检出。
+- `xcode-select -p` 指向 `/Library/Developer/CommandLineTools`，没有完整 Xcode。`ios-app/alkaa.xcworkspace` 的 `alkaa` scheme 会调用 Gradle 生成 Kotlin 框架。APK、桌面分发目录及 iOS 模拟器产物仍待验；未运行签名、设备或发布任务。
 - Xcode fixture 验证了 scheme 枚举、Debug 模拟器参数、禁用签名和 `.app` 产物观察。

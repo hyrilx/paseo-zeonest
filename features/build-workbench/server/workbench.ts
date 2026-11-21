@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { adapter, artifact, live, log, retryable, run, saved, target, targetId } from "../shared/contracts";
+import { adapter, artifact, live, log, retryable, run, saved, target, targetId, WORKSPACE_TARGET_LIMIT } from "../shared/contracts";
 import type { Command, Configuration, Log, Run, Saved, TargetKey } from "../shared/contracts";
 import { changes, observe } from "./artifacts";
 import { finishCmake, prepareCmake } from "./cmake";
-import { nativeTarget, parseNativeProbe } from "./native-projects";
+import { gradleProbe, gradleTaskPriority, nativeTarget, parseXcodeProbe } from "./native-projects";
 import { digest, inside, missing, readBounded, resolveWithin, workspaceRoot } from "./paths";
 import { discoverProjects, type ProjectTarget } from "./projects";
 import { launch } from "./process";
@@ -16,6 +16,7 @@ import { buildArguments, preparation, requirement, toolchains, toolIssues, verif
 const HISTORY = 24;
 const LOG_CHARS = 96 * 1024;
 const LOG_ROWS = 512;
+const XCODE_PROBE_CHARS = 256 * 1024;
 const MAX_ACTIVE = 12;
 const MAX_RUNNING = 2;
 const entrySchema = z.object({ run, rows: z.array(log), cursor: z.number(), artifacts: z.array(artifact), artifactsLimited: z.boolean(), probeStamp: z.string().optional(), probeRoot: z.string().optional(), preparationCompleted: z.boolean().optional() });
@@ -24,7 +25,7 @@ type State = z.infer<typeof document>;
 type Entry = z.infer<typeof entrySchema>;
 export type Workspace = { id: string; root: string };
 type Plan = { command: Command; fingerprint: string; steps: Invocation[]; outputs: string[]; locks?: string[]; configure?: { dir: string; stamp: string; tool: string }; nativeProbe?: { adapter: "gradle" | "xcode"; stamp: string } };
-type Job = { workspace: Workspace; entry: Entry; plan: Plan; forcePreparation: boolean; process?: OwnedProcess; flush?: ReturnType<typeof setTimeout>; stopTimer?: ReturnType<typeof setTimeout>; before?: ReturnType<typeof observe>; probeOutput?: string; probeLimited?: boolean };
+type Job = { workspace: Workspace; entry: Entry; plan: Plan; forcePreparation: boolean; process?: OwnedProcess; flush?: ReturnType<typeof setTimeout>; stopTimer?: ReturnType<typeof setTimeout>; before?: ReturnType<typeof observe> };
 
 export function conflicts(a: { root: string; locks?: string[] }, b: { root: string; locks?: string[] }) {
   const overlaps = (x: string, y: string) => inside(x, y) || inside(y, x);
@@ -86,15 +87,24 @@ export class Workbench {
   #discovery(w: Workspace) {
     const result = discoverProjects(w.root);
     const history = this.#state(w.id).history;
-    result.targets = result.targets.flatMap((t) => {
-      if (!t.operation || !(t.gradle || t.xcode)) return [t];
+    const ranked: { target: ProjectTarget; priority: number }[] = [];
+    for (const t of result.targets) {
+      ranked.push({ target: t, priority: t.operation ? 6 : 0 });
+      if (!t.operation || !(t.gradle || t.xcode)) continue;
       const probe = history.find((entry) => entry.probeStamp === t.stamp && entry.probeRoot === w.root &&
         entry.run.status === "success" && targetId(entry.run.configuration.target) === targetId(t));
-      return [t, ...(probe?.run.confirmedTargets ?? []).flatMap((name) => {
+      if (probe?.run.confirmedTargetsLimited) result.notices.unshift(`${t.source}：上一次成功探测仅保留部分目标。`);
+      for (const name of probe?.run.confirmedTargets ?? []) {
         const item = nativeTarget(t, name);
-        return item ? [item] : [];
-      })];
-    }).slice(0, 512);
+        if (item) ranked.push({ target: item, priority: item.gradle ? 1 + gradleTaskPriority(name) : 4 });
+      }
+    }
+    if (ranked.length > WORKSPACE_TARGET_LIMIT) {
+      result.notices.unshift(`工作区仅显示 ${WORKSPACE_TARGET_LIMIT} 个目标，优先保留探测入口和可直接构建的原生目标。`);
+      ranked.sort((a, b) => b.priority - a.priority);
+    }
+    result.targets = ranked.slice(0, WORKSPACE_TARGET_LIMIT).map((item) => item.target);
+    result.notices = result.notices.slice(0, 32);
     return result;
   }
 
@@ -269,10 +279,15 @@ export class Workbench {
       throw new Error("工作区或命令目录已变化，请刷新");
     }
     if (preparing || index > 0) this.#append(job, "stdout", `\n[${phase}] ${JSON.stringify([invocation.executable, ...invocation.args])}\n`);
+    const probeAdapter = preparing ? undefined : job.plan.nativeProbe?.adapter;
+    const gradle = probeAdapter === "gradle" ? gradleProbe() : undefined;
+    let xcodeOutput: string | undefined = "";
     job.process = launch(invocation, (stream, text) => {
-      if (!preparing && job.plan.nativeProbe && stream === "stdout" && !job.probeLimited) {
-        if ((job.probeOutput?.length ?? 0) + text.length <= 256 * 1024) job.probeOutput = (job.probeOutput ?? "") + text;
-        else { job.probeOutput = undefined; job.probeLimited = true; }
+      if (stream === "stdout") {
+        gradle?.push(text);
+        if (probeAdapter === "xcode" && xcodeOutput !== undefined) {
+          xcodeOutput = xcodeOutput.length + text.length <= XCODE_PROBE_CHARS ? xcodeOutput + text : undefined;
+        }
       }
       this.#append(job, stream, text);
     });
@@ -299,17 +314,19 @@ export class Workbench {
         catch (error) { status = "failed"; result = (error as Error).message; }
       }
       if (status === "success" && job.plan.nativeProbe) {
-        const { adapter, stamp } = job.plan.nativeProbe;
+        const { stamp } = job.plan.nativeProbe;
         try {
-          if (job.probeLimited) throw new Error("探测输出超过读取上限");
-          const reported = parseNativeProbe(adapter, job.probeOutput ?? "");
+          if (xcodeOutput === undefined) throw new Error("探测输出超过读取上限");
+          const reported = gradle ? gradle.finish() : parseXcodeProbe(xcodeOutput);
           const key = job.entry.run.configuration.target;
           const probe = discoverProjects(job.workspace.root).targets.find((t) => targetId(t) === targetId(key) && t.stamp === stamp && t.operation);
           if (!probe) throw new Error("探测期间项目声明已变化，请重新探测");
+          const confirmed = reported.names.filter((name) => nativeTarget(probe, name));
           job.entry.probeStamp = stamp;
           job.entry.probeRoot = job.workspace.root;
-          job.entry.run.confirmedTargets = reported.filter((name) => nativeTarget(probe, name));
-          result += `；发现 ${job.entry.run.confirmedTargets.length} 个可选目标，刷新后可查看`;
+          job.entry.run.confirmedTargets = confirmed;
+          if (reported.limited) job.entry.run.confirmedTargetsLimited = true;
+          result += reported.limited ? `；保留 ${confirmed.length} 个可选目标，部分条目未收录` : `；发现 ${confirmed.length} 个可选目标，刷新后可查看`;
         } catch (error) { status = "failed"; result = (error as Error).message; }
       }
       this.#finish(job, status, result);

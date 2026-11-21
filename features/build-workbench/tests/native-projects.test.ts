@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as wait } from "node:timers/promises";
-import type { Configuration, TargetKey } from "../shared/contracts";
-import { parseNativeProbe } from "../server/native-projects";
+import { PROBE_TARGET_LIMIT, WORKSPACE_TARGET_LIMIT, type Configuration, type TargetKey } from "../shared/contracts";
+import { gradleProbe, parseXcodeProbe } from "../server/native-projects";
 import { workspaceRoot } from "../server/paths";
 import { Workbench } from "../server/workbench";
 
@@ -93,6 +93,107 @@ if (args.includes('tasks')) {
   assert.ok(!reopened.discover(workspace).targets.find((item) => item.name === build.name));
 });
 
+test("Gradle parser reads split headings, CRLF, split task paths and the final unterminated line", () => {
+  const parser = gradleProbe();
+  for (const chunk of ["Unrelated output\nBuild ta", "sks\r", "\n-------\r\nlib:compile", "Kotlin - Compiles tasks\r\n", "badName - " + "a".repeat(17 * 1024), "\r\napp:asse", "mbleDebug"]) parser.push(chunk);
+  assert.deepEqual(parser.finish(), { names: [":lib:compileKotlin", ":app:assembleDebug"], limited: true });
+  const noise = gradleProbe();
+  for (let i = 0; i < 400; i++) noise.push("Configuration message: " + "x".repeat(700) + "\n");
+  noise.push("Build tasks\n-----------\napp:assembleDebug\n");
+  assert.deepEqual(noise.finish(), { names: [":app:assembleDebug"], limited: false });
+  const invalid = gradleProbe();
+  invalid.push("Build tasks\nwithout a task section\nBUILD SUCCESSFUL");
+  assert.throws(() => invalid.finish(), /没有返回可识别的任务列表/u);
+});
+
+test("long Gradle probes keep late build entries beyond log and target limits; only successful probes replace the list", { skip: process.platform === "win32" }, async (t) => {
+  const { home, workspace } = fixture(t);
+  const file = (name: string) => join(workspace.root, name);
+  put(file("settings.gradle"), "include 'app', 'desktop-app'\n");
+  put(file("package.json"), JSON.stringify({ scripts: Object.fromEntries(Array.from({ length: WORKSPACE_TARGET_LIMIT + 1 }, (_, i) => ["script" + i, "fixture"])) }));
+  put(file("gradle/wrapper/gradle-wrapper.properties"), "distributionUrl=https://example.test/gradle.zip\n");
+  put(file("gradle/wrapper/gradle-wrapper.jar"), "fixture");
+  const javaHome = join(home, "jdk");
+  put(join(javaHome, "bin/java"), 'process.stderr.write("openjdk version \\"21.0.1\\"");', true);
+  put(file("gradlew"), `
+const fs = require('node:fs');
+const assert = require('node:assert/strict');
+assert.ok(process.argv.includes('tasks') && process.argv.includes('--all'));
+const mode = fs.existsSync('mode') ? fs.readFileSync('mode', 'utf8') : 'large';
+if (mode === 'invalid') console.log('BUILD SUCCESSFUL but no tasks listing');
+else if (mode === 'large') {
+  fs.writeSync(1, 'Build tasks\\r\\n-----------\\r\\n');
+  for (let i = 0; i < 600; i++) {
+    const task = i % 2 ? 'bundleDebugResources' : 'allMetadataJar';
+    fs.writeSync(1, 'module' + i + ':' + task + ' - ' + 'x'.repeat(700) + '\\r\\n');
+  }
+  fs.writeSync(1, 'Compose desktop tasks\\r\\n---------------------\\r\\ndesktop-app:createDistributable\\r\\n');
+  fs.writeSync(1, 'Other tasks\\r\\n-----------\\r\\napp:assembleDebug\\r\\napp:publishDebug\\r\\napp:installDebug\\r\\napp:signDebug\\r\\n');
+  fs.writeSync(1, 'app:assembleDebug - Assembles main output for variant debug');
+} else {
+  fs.writeSync(1, 'Build tasks\\n-----------\\napp:assembleReplacement\\n');
+  if (mode === 'failure') process.exitCode = 9;
+  if (mode === 'stop') setInterval(() => {}, 100);
+}
+`, true);
+  const store = join(home, "records");
+  const env = { PATH: [join(javaHome, "bin"), dirname(process.execPath)].join(delimiter), JAVA_HOME: javaHome, HOME: home };
+  const w = new Workbench(store, env);
+  t.after(() => w.close());
+  const key = { adapter: "gradle", project: ".", name: "tasks --all" } as const;
+  const c = configuration(w, workspace, key);
+  await w.verify(workspace, c);
+  async function probe(mode: string) {
+    put(file("mode"), mode);
+    const submitted = w.start(workspace, c, w.preview(workspace, c).fingerprint);
+    assert.equal(submitted.kind, "started");
+    let stopped = false;
+    for (let i = 0; i < 120; i++) {
+      const detail = w.detail(workspace, submitted.run.id, 0);
+      if (detail.run.endedAt) return detail;
+      if (mode === "stop" && !stopped && detail.rows.some((row) => row.text.includes("assembleReplacement"))) {
+        w.stop(workspace, submitted.run.id);
+        stopped = true;
+      }
+      await wait(25);
+    }
+    assert.fail("Gradle fixture did not finish");
+  }
+  const first = await probe("failure");
+  assert.equal(first.run.status, "failed");
+  assert.equal(first.run.confirmedTargets, undefined);
+  assert.ok(!w.discover(workspace).targets.some((target) => target.confirmed));
+  const report = await probe("large");
+  assert.equal(report.run.status, "success");
+  assert.equal(report.truncated, true, "UI log cap is independent of the parser");
+  assert.equal(report.run.confirmedTargetsLimited, true);
+  assert.equal(report.run.confirmedTargets?.length, PROBE_TARGET_LIMIT);
+  assert.equal(report.run.confirmedTargets?.[0], ":module0:allMetadataJar");
+  assert.ok(!report.run.confirmedTargets?.includes(":module599:bundleDebugResources"));
+  const names = [":desktop-app:createDistributable", ":app:assembleDebug"];
+  assert.deepEqual(report.run.confirmedTargets?.slice(-2), names);
+  for (const [mode, status] of [["failure", "failed"], ["invalid", "failed"], ["stop", "stopped"]] as const) {
+    const rejected = await probe(mode);
+    assert.equal(rejected.run.status, status);
+    assert.equal(rejected.run.confirmedTargets, undefined);
+    assert.ok(w.discover(workspace).targets.some(({ name, confirmed }) => name === names[0] && confirmed));
+  }
+  await w.close();
+  const reopened = new Workbench(store, env);
+  t.after(() => reopened.close());
+  const refreshed = reopened.discover(workspace);
+  assert.equal(refreshed.targets.length, WORKSPACE_TARGET_LIMIT);
+  assert.ok(refreshed.notices.some((notice) => notice.includes("上一次成功探测仅保留部分目标")));
+  assert.ok(refreshed.notices.some((notice) => notice.includes("工作区仅显示")));
+  assert.ok(!refreshed.targets.some(({ name }) => /assembleReplacement|publishDebug|installDebug|signDebug/u.test(name)));
+  for (const name of names) {
+    const target = refreshed.targets.find((target) => target.name === name && target.confirmed);
+    assert.ok(target);
+    const config = configuration(reopened, workspace, target);
+    assert.deepEqual(reopened.preview(workspace, config).command.argv.slice(1), ["--no-daemon", "--console=plain", name]);
+  }
+});
+
 test("Xcode listing and selectable simulator configuration keep schemes and artifacts scoped", { skip: process.platform !== "darwin" }, async (t) => {
   const { home, workspace } = fixture(t);
   const developer = join(home, "Fixture.app/Contents/Developer");
@@ -103,6 +204,7 @@ assert.equal(process.env.DEVELOPER_DIR, ${JSON.stringify(developer)});
 if (args.includes('-version')) console.log(args.includes('-sdk') ? '26.1' : 'Xcode 26.1\\nBuild version fixture');
 else if (args.includes('-list')) {
   assert.ok(!args.includes('-disableAutomaticPackageResolution'));
+  if (require('node:fs').existsSync('large-xcode-probe')) console.log('x'.repeat(256 * 1024));
   console.log(JSON.stringify({ [args.includes('-project') ? 'project' : 'workspace']: { schemes: ['Fixture', '-invalid', 'Shared from tool'] } }));
 }
 else {
@@ -134,6 +236,15 @@ else {
   assert.throws(() => w.preview(workspace, { ...build, options: ["archive"] }), /不支持选项/u);
   assert.throws(() => w.preview(workspace, { ...build, options: ["CODE_SIGNING_ALLOWED=YES"] }), /不支持选项/u);
   assert.ok((await run(w, workspace, { ...build, options: ["-configuration", "Custom Release"] })).artifacts.some((item) => item.path.endsWith("Fixture.app/Fixture") && item.state === "new"));
-  assert.deepEqual(parseNativeProbe("xcode", '{"workspace":{}}'), []);
-  assert.throws(() => parseNativeProbe("xcode", '{"other":{}}'), /无法读取/u);
+  put(join(workspace.root, "ios/large-xcode-probe"), "");
+  const oversized = w.start(workspace, probe, w.preview(workspace, probe).fingerprint);
+  assert.equal(oversized.kind, "started");
+  for (let i = 0; i < 120 && !w.detail(workspace, oversized.run.id, 0).run.endedAt; i++) await wait(25);
+  const rejected = w.detail(workspace, oversized.run.id, 0).run;
+  assert.equal(rejected.status, "failed");
+  assert.match(rejected.result ?? "", /探测输出超过读取上限/u);
+  assert.equal(rejected.confirmedTargets, undefined);
+  assert.ok(w.discover(workspace).targets.some((item) => item.project === name && item.name === "Fixture" && item.confirmed));
+  assert.deepEqual(parseXcodeProbe('{"workspace":{}}'), { names: [], limited: false });
+  assert.throws(() => parseXcodeProbe('{"other":{}}'), /无法读取/u);
 });

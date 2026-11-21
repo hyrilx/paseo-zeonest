@@ -1,4 +1,5 @@
 import { accessSync, constants, statSync } from "node:fs";
+import { PROBE_TARGET_LIMIT } from "../shared/contracts";
 import type { ProjectTarget } from "./projects";
 import { misePin } from "./mise";
 import { at, digest, projectDirs, readText, resolveWithin } from "./paths";
@@ -68,17 +69,89 @@ const gradleTask = (name: string) => {
 const localTask = (task: string) => /^(?:build|assemble|bundle|compile|check|test|lint)(?:$|[A-Z0-9_.-])|^(?:jar|war|distZip|distTar)$|(?:Jar|War|Distributable|Test|Check|Lint)$/u.test(task);
 const schemeName = (name: string) => name.length <= 128 && !!name.trim() && !/^\s*-/u.test(name) && !/[\u0000-\u001f\u007f]/u.test(name);
 
-export function parseNativeProbe(adapter: "gradle" | "xcode", output: string): string[] {
-  if (adapter === "gradle") {
-    let buildGroup = false;
-    const names = output.split(/\r?\n/u).flatMap((line) => {
-      const group = /^(.+?) tasks\s*$/iu.exec(line)?.[1];
-      if (group) { buildGroup = /\b(?:build|verification|distribution)s?\b/iu.test(group); return []; }
-      const name = /^(:?[\w.:-]+)(?:\s+-\s+.*)?\s*$/u.exec(line)?.[1];
-      return name && gradleTask(name) && (buildGroup || localTask(name.split(":").at(-1)!)) ? [name.startsWith(":") ? name : ":" + name] : [];
-    });
-    return [...new Set(names)].slice(0, 256);
+export function gradleTaskPriority(name: string) {
+  const pieces = name.split(":");
+  const qualified = pieces.length > 2;
+  const task = pieces.at(-1) ?? "";
+  // In a large multi-module listing Gradle can list hundreds of metadata JARs,
+  // aggregates, and intermediate bundle/resource tasks before the variant entries.
+  const variantOutput = /^(?:assemble|bundle)[A-Z0-9]/u.test(task) &&
+    !/(?:Classes|Resources|Metadata|Test|ToDir|Lint|Aar|Jar)/u.test(task);
+  const distribution = /^(?:create.*Distributable|distZip|distTar)$/u.test(task);
+  if (qualified && (variantOutput || distribution)) return 4;
+  if (/^(?:build|assemble|bundle|package)(?:$|[A-Z0-9_.-])|^(?:jar|war|distZip|distTar)$|(?:Jar|War|Distributable)$/u.test(task)) return qualified ? 3 : 2;
+  return qualified ? 1 : 0;
+}
+
+export type ProbeTargets = { names: string[]; limited: boolean };
+const GRADLE_LINE_LIMIT = 16 * 1024;
+
+export function gradleProbe() {
+  let line = "";
+  let skippingLine = false;
+  let limited = false;
+  let sawListing = false;
+  let group: string | undefined;
+  let inTasks = false;
+  let buildGroup = false;
+  const retained = new Map<string, number>();
+
+  function acceptLine(text: string) {
+    if (group && /^-{3,}\s*$/u.test(text)) {
+      inTasks = true;
+      sawListing = true;
+      buildGroup = /\b(?:build|verification|distribution)s?\b/iu.test(group);
+      group = undefined;
+      return;
+    }
+    group = text.includes(" - ") ? undefined : /^([^\s].*?) tasks\s*$/iu.exec(text)?.[1];
+    if (group || /^(?:Rules\s*$|To see |BUILD (?:SUCCESSFUL|FAILED)\b)/u.test(text)) inTasks = false;
+    if (!inTasks) return;
+    const name = /^(:?[\w.:-]+)(?:\s+-\s+.*)?\s*$/u.exec(text)?.[1];
+    if (!name || !gradleTask(name) || !(buildGroup || localTask(name.split(":").at(-1) ?? ""))) return;
+    const path = name.startsWith(":") ? name : ":" + name;
+    if (retained.has(path)) return;
+    const priority = gradleTaskPriority(path);
+    if (retained.size === PROBE_TARGET_LIMIT) {
+      limited = true;
+      let victim: string | undefined;
+      let lowest = priority;
+      for (const [key, item] of retained) {
+        if (item < priority && item <= lowest) { lowest = item; victim = key; }
+      }
+      if (victim === undefined) return;
+      retained.delete(victim);
+    }
+    retained.set(path, priority);
   }
+
+  return {
+    push(chunk: string) {
+      let from = 0;
+      while (from < chunk.length) {
+        const newline = chunk.indexOf("\n", from);
+        const end = newline < 0 ? chunk.length : newline;
+        if (!skippingLine) {
+          if (line.length + end - from <= GRADLE_LINE_LIMIT) line += chunk.slice(from, end);
+          else { line = ""; skippingLine = true; limited ||= inTasks; group = undefined; }
+        }
+        if (newline < 0) break;
+        if (!skippingLine) acceptLine(line.endsWith("\r") ? line.slice(0, -1) : line);
+        line = "";
+        skippingLine = false;
+        from = newline + 1;
+      }
+    },
+    finish(): ProbeTargets {
+      if (!skippingLine && line) acceptLine(line);
+      if (!sawListing) throw new Error("Gradle 没有返回可识别的任务列表");
+      // Map order is source order, including after an eviction.
+      return { names: [...retained.keys()], limited };
+    },
+  };
+}
+
+export function parseXcodeProbe(output: string): ProbeTargets {
   // xcodebuild may print a preamble before the JSON document.
   const start = output.indexOf("{");
   const end = output.lastIndexOf("}");
@@ -87,7 +160,8 @@ export function parseNativeProbe(adapter: "gradle" | "xcode", output: string): s
     const parsed = JSON.parse(output.slice(start, end + 1)) as { workspace?: { schemes?: unknown }; project?: { schemes?: unknown } };
     const schemes = (parsed.workspace ?? parsed.project)?.schemes ?? [];
     if (!(parsed.workspace || parsed.project) || !Array.isArray(schemes)) throw new Error("scheme 列表缺失");
-    return [...new Set(schemes.filter((s): s is string => typeof s === "string" && schemeName(s)))].slice(0, 256);
+    const names = [...new Set(schemes.filter((s): s is string => typeof s === "string" && schemeName(s)))];
+    return { names: names.slice(0, PROBE_TARGET_LIMIT), limited: names.length > PROBE_TARGET_LIMIT };
   } catch (error) { throw new Error("无法读取 xcodebuild scheme 列表", { cause: error }); }
 }
 

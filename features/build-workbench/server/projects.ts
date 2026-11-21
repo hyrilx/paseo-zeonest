@@ -3,7 +3,7 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 import JSON5 from "json5";
 import { minimatch } from "minimatch";
 import { parse as yaml } from "yaml";
-import type { Target } from "../shared/contracts";
+import { WORKSPACE_TARGET_LIMIT, type Target } from "../shared/contracts";
 import { at, digest, projectDirs, readText, resolveWithin } from "./paths";
 import { array, literal, section } from "./manifests";
 import { discoverCmake } from "./cmake";
@@ -134,7 +134,7 @@ export function discoverProjects(root: string): Discovery {
       if (!info) { notices.push(`${source}：包管理器不是 npm 或 pnpm。`); continue; }
       for (const [name, script] of Object.entries(object(data.scripts))) {
         if (!safeName(name) || typeof script !== "string" || !script.trim() || /^(pre|post)(install|publish)|(?::watch$)|^(install|publish|deploy|release|push|sign|dev|start|watch|preview)(:|$)/iu.test(name)) continue;
-        if (targets.length >= 512) { notices.push("目标发现达到上限（512 项）"); break; }
+        if (targets.length >= WORKSPACE_TARGET_LIMIT) { notices.unshift(`目标发现达到上限（${WORKSPACE_TARGET_LIMIT} 项）`); break; }
         targets.push({ adapter: info.manager, project, name, source, cwd: project, stamp: digest(JSON.stringify([parent?.text, text, info.stamp])),
           requirements: info.requirements, install: info.install, outputs: outputHints(root, project, data),
         });
@@ -147,7 +147,11 @@ export function discoverProjects(root: string): Discovery {
   discoverGradle(root, dirs, notices, targets);
   discoverXcode(root, notices, targets);
   if (!targets.length) notices.push("未找到任务。已检查 npm/pnpm、Cargo、CMake、Tauri、Gradle 与 Xcode 清单；修改清单后可刷新。");
-  return { targets: targets.slice(0, 512), notices: notices.slice(0, 32) };
+  if (targets.length > WORKSPACE_TARGET_LIMIT) {
+    targets.sort((a, b) => Number(!!b.operation) - Number(!!a.operation));
+    notices.unshift(`目标发现达到上限（${WORKSPACE_TARGET_LIMIT} 项），优先保留探测入口。`);
+  }
+  return { targets: targets.slice(0, WORKSPACE_TARGET_LIMIT), notices: [...new Set(notices)].slice(0, 32) };
 }
 
 function rustChannel(project: string, read: Read) {

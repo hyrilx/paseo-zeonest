@@ -290,7 +290,7 @@ function RunDetail({ colors, workspaceId, id, update, busy, retry, stop }: {
     {run ? <>
       <CommandPreview plan={run.command} colors={colors} />
       {run.result ? <Note colors={colors}>{run.result}</Note> : null}
-      {run.confirmedTargets?.length ? <Note colors={colors}>已确认：{run.confirmedTargets.join("、")}</Note> : null}
+      {run.confirmedTargets?.length ? <Note colors={colors}>{run.confirmedTargetsLimited ? "已确认（部分）" : "已确认"}：{run.confirmedTargets.join("、")}</Note> : null}
       <View style={styles.actions}>
         <Button colors={colors} label="输出" primary={tab === "output"} onPress={() => setTab("output")} />
         <Button colors={colors} label="产物" primary={tab === "artifacts"} onPress={() => setTab("artifacts")} />

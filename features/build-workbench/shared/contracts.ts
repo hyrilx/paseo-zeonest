@@ -12,12 +12,15 @@ export const config = z.object({
   target: targetKey, tool: toolId, options: z.array(token).max(64), artifacts: z.array(path).max(8),
 });
 export const saved = config.extend({ name: z.string().trim().min(1).max(64) });
+export const PROBE_TARGET_LIMIT = 256;
+export const WORKSPACE_TARGET_LIMIT = 512;
 const commandStep = z.object({ cwd: path, argv: z.array(z.string()) });
 export const command = commandStep.extend({ tool: candidate, source: path, preparation: z.array(commandStep).max(4).optional() });
 export const status = z.enum(["queued", "running", "stopping", "success", "failed", "stopped", "interrupted"]);
 export const run = z.object({
   id: z.uuid(), sequence: z.number().int(), status, configuration: config, command, fingerprint: z.string(),
-  confirmedTargets: z.array(z.string()).max(256).optional(), createdAt: z.number(), startedAt: z.number().optional(), endedAt: z.number().optional(), result: z.string().optional(),
+  confirmedTargets: z.array(z.string()).max(PROBE_TARGET_LIMIT).optional(), confirmedTargetsLimited: z.boolean().optional(),
+  createdAt: z.number(), startedAt: z.number().optional(), endedAt: z.number().optional(), result: z.string().optional(),
 });
 export const artifact = z.object({ path, state: z.enum(["new", "changed", "existing", "missing", "removed", "unavailable"]) });
 export const log = z.object({ cursor: z.number().int().nonnegative(), stream: z.enum(["stdout", "stderr"]), text: z.string() });
