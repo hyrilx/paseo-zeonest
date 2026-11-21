@@ -4,13 +4,20 @@ import { homedir } from "node:os";
 import { array, literal, section } from "./manifests";
 import { at } from "./paths";
 
-export function misePin(dirs: string[], name: string, read: (path: string) => string | undefined) {
-  for (const dir of new Set(dirs)) {
-    const text = read(at(dir, "mise.toml")) ?? read(at(dir, ".mise.toml")) ?? read(at(dir, ".config/mise.toml"));
-    if (!text) continue;
-    const tools = section(text, "tools");
-    const pin = literal(tools, name) ?? array(tools, name)[0];
-    if (pin) return pin;
+export function ancestors(project: string) {
+  const parts = project === "." ? [] : project.split("/");
+  return parts.map((_, index) => parts.slice(0, parts.length - index).join("/")).concat(".");
+}
+
+export function misePin(project: string, name: string, read: (path: string) => string | undefined) {
+  for (const dir of ancestors(project)) {
+    for (const file of ["mise.local.toml", ".mise.local.toml", "mise.toml", ".mise.toml", ".config/mise.toml", ".config/mise/config.toml"]) {
+      const text = read(at(dir, file));
+      if (!text) continue;
+      const tools = section(text, "tools");
+      const pin = literal(tools, name) ?? array(tools, name)[0];
+      if (pin) return pin;
+    }
   }
 }
 

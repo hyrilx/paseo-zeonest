@@ -60,9 +60,11 @@ assert.ok(args.includes('--no-daemon') && !args.includes('--offline'));
 assert.match(process.env.JAVA_TOOL_OPTIONS, /org.gradle.native=false/);
 if (args.includes('tasks')) {
   fs.writeFileSync('probe-ran', 'first Wrapper download and project settings');
-  console.log('build - Root build\\nlib:nested:compileKotlin - Compiler task\\nrenderer:createDistributable\\nlib:publish - forbidden\\nrenderer:connectedDebugAndroidTest - forbidden');
+  console.log('Build tasks\\n-----------\\nbuild - Root build\\nlib:nested:compileKotlin - Compiler task\\nrenderer:createDistributable\\nrenderer:assembleDemoRelease\\nrenderer:shadowJar\\nVerification tasks\\n-----------\\nrenderer:testDemoReleaseUnitTest\\nPublishing tasks\\n-----------\\nlib:publish - forbidden\\nrenderer:connectedDebugAndroidTest - forbidden');
 } else {
   assert.ok(args.includes(':lib:nested:compileKotlin'));
+  assert.ok(args.includes('--max-workers') && args.includes('-PsampleFeature=two words'));
+  assert.ok(!args.some((arg) => arg.startsWith('-Pkotlin.compiler.execution.strategy=')));
   fs.mkdirSync('lib/nested/build/libs', { recursive: true });
   fs.writeFileSync('lib/nested/build/libs/fixture.jar', 'jar');
 }
@@ -77,10 +79,12 @@ if (args.includes('tasks')) {
   const c = configuration(w, workspace, probe);
   assert.match((await w.verify(workspace, c)).version ?? "", /openjdk version "21\.0\.1"/u);
   assert.equal(existsSync(workspaceFile("probe-ran")), false, "verification must not execute the Wrapper");
-  assert.deepEqual((await run(w, workspace, c)).run.confirmedTargets, [":build", build.name, ":renderer:createDistributable"]);
+  assert.deepEqual((await run(w, workspace, c)).run.confirmedTargets, [":build", build.name, ":renderer:createDistributable", ":renderer:assembleDemoRelease", ":renderer:shadowJar", ":renderer:testDemoReleaseUnitTest"]);
   assert.ok(w.discover(workspace).targets.find((item) => item.name === build.name)?.confirmed);
   assert.ok(!w.discover({ ...workspace, id: "other" }).targets.find((item) => item.name === build.name));
-  const detail = await run(w, workspace, configuration(w, workspace, build));
+  const buildConfig = { ...configuration(w, workspace, build), options: ["--max-workers", "2", "-PsampleFeature=two words"] };
+  assert.throws(() => w.preview(workspace, { ...buildConfig, options: [":renderer:publish"] }), /不支持选项/u);
+  const detail = await run(w, workspace, buildConfig);
   assert.ok(detail.artifacts.some((a) => a.path.endsWith("fixture.jar") && a.state === "new"));
   const reopened = new Workbench(store, env);
   t.after(() => reopened.close());
@@ -89,7 +93,7 @@ if (args.includes('tasks')) {
   assert.ok(!reopened.discover(workspace).targets.find((item) => item.name === build.name));
 });
 
-test("Xcode listing and Debug simulator argv keep schemes and artifacts scoped", { skip: process.platform !== "darwin" }, async (t) => {
+test("Xcode listing and selectable simulator configuration keep schemes and artifacts scoped", { skip: process.platform !== "darwin" }, async (t) => {
   const { home, workspace } = fixture(t);
   const developer = join(home, "Fixture.app/Contents/Developer");
   put(join(developer, "usr/bin/xcodebuild"), `
@@ -104,18 +108,22 @@ else if (args.includes('-list')) {
 else {
   const fs = require('node:fs'), path = require('node:path');
   assert.equal(args[args.indexOf('-sdk') + 1], 'iphonesimulator');
-  assert.equal(args[args.indexOf('-configuration') + 1], 'Debug');
+  const configuration = args[args.indexOf('-configuration') + 1];
+  assert.equal(configuration, 'Custom Release');
   assert.ok(args.includes('CODE_SIGNING_ALLOWED=NO') && args.at(-1) === 'build');
-  const product = path.join(args[args.indexOf('-derivedDataPath') + 1], 'Build/Products/Debug-iphonesimulator/Fixture.app');
+  const product = path.join(args[args.indexOf('-derivedDataPath') + 1], 'Build/Products/' + configuration + '-iphonesimulator/Fixture.app');
   fs.mkdirSync(product, { recursive: true }); fs.writeFileSync(path.join(product, 'Fixture'), 'simulator');
 }
 `, true);
   const name = "ios/sample.xcworkspace";
   put(join(workspace.root, name, "contents.xcworkspacedata"), '<FileRef location = "group:sample.xcodeproj"/>');
   put(join(workspace.root, "ios/sample.xcodeproj/project.pbxproj"), "shellScript = ./gradlew generated;");
+  const alt = join(home, "Applications/Xcode-Beta.app/Contents/Developer/usr/bin/xcodebuild");
+  put(alt, 'console.log("Xcode Beta");', true);
   const w = new Workbench(join(home, "records"), { DEVELOPER_DIR: developer, HOME: home });
   t.after(() => w.close());
   const probe = configuration(w, workspace, { adapter: "xcode", project: name, name: "list schemes" });
+  assert.ok(w.tools(workspace, probe.target).candidates.some((tool) => tool.paths.includes(alt)));
   await w.verify(workspace, probe);
   assert.deepEqual((await run(w, workspace, probe)).run.confirmedTargets, ["Fixture", "Shared from tool"]);
   const standalone = configuration(w, workspace, { ...probe.target, project: "ios/sample.xcodeproj" });
@@ -123,8 +131,9 @@ else {
   await w.verify(workspace, standalone);
   assert.deepEqual((await run(w, workspace, standalone)).run.confirmedTargets, ["Fixture", "Shared from tool"]);
   const build = configuration(w, workspace, { ...probe.target, name: "Fixture" });
-  assert.throws(() => w.preview(workspace, { ...build, options: ["archive"] }), /不接受额外参数/u);
-  assert.ok((await run(w, workspace, build)).artifacts.some((item) => item.path.endsWith("Fixture.app/Fixture") && item.state === "new"));
+  assert.throws(() => w.preview(workspace, { ...build, options: ["archive"] }), /不支持选项/u);
+  assert.throws(() => w.preview(workspace, { ...build, options: ["CODE_SIGNING_ALLOWED=YES"] }), /不支持选项/u);
+  assert.ok((await run(w, workspace, { ...build, options: ["-configuration", "Custom Release"] })).artifacts.some((item) => item.path.endsWith("Fixture.app/Fixture") && item.state === "new"));
   assert.deepEqual(parseNativeProbe("xcode", '{"workspace":{}}'), []);
   assert.throws(() => parseNativeProbe("xcode", '{"other":{}}'), /无法读取/u);
 });

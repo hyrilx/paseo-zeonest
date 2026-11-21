@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { test } from "node:test";
@@ -24,21 +24,22 @@ const args = process.argv.slice(2);
 if (args[0] === '--versions') console.log(JSON.stringify({ node: process.versions.node, npm: '11.0.0' }));
 else if (args[0] === '--version') console.log('11.0.0');
 else if (args[0] === 'ci' || args[0] === 'install') {
+  // An interrupted installer can leave apparently valid metadata before finishing.
+  fs.mkdirSync('node_modules/fixture', { recursive: true });
+  fs.writeFileSync('node_modules/fixture/package.json', '{"version":"1.0.0"}');
   console.log('INSTALL-START');
   if (fs.existsSync('fail')) process.exit(42);
   if (fs.existsSync('stall')) setInterval(() => {}, 100);
-  else {
-    fs.mkdirSync('node_modules/fixture', { recursive: true });
-    fs.writeFileSync('node_modules/fixture/package.json', '{}');
-    console.log('INSTALL-DONE');
-  }
+  else console.log('INSTALL-DONE');
 } else {
+  if (fs.existsSync('fail-build')) process.exit(43);
   fs.writeFileSync('built', 'yes');
   console.log('BUILD-DONE');
 }
 `, true);
   const env = { HOME: base, PATH: [join(base, "bin"), dirname(process.execPath)].join(delimiter) };
-  const workbench = new Workbench(join(base, "runs"), env);
+  const store = join(base, "runs");
+  const workbench = new Workbench(store, env);
   t.after(() => workbench.close());
   function setup(id: string, mode?: "fail" | "stall", manager: "npm" | "pnpm" = "npm") {
     put(`${id}/projects/group/package.json`, { packageManager: `${manager}@11.0.0`, workspaces: ["packages/*"] });
@@ -80,14 +81,84 @@ else if (args[0] === 'ci' || args[0] === 'install') {
     assert.match(done.log, /INSTALL-START[\s\S]*INSTALL-DONE[\s\S]*BUILD-DONE/u);
     assert.equal(workbench.preview(success.workspace, success.config).command.preparation, undefined);
   }
-  const fail = await settled(await start(setup("failure", "fail")));
+  const failure = setup("failure", "fail");
+  const fail = await settled(await start(failure));
   assert.equal(fail.value.run.status, "failed");
   assert.match(fail.value.run.result ?? "", /依赖准备未完成.*42/u);
   assert.doesNotMatch(fail.log, /BUILD-DONE/u);
-  const stall = setup("stopped", "stall");
+  const stall = setup("stopped", "stall", "pnpm");
   const halted = await settled(await start(stall), stall);
   assert.equal(halted.value.run.status, "stopped");
   assert.doesNotMatch(halted.log, /BUILD-DONE/u);
+
+  const buildFailure = setup("build-failure");
+  put("build-failure/projects/group/packages/app/fail-build", "true");
+  const build = await settled(await start(buildFailure));
+  assert.equal(build.value.run.status, "failed");
+  assert.equal(build.value.run.result, "退出码 43");
+  await workbench.close();
+
+  const reopened = new Workbench(store, env);
+  t.after(() => reopened.close());
+  for (const [{ workspace, config }, id, marker] of [
+    [failure, fail.value.run.id, "fail"], [stall, halted.value.run.id, "stall"],
+  ] as const) {
+    assert.equal(reopened.preview(workspace, config).command.preparation, undefined, "normal preview sees a partial but valid-looking install");
+    const changed = reopened.retry(workspace, id);
+    assert.equal(changed.kind, "changed");
+    assert.ok(changed.command.preparation?.length);
+    rmSync(join(workspace.root, "projects/group", marker));
+    await reopened.verify(workspace, config);
+    const afterVerify = reopened.retry(workspace, id, undefined, true);
+    assert.equal(afterVerify.kind, "changed");
+    assert.ok(afterVerify.command.preparation?.length);
+    assert.equal(reopened.list(workspace).length, 1, "retry preview does not create a run");
+    const retry = reopened.retry(workspace, id, afterVerify.fingerprint);
+    assert.equal(retry.kind, "started");
+    assert.notEqual(retry.run.id, id);
+    const result = await settled(() => reopened.detail(workspace, retry.run.id, 0));
+    assert.equal(result.value.run.status, "success");
+    assert.match(result.log, /INSTALL-START[\s\S]*INSTALL-DONE[\s\S]*BUILD-DONE/u);
+  }
+  await reopened.verify(buildFailure.workspace, buildFailure.config);
+  const onlyBuild = reopened.retry(buildFailure.workspace, build.value.run.id, undefined, true);
+  assert.equal(onlyBuild.kind, "changed");
+  assert.equal(onlyBuild.command.preparation, undefined, "successful prep is not repeated solely because the build failed");
+});
+
+test("npm/pnpm preparation checks versions, lock freshness, and generated PnP layout", { skip: process.platform === "win32" }, (t) => {
+  const root = workspaceRoot(mkdtempSync(join(tmpdir(), "zeonest-layout-test-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  function file(name: string, content: string, executable = false) {
+    const path = join(root, name);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, content, { mode: executable ? 0o700 : 0o600 });
+    return path;
+  }
+  for (const manager of ["npm", "pnpm"] as const) {
+    file(`bin/${manager}`, "must not run", true);
+    file(`${manager}/package.json`, JSON.stringify({ packageManager: manager + "@11", scripts: { build: "fixture" }, dependencies: { fixture: "^1" } }));
+  }
+  file("npm/package-lock.json", "{}");
+  const pkg = file("npm/node_modules/fixture/package.json", '{"version":"2.0.0"}');
+  const lock = file("pnpm/pnpm-lock.yaml", "lockfileVersion: '9.0'");
+  file("pnpm/.pnp.cjs", "generated");
+  const w = new Workbench(join(root, "store"), { PATH: [join(root, "bin"), dirname(process.execPath)].join(delimiter), HOME: root });
+  t.after(() => w.close());
+  function needsPreparation(adapter: "npm" | "pnpm") {
+    const workspace = { id: adapter, root: join(root, adapter) };
+    const target = { adapter, project: ".", name: "build" };
+    const tool = w.tools(workspace, target).candidates[0];
+    assert.ok(tool);
+    return !!w.preview(workspace, { target, tool: tool.id, options: [], artifacts: [] }).command.preparation;
+  }
+  assert.equal(needsPreparation("npm"), true);
+  writeFileSync(pkg, '{"version":"1.2.0"}');
+  assert.equal(needsPreparation("npm"), false);
+  assert.equal(needsPreparation("pnpm"), false);
+  const future = new Date(Date.now() + 5_000);
+  utimesSync(lock, future, future);
+  assert.equal(needsPreparation("pnpm"), true);
 });
 
 test("mise discovery locates app bundle layouts and executables provided by another package", { skip: process.platform === "win32" }, (t) => {

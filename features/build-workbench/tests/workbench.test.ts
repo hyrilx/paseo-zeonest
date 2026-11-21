@@ -47,7 +47,8 @@ test("pnpm and Cargo declarations stay separate and preserve project pins", (t) 
   manifest(root, { packageManager: "pnpm@11.3.0", scripts: { build: "pnpm --filter ui build" } });
   manifest(join(root, "apps/web"), { files: ["dist/"], scripts: { build: "tsc -b && vite build" } });
   writeFileSync(join(root, "pnpm-workspace.yaml"), "packages:\n  - 'apps/*'\n");
-  writeFileSync(join(root, "mise.toml"), '[tools]\nnode = "24.14.0"\n');
+  writeFileSync(join(root, "mise.toml"), '[tools]\nnode = "22"\n');
+  writeFileSync(join(root, "apps/.mise.toml"), '[tools]\nnode = "24.14.0"\n');
   writeFileSync(join(root, "Cargo.toml"), '[workspace]\nmembers = [\n "crates/api",\n]\n');
   writeFileSync(join(root, "crates/api/Cargo.toml"), '[package]\nname = "api"\n');
   const { targets } = discoverProjects(root);
@@ -66,7 +67,7 @@ test("Cargo leaves build.rs to Cargo and Tauri does not require a particular JS 
   writeFileSync(join(root, "proto/input.proto"), 'syntax = "proto3";');
   writeFileSync(join(root, "desktop/src-tauri/Cargo.toml"), '[package]\nname = "desktop"\n');
   manifest(join(root, "desktop"), { scripts: { "tauri:check": "tauri info" }, dependencies: { "@tauri-apps/cli": "^2" } });
-  writeFileSync(join(root, "desktop/src-tauri/Tauri.toml"), '[build]\nfrontendDist = "../assets"\nbeforeBuildCommand = "npm run generate"\n');
+  writeFileSync(join(root, "desktop/src-tauri/tauri.conf.json5"), "{ // project-defined hook\n build: { frontendDist: '../assets', beforeBuildCommand: 'npm run generate', }, }");
   const { targets } = discoverProjects(root);
   const cargo = targets.find((entry) => entry.project === "core");
   assert.equal(cargo?.blocked, undefined);
@@ -74,7 +75,7 @@ test("Cargo leaves build.rs to Cargo and Tauri does not require a particular JS 
   const tauri = targets.find((entry) => entry.adapter === "tauri");
   assert.deepEqual(tauri?.outputs, ["desktop/assets", "desktop/src-tauri/target/debug/desktop"]);
   assert.equal(tauri?.tauri?.manager, "npm");
-  assert.deepEqual(tauri?.install?.required, ["@tauri-apps/cli"]);
+  assert.deepEqual(tauri?.install?.required, [{ from: "desktop", name: "@tauri-apps/cli", version: "^2" }]);
   assert.ok(targets.some((entry) => entry.adapter === "npm" && entry.name === "tauri:check"));
 });
 
@@ -119,7 +120,8 @@ test("workspace ownership, queued conflict, independent output, parent/child sto
   const cb = await configuration(b, "check");
   assert.throws(() => workbench.preview(a, { ...ca, artifacts: ["../b"] }), /相对路径/u);
   assert.throws(() => workbench.preview(a, { ...ca, artifacts: ["outside/file"] }), /符号链接/u);
-  assert.throws(() => workbench.preview(a, { ...ca, options: ["--prefix", "/tmp"] }), /仅支持/u);
+  assert.deepEqual(workbench.preview(a, { ...ca, options: ["--prefix", "/tmp/with spaces", "$(literal)", ""] }).command.argv.slice(1),
+    ["run", "build", "--", "--prefix", "/tmp/with spaces", "$(literal)", ""]);
   const one = submit(a, ca);
   const queued = submit(a, { ...ca, target: target("check") });
   const two = submit(b, cb);

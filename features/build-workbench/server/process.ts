@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 
-export type Invocation = { executable: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv };
+export type Invocation = { executable: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; reapAfterExit?: boolean };
 type Output = (stream: "stdout" | "stderr", text: string) => void;
 type Exit = { code: number | null; signal: string | null; error?: string; stopped: boolean };
 export type OwnedProcess = { done: Promise<Exit>; stop(): void };
@@ -23,11 +23,13 @@ export function launch(invocation: Invocation, output: Output): OwnedProcess {
     try { process.kill(-pid, sig); return true; }
     catch (e) { return (e as NodeJS.ErrnoException).code !== "ESRCH"; }
   }
-  const stop = () => {
-    if (stopping) return;
-    stopping = signal("SIGTERM");
-    if (stopping) timer = setTimeout(() => { signal("SIGKILL"); }, 1000);
+  const terminateGroup = () => {
+    if (timer) return true;
+    if (!signal("SIGTERM")) return false;
+    timer = setTimeout(() => { signal("SIGKILL"); }, 1000);
+    return true;
   };
+  const stop = () => { stopping = terminateGroup() || stopping; };
   const done = new Promise<Exit>((resolve) => {
     child.once("error", (e) => { error = e.message; });
     for (const [stream, source] of [["stdout", child.stdout], ["stderr", child.stderr]] as const) {
@@ -35,6 +37,9 @@ export function launch(invocation: Invocation, output: Output): OwnedProcess {
       source.on("data", (buf: Buffer) => output(stream, decoder.write(buf)));
       source.once("end", () => output(stream, decoder.end()));
     }
+    // After the Gradle launcher exits, its compiler workers can still hold the pipes open.
+    // Reap only this run's group, without changing the launcher exit status.
+    if (invocation.reapAfterExit) child.once("exit", terminateGroup);
     child.once("close", (code, sig) => {
       closed = true;
       const finish = () => {

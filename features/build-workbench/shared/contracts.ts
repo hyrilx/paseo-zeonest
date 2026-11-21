@@ -5,11 +5,11 @@ export const adapter = z.enum(["npm", "pnpm", "cargo", "cmake", "tauri", "gradle
 const path = z.string().min(1).max(1024);
 const targetKey = z.object({ adapter, project: path, name: z.string().min(1).max(256) });
 export const target = targetKey.extend({ source: path, outputs: z.array(path).max(16), operation: z.literal("probe").optional(), confirmed: z.boolean().optional(), blocked: z.string().optional() });
-const token = z.string().min(1).max(512).refine((s) => !/[\x00-\x1f\x7f]/u.test(s));
+const token = z.string().max(4096).refine((s) => !/[\x00-\x1f\x7f]/u.test(s));
 const toolId = z.string().max(64);
 export const candidate = z.object({ id: toolId, label: z.string(), paths: z.array(path), requirement: z.string(), version: z.string().optional() });
 export const config = z.object({
-  target: targetKey, tool: toolId, options: z.array(token).max(16), artifacts: z.array(path).max(8),
+  target: targetKey, tool: toolId, options: z.array(token).max(64), artifacts: z.array(path).max(8),
 });
 export const saved = config.extend({ name: z.string().trim().min(1).max(64) });
 const commandStep = z.object({ cwd: path, argv: z.array(z.string()) });
@@ -17,7 +17,7 @@ export const command = commandStep.extend({ tool: candidate, source: path, prepa
 export const status = z.enum(["queued", "running", "stopping", "success", "failed", "stopped", "interrupted"]);
 export const run = z.object({
   id: z.uuid(), sequence: z.number().int(), status, configuration: config, command, fingerprint: z.string(),
-  confirmedTargets: z.array(z.string()).max(64).optional(), createdAt: z.number(), startedAt: z.number().optional(), endedAt: z.number().optional(), result: z.string().optional(),
+  confirmedTargets: z.array(z.string()).max(256).optional(), createdAt: z.number(), startedAt: z.number().optional(), endedAt: z.number().optional(), result: z.string().optional(),
 });
 export const artifact = z.object({ path, state: z.enum(["new", "changed", "existing", "missing", "removed", "unavailable"]) });
 export const log = z.object({ cursor: z.number().int().nonnegative(), stream: z.enum(["stdout", "stderr"]), text: z.string() });
@@ -39,7 +39,7 @@ export const preview = rpc("preview", planInput, z.object({ command, fingerprint
 export const save = rpc("save", scope.extend({ configuration: saved }), z.array(saved));
 export const remove = rpc("remove", scope.extend({ name: saved.shape.name }), z.array(saved));
 export const start = rpc("start", planInput.extend({ fingerprint: z.string().length(64) }), submitted);
-export const retry = rpc("retry", runInput.extend({ fingerprint: z.string().length(64).optional() }), submitted);
+export const retry = rpc("retry", runInput.extend({ fingerprint: z.string().length(64).optional(), previewOnly: z.boolean().optional() }), submitted);
 export const stop = rpc("stop", runInput, run);
 export const list = rpc("list", scope, z.array(run));
 export const detail = rpc("detail", runInput.extend({ cursor: z.number().int().nonnegative() }), z.object({

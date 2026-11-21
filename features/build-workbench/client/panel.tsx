@@ -4,6 +4,7 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useRpc } from "@getpaseo/plugin/client";
 import type { PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { Loading, ScrollView, SettingsCard, SettingsRow, SettingsSection, SettingsSelect, TextInput } from "@getpaseo/plugin/client/ui";
+import { formatArguments, parseArguments } from "../shared/arguments";
 import * as rpc from "../shared/contracts";
 import type { Command, Configuration, Log, Run, Saved } from "../shared/contracts";
 
@@ -13,7 +14,19 @@ const labels: Record<Run["status"], string> = { queued: "排队中", running: "�
 const assetLabels = { new: "新增", changed: "变化", existing: "已有", missing: "缺失", removed: "已移除", unavailable: "无法观察" };
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 const projectLabel = (target: rpc.TargetKey) => `${target.project === "." ? "根目录" : target.project} · ${target.adapter}`;
-const commandText = (command: Pick<Command, "argv">) => command.argv.map((arg) => /^[\w@./:=+-]+$/u.test(arg) ? arg : JSON.stringify(arg)).join(" ");
+const commandText = (command: Pick<Command, "argv">) => formatArguments(command.argv);
+const examples: Record<rpc.Adapter, string[]> = {
+  npm: ["--mode staging"], pnpm: ["--mode staging"],
+  cargo: ["--release", "--all-features", "--profile dev"],
+  cmake: ["--parallel 4", "--config Release"],
+  tauri: ["--release", "-- --locked"],
+  gradle: ["--stacktrace", "--parallel --max-workers 4", "--refresh-dependencies"],
+  xcode: ["-configuration Release", "-showBuildTimingSummary"],
+};
+function optionInput(text: string) {
+  try { return { argv: parseArguments(text) }; }
+  catch (error) { return { error: errorMessage(error) }; }
+}
 
 export function BuildPanel(props: PluginWorkspacePanelProps) {
   return <Workbench key={JSON.stringify([props.host.id, props.workspaceId])} {...props} />;
@@ -56,8 +69,11 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
   const [connection, setConnection] = useState("");
   const [busy, setBusy] = useState(false);
   const selected = discovery?.targets.find((item) => rpc.targetId(item) === selection);
-  const configuration: Configuration | undefined = selected && tool ? { target: selected, tool,
-    options: options.trim().split(/\s+/u).filter(Boolean), artifacts: artifacts.split("\n").map((s) => s.trim()).filter(Boolean) } : undefined;
+  const parsed = optionInput(options);
+  const configuration: Configuration | undefined = selected && tool && parsed.argv ? { target: selected, tool,
+    options: parsed.argv, artifacts: artifacts.split("\n").map((s) => s.trim()).filter(Boolean) } : undefined;
+  const suggestion = selected?.operation && selected.adapter === "cmake" ? ['-DCMAKE_BUILD_TYPE=Release', '-G "Unix Makefiles"']
+    : selected?.operation && selected.adapter === "xcode" ? ["-verbose"] : selected ? examples[selected.adapter] : [];
   const configurationKey = configuration && JSON.stringify(configuration);
 
   useEffect(() => {
@@ -151,7 +167,7 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
         <SettingsSelect label="已保存配置" value={named} options={[{ label: "临时配置", value: "" }, ...configs.map((c) => ({ label: c.name, value: c.name }))]} onValueChange={(value) => {
           setNamed(value);
           const c = configs.find((item) => item.name === value);
-          if (c) { setProject(projectLabel(c.target)); setSearch(""); select(rpc.targetId(c.target)); chooseTool(c.tool); setOptions(c.options.join(" ")); setArtifacts(c.artifacts.join("\n")); setName(c.name); setAvailable(undefined); refreshVersions((v) => v + 1); }
+          if (c) { setProject(projectLabel(c.target)); setSearch(""); select(rpc.targetId(c.target)); chooseTool(c.tool); setOptions(formatArguments(c.options)); setArtifacts(c.artifacts.join("\n")); setName(c.name); setAvailable(undefined); refreshVersions((v) => v + 1); }
           else setName("");
         }} />
         <SettingsSelect label="子项目" value={project} options={[{ label: "全部", value: "" }, ...projects.map((p) => ({ label: p, value: p }))]} onValueChange={(value) => { setProject(value); select(""); setAvailable(undefined); chooseTool(""); }} />
@@ -159,7 +175,10 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
         <SettingsSelect label="目标" value={selection} options={[{ label: selection && !selected ? "原目标已失效，请重新选择" : "选择目标", value: "" },
           ...targets.map((t) => ({ label: `${projectLabel(t)} › ${t.name}${t.operation ? "（探测）" : t.blocked ? "（不可运行）" : t.confirmed ? "（已探测）" : ""}`, value: rpc.targetId(t) }))]} onValueChange={(value) => { select(value); chooseTool(""); setAvailable(undefined); setPlanError(""); }} />
         {selected ? <>
-          <Field colors={colors} label="构建选项" placeholder={selected.adapter === "npm" || selected.adapter === "pnpm" ? "--mode staging" : "留空使用默认选项"} value={options} set={setOptions} />
+          <Field colors={colors} label="构建选项" placeholder="留空使用项目默认值" value={options} set={setOptions} />
+          <SettingsSelect label="常用选项" hint="选中示例会替换上方选项，可再编辑。含空格的值请加引号。"
+            value={suggestion.includes(options) ? options : ""} options={[{ label: "选择示例", value: "" }, ...suggestion.map((value) => ({ label: value, value }))]}
+            onValueChange={(value) => { if (value) setOptions(value); }} />
           <Field colors={colors} label="附加产物路径（每行一个）" multiline value={artifacts} set={setArtifacts} />
         </> : null}
       </SettingsCard>
@@ -170,7 +189,8 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
       {selected?.operation ? <Note colors={colors}>探测会执行项目配置，并可能下载工具声明的项目依赖。完成后可刷新目标。</Note> : null}
       {selected?.blocked ? <Note colors={colors} warning>{selected.blocked}</Note> : null}
       {selected && !selected.blocked && !plan?.command.tool.version ? <Note colors={colors}>运行前请在工具链中选择并检查版本。</Note> : null}
-      {configurationKey && planError ? <Note colors={colors} warning>{planError}</Note> : null}
+      {selected?.adapter === "gradle" && !selected.operation ? <Note colors={colors}>Gradle 构建变体在「目标」中选择，例如 assembleDemoRelease；上方选项用于调整该任务的执行。</Note> : null}
+      {selected && (parsed.error || (configurationKey && planError)) ? <Note colors={colors} warning>{parsed.error || planError}</Note> : null}
       {discovery?.notices.map((msg, idx) => <Note key={idx} colors={colors}>{msg}</Note>)}
       {plan ? <CommandPreview plan={plan.command} colors={colors} /> : null}
       {plan && configuration ? <View style={styles.actions}>
@@ -207,8 +227,9 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
       <View style={styles.actions}>
         {confirm.id && current && !confirm.plan.command.tool.version ? <Button colors={colors} label="重新检查原配置的工具" disabled={!action} onPress={() => perform(async () => {
           await verify({ workspaceId, configuration: current.configuration });
-          const plan = await getPreview({ workspaceId, configuration: current.configuration });
-          setConfirmation({ ...confirm, plan }); refreshVersions((v) => v + 1);
+          const plan = await retry({ workspaceId, id: current.id, previewOnly: true });
+          if (plan.kind === "changed") setConfirmation({ ...confirm, plan });
+          refreshVersions((v) => v + 1);
         })} /> : null}
         <Button colors={colors} label="确认运行" primary disabled={!action || !confirm.plan.command.tool.version} onPress={() => perform(() => submit(confirm.plan, confirm.id))} />
         <Button colors={colors} label="取消" onPress={() => setConfirmation(undefined)} />

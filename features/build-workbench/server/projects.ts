@@ -1,5 +1,6 @@
 import { lstatSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
+import JSON5 from "json5";
 import { minimatch } from "minimatch";
 import { parse as yaml } from "yaml";
 import type { Target } from "../shared/contracts";
@@ -8,7 +9,7 @@ import { array, literal, section } from "./manifests";
 import { discoverCmake } from "./cmake";
 import { discoverGradle, discoverXcode } from "./native-projects";
 import type { Gradle, Xcode } from "./native-projects";
-import { misePin } from "./mise";
+import { ancestors, misePin } from "./mise";
 
 export type ProjectTarget = Target & {
   cwd: string;
@@ -17,7 +18,7 @@ export type ProjectTarget = Target & {
   cargo?: { name?: string; targetDir: string };
   cmake?: { dir: string; stamp: string; preset?: string; target?: string; configuration?: string; tool?: string };
   tauri?: { cli?: true; targetDir: string; manager?: "npm" | "pnpm" };
-  install?: { cwd: string; lock: boolean; required: string[] };
+  install?: { cwd: string; lock?: string; required: { from: string; name: string; version: string }[] };
   gradle?: Gradle;
   xcode?: Xcode;
   // Only populate this when the adapter can bound its writes. Artifact paths are not locks.
@@ -60,10 +61,10 @@ function packageTools(root: string, project: string, installRoot: string, data: 
   const lock = (name: string) => {
     try {
       const stat = lstatSync(resolveWithin(root, at(installRoot, name)), { bigint: true });
-      return stat.isFile() ? [name, stat.size, stat.mtimeNs, stat.ctimeNs].join(":") : undefined;
+      return stat.isFile() ? { name, stamp: [stat.size, stat.mtimeNs, stat.ctimeNs].join(":") } : undefined;
     } catch { return undefined; }
   };
-  const pin = (name: string) => misePin([project, installRoot, "."], name, read);
+  const pin = (name: string) => misePin(project, name, read);
   const nodePin = pin("node");
   const declared = version(data.packageManager) ?? version(parent.packageManager);
   if (declared && !/^(?:npm|pnpm)@/u.test(declared)) return;
@@ -71,9 +72,10 @@ function packageTools(root: string, project: string, installRoot: string, data: 
   const pnpmLock = lock("pnpm-lock.yaml");
   const npmLock = lock("npm-shrinkwrap.json") ?? lock("package-lock.json");
   const manager = declared ? declared.startsWith("pnpm@") ? "pnpm" : "npm" : pnpm || pnpmLock ? "pnpm" : "npm";
-  const required = [...new Set(Object.keys({ ...object(parent.dependencies), ...object(parent.devDependencies), ...object(data.dependencies), ...object(data.devDependencies) }))]
-    .filter((p) => /^(?:@[\w.-]+\/)?[\w-][\w.-]*$/u.test(p)).slice(0, 256);
-  return { manager, install: { cwd: installRoot, lock: !!(manager === "pnpm" ? pnpmLock : npmLock), required },
+  const required = (project === installRoot ? [[project, data]] as const : [[installRoot, parent], [project, data]] as const)
+    .flatMap(([from, pkg]) => Object.entries({ ...object(pkg.dependencies), ...object(pkg.devDependencies) }).flatMap(([name, version]) =>
+      /^(?:@[\w.-]+\/)?[\w-][\w.-]*$/u.test(name) && typeof version === "string" ? [{ from, name, version }] : [])).slice(0, 256);
+  return { manager, install: { cwd: installRoot, lock: (manager === "pnpm" ? pnpmLock : npmLock)?.name, required },
     stamp: [declared, pnpm, pnpmLock, npmLock, nodePin, pin(manager)],
     requirements: { node: version(object(data.engines).node) ?? version(object(parent.engines).node), miseNode: nodePin,
       managerEngine: version(object(data.engines)[manager]) ?? version(object(parent.engines)[manager]),
@@ -113,7 +115,7 @@ export function discoverProjects(root: string): Discovery {
     const pnpm = read(pnpmPath);
     let patterns = fromNpm;
     if (pnpm !== undefined) {
-      try { patterns = object(yaml(pnpm, { maxAliasCount: 0 })).packages; }
+      try { patterns = object(yaml(pnpm, { maxAliasCount: 0 })).packages ?? ["**"]; }
       catch (e) { notices.push(pnpmPath + "：" + (e as Error).message); }
     }
     if (pnpm !== undefined || Array.isArray(fromNpm)) jsRoots.set(dir, dir);
@@ -149,9 +151,7 @@ export function discoverProjects(root: string): Discovery {
 }
 
 function rustChannel(project: string, read: Read) {
-  const parts = project === "." ? [] : project.split("/");
-  for (let n = parts.length; n >= 0; n--) {
-    const dir = parts.slice(0, n).join("/") || ".";
+  for (const dir of ancestors(project)) {
     const toml = read(at(dir, "rust-toolchain.toml"));
     const channel = toml ? literal(section(toml, "toolchain"), "channel") : read(at(dir, "rust-toolchain"))?.trim();
     if (channel) return channel;
@@ -207,20 +207,18 @@ function discoverCargo(root: string, dirs: string[], read: Read, notices: string
 
 function discoverTauri(root: string, dirs: string[], jsRoots: Map<string, string>, read: Read, notices: string[], targets: ProjectTarget[]) {
   for (const native of dirs) {
-    const jsonPath = at(native, "tauri.conf.json");
-    const tomlPath = at(native, "Tauri.toml");
-    const rawJson = read(jsonPath);
-    const source = rawJson === undefined ? tomlPath : jsonPath;
-    const conf = rawJson ?? read(tomlPath);
-    if (conf === undefined) continue;
+    const entry = ["tauri.conf.json", "tauri.conf.json5", "Tauri.toml"].map((name) => at(native, name))
+      .map((source) => ({ source, conf: read(source) })).find(({ conf }) => conf !== undefined);
+    if (!entry || entry.conf === undefined) continue;
+    const { source, conf } = entry;
     const manifest = read(at(native, "Cargo.toml"));
     if (!manifest) { notices.push(`${source}：缺少 Cargo.toml`); continue; }
     const project = native === "." ? "." : dirname(native);
     try {
       const pkgText = read(at(project, "package.json"));
       const pkg = pkgText === undefined ? {} : json(pkgText);
-      const build = rawJson !== undefined ? object(json(conf).build) : undefined;
-      const frontend = build ? version(build.frontendDist) : literal(section(conf, "build"), "frontendDist");
+      const frontend = source.endsWith(".toml") ? literal(section(conf, "build"), "frontendDist")
+        : version(object(object(source.endsWith(".json5") ? JSON5.parse(conf) : json(conf)).build).frontendDist);
       const frontendOutput = observePath(root, native, frontend);
       const cargo = section(manifest, "package");
       const installRoot = jsRoots.get(project) ?? project;

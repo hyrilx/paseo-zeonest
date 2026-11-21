@@ -26,7 +26,7 @@ export function discoverCmake(root: string, notices: string[], targets: ProjectT
     const source = at(project, "CMakeLists.txt");
     try {
       const presets = configurePresets(root, project, notices);
-      const miseCmake = misePin([project, "."], "cmake", (path) => readText(root, path));
+      const miseCmake = misePin(project, "cmake", (path) => readText(root, path));
       if (project !== "." && !entry.definesProject && !presets.names.length) continue;
       const inputs = [...lists].filter(([p]) => p !== project && (project === "." || p.startsWith(project + "/"))).sort(([a], [b]) => a.localeCompare(b));
       if (!entry.definesProject) notices.push(`${source}：没有直接声明 project()。若依赖父工程，请打开父工程执行配置。`);

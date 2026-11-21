@@ -51,9 +51,9 @@ export default function contribute(server: PluginServerContext) {
     const { store, workspace } = await access(paseo, workspaceId);
     return store.start(workspace, configuration, fingerprint);
   });
-  server.handle(rpc.retry, async ({ workspaceId, id, fingerprint }, { paseo }) => {
+  server.handle(rpc.retry, async ({ workspaceId, id, fingerprint, previewOnly }, { paseo }) => {
     const { store, workspace } = await access(paseo, workspaceId);
-    return store.retry(workspace, id, fingerprint);
+    return store.retry(workspace, id, fingerprint, previewOnly);
   });
   server.handle(rpc.stop, async ({ workspaceId, id }, { paseo }) => {
     const { store, workspace } = await access(paseo, workspaceId);

@@ -32,7 +32,7 @@ export function discoverGradle(root: string, dirs: string[], notices: string[], 
           try { const value = readText(root, path); return value === undefined ? [] : [[path, digest(value)]]; }
           catch { return []; }
         }));
-      const miseJava = misePin([project, "."], "java", (path) => readText(root, path));
+      const miseJava = misePin(project, "java", (path) => readText(root, path));
       const stamp = digest(JSON.stringify([inputs, properties, extra, buildFiles, miseJava]));
       targets.push({ adapter: "gradle", project, source, cwd: project, requirements: { miseJava }, stamp, gradle, name: "tasks --all", operation: "probe", outputs: [] });
     } catch (error) { notices.push(`${project}：${(error as Error).message}`); }
@@ -60,19 +60,24 @@ export function discoverXcode(root: string, notices: string[], targets: ProjectT
 
 const gradleTask = (name: string) => {
   const task = name.split(":").at(-1) ?? "";
-  if (!/^:?(?:[\w.-]+:)*[\w-]+$/u.test(name) || name.length > 192) return false;
-  if (/publish|deploy|upload|sign|release|connected|device|install|archive/iu.test(task)) return false;
-  return /^(?:build|assemble|bundle|compile|check|test|lint|jar|war|bootJar|bootWar|distZip|distTar|create.*Distributable)(?:$|[A-Z0-9])/u.test(task);
+  if (!/^:?(?:[\w-][\w.-]*:)*[\w-][\w.-]*$/u.test(name) || task.startsWith("-") || name.length > 192 || name.split(":").some((part) => part === "." || part === "..")) return false;
+  const words = task.replace(/([A-Z])([A-Z][a-z])/gu, "$1 $2").replace(/([a-z0-9])([A-Z])/gu, "$1 $2").toLowerCase().split(/[ ._-]+/u);
+  // Release can be a variant of a local build or unit test; it isn't a publishing verb.
+  return !words.some((word) => /^(?:publish\w*|deploy\w*|upload\w*|sign|signing|connected\w*|devices?|install\w*|uninstall\w*|archive|run|clean)$/u.test(word)) && !/^(?:init|wrapper|release)$/iu.test(task);
 };
+const localTask = (task: string) => /^(?:build|assemble|bundle|compile|check|test|lint)(?:$|[A-Z0-9_.-])|^(?:jar|war|distZip|distTar)$|(?:Jar|War|Distributable|Test|Check|Lint)$/u.test(task);
 const schemeName = (name: string) => name.length <= 128 && !!name.trim() && !/^\s*-/u.test(name) && !/[\u0000-\u001f\u007f]/u.test(name);
 
 export function parseNativeProbe(adapter: "gradle" | "xcode", output: string): string[] {
   if (adapter === "gradle") {
+    let buildGroup = false;
     const names = output.split(/\r?\n/u).flatMap((line) => {
+      const group = /^(.+?) tasks\s*$/iu.exec(line)?.[1];
+      if (group) { buildGroup = /\b(?:build|verification|distribution)s?\b/iu.test(group); return []; }
       const name = /^(:?[\w.:-]+)(?:\s+-\s+.*)?\s*$/u.exec(line)?.[1];
-      return name && gradleTask(name) ? [name.startsWith(":") ? name : ":" + name] : [];
+      return name && gradleTask(name) && (buildGroup || localTask(name.split(":").at(-1)!)) ? [name.startsWith(":") ? name : ":" + name] : [];
     });
-    return [...new Set(names)].slice(0, 64);
+    return [...new Set(names)].slice(0, 256);
   }
   // xcodebuild may print a preamble before the JSON document.
   const start = output.indexOf("{");
@@ -82,7 +87,7 @@ export function parseNativeProbe(adapter: "gradle" | "xcode", output: string): s
     const parsed = JSON.parse(output.slice(start, end + 1)) as { workspace?: { schemes?: unknown }; project?: { schemes?: unknown } };
     const schemes = (parsed.workspace ?? parsed.project)?.schemes ?? [];
     if (!(parsed.workspace || parsed.project) || !Array.isArray(schemes)) throw new Error("scheme 列表缺失");
-    return [...new Set(schemes.filter((s): s is string => typeof s === "string" && schemeName(s)))].slice(0, 64);
+    return [...new Set(schemes.filter((s): s is string => typeof s === "string" && schemeName(s)))].slice(0, 256);
   } catch (error) { throw new Error("无法读取 xcodebuild scheme 列表", { cause: error }); }
 }
 

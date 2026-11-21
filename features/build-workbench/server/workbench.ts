@@ -18,13 +18,13 @@ const LOG_CHARS = 96 * 1024;
 const LOG_ROWS = 512;
 const MAX_ACTIVE = 12;
 const MAX_RUNNING = 2;
-const entrySchema = z.object({ run, rows: z.array(log), cursor: z.number(), artifacts: z.array(artifact), artifactsLimited: z.boolean(), probeStamp: z.string().optional(), probeRoot: z.string().optional() });
+const entrySchema = z.object({ run, rows: z.array(log), cursor: z.number(), artifacts: z.array(artifact), artifactsLimited: z.boolean(), probeStamp: z.string().optional(), probeRoot: z.string().optional(), preparationCompleted: z.boolean().optional() });
 const document = z.object({ sequence: z.number(), configurations: z.array(saved), tools: z.partialRecord(adapter, z.string()).default({}), history: z.array(entrySchema) });
 type State = z.infer<typeof document>;
 type Entry = z.infer<typeof entrySchema>;
 export type Workspace = { id: string; root: string };
 type Plan = { command: Command; fingerprint: string; steps: Invocation[]; outputs: string[]; locks?: string[]; configure?: { dir: string; stamp: string; tool: string }; nativeProbe?: { adapter: "gradle" | "xcode"; stamp: string } };
-type Job = { workspace: Workspace; entry: Entry; plan: Plan; process?: OwnedProcess; flush?: ReturnType<typeof setTimeout>; stopTimer?: ReturnType<typeof setTimeout>; before?: ReturnType<typeof observe>; probeOutput?: string; probeLimited?: boolean };
+type Job = { workspace: Workspace; entry: Entry; plan: Plan; forcePreparation: boolean; process?: OwnedProcess; flush?: ReturnType<typeof setTimeout>; stopTimer?: ReturnType<typeof setTimeout>; before?: ReturnType<typeof observe>; probeOutput?: string; probeLimited?: boolean };
 
 export function conflicts(a: { root: string; locks?: string[] }, b: { root: string; locks?: string[] }) {
   const overlaps = (x: string, y: string) => inside(x, y) || inside(y, x);
@@ -147,7 +147,7 @@ export class Workbench {
     } finally { this.#verificationRoot = undefined; this.#pump(); }
   }
 
-  #plan(w: Workspace, c: Configuration): Plan {
+  #plan(w: Workspace, c: Configuration, forcePreparation = false): Plan {
     this.accept();
     if (w.root !== workspaceRoot(w.root)) throw new Error("工作区目录已变化，请刷新");
     const t = this.#lookup(w, c.target);
@@ -162,13 +162,14 @@ export class Workbench {
       resolveWithin(w.root, dir);
     }
     const cwd = resolveWithin(w.root, t.cwd);
-    const prep = preparation(w.root, t, tool);
+    const prep = preparation(w.root, t, tool, forcePreparation);
     const command: Command = { cwd: t.cwd, source: t.source, argv: [tool.executable, ...args], tool: tool.candidate,
       ...(prep.length ? { preparation: prep.map(({ cwd, invocation }) => ({ cwd, argv: [invocation.executable, ...invocation.args] })) } : {}) };
     const fingerprint = digest(JSON.stringify([w.root, targetId(t), t.stamp, tool.signature, command, outputs]));
     const configure = t.operation === "probe" && t.cmake ? { ...t.cmake, tool: tool.signature } : undefined;
     const nativeProbe = t.operation && (t.adapter === "gradle" || t.adapter === "xcode") ? { adapter: t.adapter, stamp: t.stamp } : undefined;
-    return { command, fingerprint, steps: [...prep.map(({ invocation }) => invocation), { executable: tool.executable, args, cwd, env: tool.env }], outputs, configure, nativeProbe, locks: t.writes?.map((p) => resolveWithin(w.root, p)) };
+    const main = { executable: tool.executable, args, cwd, env: tool.env, reapAfterExit: !!t.gradle };
+    return { command, fingerprint, steps: [...prep.map(({ invocation }) => invocation), main], outputs, configure, nativeProbe, locks: t.writes?.map((p) => resolveWithin(w.root, p)) };
   }
   preview(w: Workspace, c: Configuration) {
     const { command, fingerprint } = this.#plan(w, c);
@@ -204,8 +205,11 @@ export class Workbench {
   }
 
   start(w: Workspace, configuration: Configuration, expected: string) {
-    const plan = this.#plan(w, configuration);
-    if (plan.fingerprint !== expected) return { kind: "changed" as const, command: plan.command, fingerprint: plan.fingerprint };
+    return this.#submit(w, configuration, expected);
+  }
+  #submit(w: Workspace, configuration: Configuration, expected: string, forcePreparation = false, previewOnly = false) {
+    const plan = this.#plan(w, configuration, forcePreparation);
+    if (previewOnly || plan.fingerprint !== expected) return { kind: "changed" as const, command: plan.command, fingerprint: plan.fingerprint };
     if (!plan.command.tool.version) throw new Error("请先检查所选工具的实际版本");
     if (this.#jobs.length >= MAX_ACTIVE) throw new Error("排队与运行任务已达到宿主上限");
     if (process.platform === "win32") throw new Error("当前仅支持可管理 POSIX 进程组的宿主");
@@ -221,15 +225,16 @@ export class Workbench {
     }
     try { this.#persist(w.id); }
     catch (e) { state.history = old; throw e; }
-    this.#jobs.push({ workspace: w, plan, entry });
+    this.#jobs.push({ workspace: w, plan, entry, forcePreparation });
     this.#pump();
     return { kind: "started" as const, run: { ...entry.run } };
   }
-  retry(w: Workspace, id: string, fingerprint?: string) {
-    const { run } = this.#entry(w, id);
+  retry(w: Workspace, id: string, fingerprint?: string, previewOnly = false) {
+    const { run, preparationCompleted } = this.#entry(w, id);
     if (!retryable(run.status)) throw new Error("只能重试失败、已停止或中断的任务");
     if (this.#jobs.some((job) => job.entry.run.id === id)) throw new Error("仍未确认原进程退出，暂时不能重试");
-    return this.start(w, run.configuration, fingerprint ?? run.fingerprint);
+    const forcePreparation = !!run.command.preparation?.length && preparationCompleted !== true;
+    return this.#submit(w, run.configuration, fingerprint ?? run.fingerprint, forcePreparation, previewOnly);
   }
 
   #pump() {
@@ -243,7 +248,7 @@ export class Workbench {
       if ((this.#verificationRoot && conflicts(scope(job), { root: this.#verificationRoot })) ||
           [...running, ...queues].some((other) => conflicts(scope(job), scope(other)))) { queues.push(job); continue; }
       try {
-        const current = this.#plan(job.workspace, job.entry.run.configuration);
+        const current = this.#plan(job.workspace, job.entry.run.configuration, job.forcePreparation);
         if (job.plan.fingerprint !== current.fingerprint) throw new Error("排队期间声明或工具发生变化，请检查并重试");
         if (job.plan.configure) prepareCmake(job.workspace.root, job.plan.configure.dir);
         job.before = observe(job.workspace.root, job.plan.outputs);
@@ -274,6 +279,10 @@ export class Workbench {
     void job.process.done.then((exit) => {
       const stopping = !this.#active || ["stopping", "interrupted"].includes(job.entry.run.status);
       if (preparing && !stopping && !exit.stopped && exit.code === 0 && !exit.error) {
+        if (index === steps.length - 2) {
+          job.entry.preparationCompleted = true;
+          this.#checkpoint(job);
+        }
         try { this.#step(job, steps, index + 1); }
         catch (error) { this.#finish(job, "failed", (error as Error).message); this.#pump(); }
         return;
