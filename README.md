@@ -12,13 +12,13 @@ Zeonest 取自 Zeolite（沸石）+ Nest（巢），意为「沸石之巢」：�
 
 | 名称 / ID | 描述 | 版本 | 标签 | 作者 |
 | --- | --- | --- | --- | --- |
-| [问答选项回顾](features/ask-user-question/README.md)<br><code>ask-user-question</code> | 在已完成的 ask&#95;user&#95;question 折叠块中保留全部选项、说明和用户答案。 | 0.1.2 | <code>界面</code> <code>Pi</code> | Zeonest |
-| [Billion Context](features/billion-context/README.md)<br><code>billion-context</code> | 托管 Bili 服务，让 Pi 与 dashboard 使用同一固定实例 | 0.4.0 | <code>context</code> <code>dashboard</code> | Zeonest |
-| [历史对话展开](features/chat-history/README.md)<br><code>chat-history</code> | 将消息中的 Chat history 摘要展开为可折叠的历史对话 | 0.1.2 | <code>chat</code> <code>history</code> | Zeonest |
-| [文件活动](features/file-activity/README.md)<br><code>file-activity</code> | 按轮查看当前会话的文件增删改查记录与差异 | 0.1.2 | <code>files</code> <code>conversation</code> | Zeonest |
-| [Pi 设置](features/pi-settings/README.md)<br><code>pi-settings</code> | 管理全局与项目的 Pi 模型、技能、插件和 MCP，应用前审阅配置 diff | 0.1.1 | <code>pi</code> <code>configuration</code> | Zeonest |
-| [Pi 状态桥接](features/pi-status-bridge/README.md)<br><code>pi-status-bridge</code> | 按会话汇总 Pi 插件状态，查看全文并调用映射的展开命令 | 0.2.0 | <code>pi</code> <code>status</code> | Zeonest |
-| [会话统计](features/session-stats/README.md)<br><code>session-stats</code> | 通过聊天胶囊查看会话轮次、工具用时与估算输出速度。 | 0.2.0 | <code>效率</code> <code>统计</code> | Zeonest |
+| [问答选项回顾](features/ask-user-question/README.md)<br><code>ask-user-question</code> | 在已完成的 ask&#95;user&#95;question 折叠块中保留全部选项、说明和用户答案。 | 0.1.2 | <code>界面</code> <code>Pi</code> | hyrilx |
+| [Billion Context](features/billion-context/README.md)<br><code>billion-context</code> | 托管 Bili 服务，让 Pi 与 dashboard 使用同一固定实例 | 0.4.0 | <code>context</code> <code>dashboard</code> | hyrilx |
+| [历史对话展开](features/chat-history/README.md)<br><code>chat-history</code> | 将消息中的 Chat history 摘要展开为可折叠的历史对话 | 0.1.2 | <code>chat</code> <code>history</code> | hyrilx |
+| [文件活动](features/file-activity/README.md)<br><code>file-activity</code> | 按轮查看当前会话的文件增删改查记录与差异 | 0.1.2 | <code>files</code> <code>conversation</code> | hyrilx |
+| [Pi 设置](features/pi-settings/README.md)<br><code>pi-settings</code> | 管理全局与项目的 Pi 模型、技能、插件和 MCP，应用前审阅配置 diff | 0.1.1 | <code>pi</code> <code>configuration</code> | hyrilx |
+| [Pi 状态桥接](features/pi-status-bridge/README.md)<br><code>pi-status-bridge</code> | 按会话汇总 Pi 插件状态，查看全文并调用映射的展开命令 | 0.2.0 | <code>pi</code> <code>status</code> | hyrilx |
+| [会话统计](features/session-stats/README.md)<br><code>session-stats</code> | 通过聊天胶囊查看会话轮次、工具用时与估算输出速度。 | 0.2.0 | <code>效率</code> <code>统计</code> | hyrilx |
 
 <!-- zeonest:features:end -->
 
@@ -72,6 +72,8 @@ npm run feature:new -- prompt-tools \
   --author "你的名字" \
   --runtime both --settings --tag productivity
 ```
+
+在仓库根目录的 `.author` 中写一行作者名，即可省略 `--author`。脚手架优先使用 `.author` 去掉首尾空白后的内容；文件不存在或为空时才使用 `--author`。`.author` 不提交到 Git。
 
 脚手架在 `features/prompt-tools/` 创建贡献入口、README 和可选配置页，功能元数据在 `feature.json` 中维护。单端功能用 `--runtime client` 或 `--runtime server`，无配置页则省略 `--settings`。实现业务与测试后运行 `npm run check`。
 

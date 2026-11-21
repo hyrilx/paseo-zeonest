@@ -94,6 +94,28 @@ test("no-settings scaffold stays minimal and refuses overwrites", async (t) => {
   assert.deepEqual((await readdir(path.join(root, "features/alpha"))).sort(), ["README.md", "client", "feature.json"]);
 });
 
+test("scaffold prefers the trimmed root .author with or without an author argument", async (t) => {
+  const root = await fixture(t);
+  await put(root, ".author", "  Local Author\r\n");
+  const { author, ...withoutAuthor } = metadata("beta");
+  await createFeature(root, metadata(), "client", false);
+  await createFeature(root, withoutAuthor, "client", false);
+
+  assert.deepEqual((await loadFeatures(root)).map((feature) => feature.metadata.author), ["Local Author", "Local Author"]);
+});
+
+test("scaffold falls back to the author argument for a missing or blank .author", async (t) => {
+  const root = await fixture(t);
+  const { author, ...withoutAuthor } = metadata("gamma");
+  await assert.rejects(createFeature(root, withoutAuthor, "client", false), /Missing feature author/);
+  await createFeature(root, metadata(), "client", false);
+  await put(root, ".author", " \n\t");
+  await assert.rejects(createFeature(root, withoutAuthor, "client", false), /Missing feature author/);
+  await createFeature(root, metadata("beta"), "client", false);
+
+  assert.deepEqual((await loadFeatures(root)).map((feature) => feature.metadata.author), [author, author]);
+});
+
 test("build discovers changed metadata and entries without any synchronization step", async (t) => {
   const root = await fixture(t);
   await createFeature(root, metadata("zeta"), "client", false);

@@ -14,7 +14,8 @@ description: 在 Zeonest 仓库新增、修改或移除静态集成的 Paseo 子
 1. 确定实际需求、运行端、是否需要配置及数据访问。缺少影响行为的决定时先询问。
 2. 读取正在修改的子功能及已有测试，不把原生配置注册误放入可关闭业务入口。
 3. 新功能使用：
-   `npm run feature:new -- <id> --name "名称" --description "说明" --author "作者" [--runtime client|server|both] [--settings] [--tag 标签]`。
+   `npm run feature:new -- <id> --name "名称" --description "说明" [--author "作者"] [--runtime client|server|both] [--settings] [--tag 标签]`。
+   作者优先取仓库根目录的 `.author`；文件不存在或为空时须传 `--author`。
    脚手架只在 `features/<id>/` 生成空接入，不改壳、根入口或其他目录。必须继续完成真实实现和 `features/<id>/tests/` 的行为测试；fixtures 也放在功能 tests 内。
 4. 所有手写实现内聚于功能目录的 client/server/shared，使用普通相对路径。直接使用固定 0.15.4 的原生 SDK，不依赖壳内部 helper 或其他功能实现；包括类型和传递依赖都必须遵守本端/shared 边界。本端业务可以使用 tools 子目录；禁止的是测试/fixtures 与仓库根开发工具依赖。静态 SVG 使用本功能的类型声明和既有文本打包，资源同样受源码归属检查。不要创建功能独立 package.json/构建/安装树。
 5. 配置由功能自行定义及渲染。壳只列出元信息、控制业务入口是否执行、路由原生设置页。
