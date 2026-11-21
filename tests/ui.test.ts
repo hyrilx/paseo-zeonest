@@ -35,7 +35,7 @@ async function uiFixture(t: { after(fn: () => Promise<void>): void }, populated 
   await build({
     absWorkingDir: root,
     stdin: {
-      contents: renderEntry(await loadFeatures(root), "client") + '\nimport { FeatureManager as RawFeatureManager } from "./shell/client/feature-manager"; export const FeatureManager = (props) => RawFeatureManager({...props, featureCatalog, featureSettingsScreens}); export { setSettingsState } from "@getpaseo/plugin/client";',
+      contents: renderEntry(await loadFeatures(root), "client") + '\nimport { FeatureManager as RawFeatureManager } from "./shell/client/feature-manager"; import { useSettings } from "@getpaseo/plugin/client"; export const FeatureManager = (props) => RawFeatureManager({...props, settings: useSettings(), featureCatalog, featureSettingsScreens}); export { setSettingsState } from "@getpaseo/plugin/client";',
       resolveDir: root, loader: "ts",
     },
     outfile, bundle: true, format: "esm", platform: "node", packages: "external",
@@ -48,8 +48,8 @@ async function uiFixture(t: { after(fn: () => Promise<void>): void }, populated 
           contents: path === "@getpaseo/plugin/client"
             ? "let state; export function setSettingsState(next) { state = next; } export function useSettings() { return state; }"
             : path === "react-native"
-              ? 'export const View = "View"; export const Text = "Text";'
-              : ["SettingsAction", "SettingsCard", "SettingsRow", "SettingsSection", "SettingsSwitch"]
+              ? 'export const View = "View", Text = "Text", Switch = "Switch", Pressable = "Pressable"; export const useWindowDimensions = () => ({ width: 1000, height: 800 });'
+              : ["Icon", "TextInput", "ScrollView", "SettingsAction", "SettingsCard", "SettingsRow", "SettingsSection", "SettingsSwitch"]
                 .map((name) => "export const " + name + " = " + JSON.stringify(name) + ";").join("\n"),
           loader: "js",
         }));
@@ -80,7 +80,7 @@ const colors = Object.fromEntries([
 const props = {
   theme: { colors }, layout: { compact: false, platform: "web" }, host: { id: "host-a", label: "A" },
   runtime: { status: "ready", enabledIds: [], error: null }, openSettings: (_id: string) => {},
-  reloadState: { status: "idle", message: null }, reloadPlugin: () => {},
+  reloadState: { status: "idle", message: null }, reloadPlugin: () => {}, width: 720, query: "", setQuery: (_query: string) => {},
 };
 
 function readySettings(overrides = {}) {
@@ -95,8 +95,8 @@ test("empty shell renders an honest empty state without fictitious feature switc
   const ui = await uiFixture(t, false);
   ui.setSettingsState(readySettings());
   const tree = ui.FeatureManager(props);
-  assert.ok(nodes(tree).some((node) => node.props.title === "尚未集成子功能"));
-  assert.equal(nodes(tree).some((node) => node.type === "SettingsSwitch"), false);
+  assert.match(text(tree), /尚未集成子功能/);
+  assert.equal(nodes(tree).some((node) => node.type === "Switch" || node.type === "TextInput"), false);
 });
 
 test("feature UI displays all metadata, pending state and settings even while disabled", async (t) => {
@@ -105,32 +105,46 @@ test("feature UI displays all metadata, pending state and settings even while di
   let opened = "";
   const tree = ui.FeatureManager({ ...props, openSettings: (id: string) => { opened = id; } });
   const visible = text(tree);
-  assert.match(visible, /1 项开关已保存/);
-  assert.match(visible, /版本 1.2.3 \/ 作者 测试作者/);
-  assert.match(visible, /标签：工具/);
-  assert.match(visible, /本次运行：未启用/);
+  assert.ok(nodes(tree).some((node) => node.props.label === "1 项开关已保存，等待生效"));
+  assert.match(visible, /v1.2.3 · 测试作者 · 工具/);
+  assert.match(visible, /未启用 · 待启用/);
   const all = nodes(tree);
-  assert.ok(all.some((node) => node.props.title === "功能甲"));
-  assert.ok(all.some((node) => node.props.label === "功能甲" && node.props.hint === "说明 alpha"));
-  const action = all.find((node) => node.props.actionLabel === "打开配置");
+  const actions = all.filter((node) => node.type === "Pressable");
+  assert.deepEqual(actions.map((node) => node.props.accessibilityLabel), ["功能甲：打开配置"]);
+  const [action] = actions;
   assert.ok(action);
   action.props.onPress();
   assert.equal(opened, "alpha-settings");
-  assert.ok(all.some((node) => node.props.label === "无需配置"));
 });
 
-test("feature names are primary row labels and descriptions are hints in wide and compact layouts", async (t) => {
+test("feature names appear once as headings; the grid adapts to the available width and compact layout", async (t) => {
   const ui = await uiFixture(t);
   ui.setSettingsState(readySettings());
-  for (const compact of [false, true]) {
-    const tree = ui.FeatureManager({ ...props, layout: { ...props.layout, compact } });
-    for (const [name, description] of [["功能甲", "说明 alpha"], ["功能乙", "说明 beta"]]) {
-      const section = nodes(tree).find((node) => node.type === "SettingsSection" && node.props.title === name);
-      assert.ok(section);
-      const rows = nodes(section).filter((node) => node.type === "SettingsRow");
-      assert.ok(rows.some((row) => row.props.label === name && row.props.hint === description));
-      assert.equal(rows.some((row) => row.props.label === description), false);
+  for (const [compact, width, cardWidth] of [[false, 720, 354], [false, 540, "100%"], [true, 720, "100%"]]) {
+    const tree = ui.FeatureManager({ ...props, layout: { ...props.layout, compact }, width });
+    const grid = nodes(tree).find((node) => node.props.testID === "zeonest-feature-grid")!;
+    const cards = grid.props.children as Node[];
+    assert.equal(cards.length, 2);
+    for (const [index, [name, description]] of ([["功能甲", "说明 alpha"], ["功能乙", "说明 beta"]] as const).entries()) {
+      const card = cards[index];
+      assert.ok(card);
+      assert.equal(card.props.style.width, cardWidth);
+      const headings = nodes(card).filter((node) => node.props.accessibilityRole === "header");
+      assert.deepEqual(headings.map(text), [name]);
+      assert.equal(text(card).split(name).length, 2);
+      assert.match(text(card), new RegExp(description));
     }
+  }
+});
+
+test("search matches metadata and shows a distinct no-results state", async (t) => {
+  const ui = await uiFixture(t);
+  ui.setSettingsState(readySettings());
+  for (const [query, expected] of [[" ALPHA ", ["alpha"]], ["工具", ["alpha", "beta"]], ["测试作者", ["alpha", "beta"]], ["未匹配", []]] as const) {
+    const tree = ui.FeatureManager({ ...props, query });
+    const cards = nodes(tree).filter((node) => node.props.testID?.startsWith("zeonest-feature-") && node.props.testID !== "zeonest-feature-grid");
+    assert.deepEqual(cards.map((node) => node.props.testID), expected.map((id) => `zeonest-feature-${id}`));
+    if (!expected.length) assert.match(text(tree), /没有匹配的功能/);
   }
 });
 
@@ -142,7 +156,7 @@ test("toggle saves a full document with the displayed revision and preserves unk
     save: async (...args: unknown[]) => { calls.push(args); return true; },
   }));
   const tree = ui.FeatureManager(props);
-  const toggle = nodes(tree).find((node) => node.type === "SettingsSwitch");
+  const toggle = nodes(tree).find((node) => node.type === "Switch");
   assert.ok(toggle);
   toggle.props.onValueChange(true);
   assert.deepEqual(calls, [[{ enabled: { removed: true, beta: false, alpha: true } }, "revision-1"]]);
@@ -153,7 +167,7 @@ test("loading/saving/invalid states never offer an enabled switch; invalid reset
   for (const settings of [{ status: "loading" }, readySettings({ saving: true })]) {
     ui.setSettingsState(settings);
     assert.ok(nodes(ui.FeatureManager(props))
-      .filter((node) => node.type === "SettingsSwitch")
+      .filter((node) => node.type === "Switch")
       .every((node) => node.props.disabled === true));
   }
   let resets = 0;
@@ -174,7 +188,7 @@ test("conflict errors allow reload and startup failures do not claim a confirmed
     ...props, layout: { compact: true, platform: "ios" },
     runtime: { status: "error", error: "startup failed", enabledIds: [] },
   });
-  assert.match(text(tree), /本次运行：未确认/);
+  assert.match(text(tree), /状态未确认/);
   assert.match(text(tree), /启动失败：startup failed/);
   const reload = nodes(tree).find((node) => node.props.label === "revision conflict");
   assert.ok(reload);
@@ -220,19 +234,80 @@ test("all child settings stay inside one menu entry and receive native surface p
       assert.deepEqual(fake.commands, ["zeonest-settings"]);
       for (const screen of Object.values(ui.featureSettingsScreens) as { id: string; title: string; Component: React.ComponentType<PluginSurfaceProps> }[]) {
         assert.equal(root.root.findAllByType(screen.Component).length, 0);
-        const section = root.root.findAll((node) => String(node.type) === "SettingsSection" && node.props.title === screen.title)[0]!;
-        const action = section.findAll((node) => String(node.type) === "SettingsAction" && node.props.actionLabel === "打开配置")[0]!;
+        const action = root.root.findByProps({ accessibilityLabel: `${screen.title}：打开配置` });
         await act(async () => action.props.onPress());
         assert.deepEqual(root.root.findByType(screen.Component).props, surfaceProps);
-        assert.equal(root.root.findAll((node) => String(node.type) === "SettingsSwitch").length, 0);
-        const back = root.root.findAll((node) => String(node.type) === "SettingsAction" && node.props.actionLabel === "返回功能集")[0]!;
+        assert.equal(root.root.findAll((node) => String(node.type) === "Switch").length, 0);
+        const back = root.root.findByProps({ accessibilityLabel: "返回功能集" });
         assert.ok(back);
         await act(async () => back.props.onPress());
         assert.equal(root.root.findAllByType(screen.Component).length, 0);
-        assert.equal(root.root.findAll((node) => String(node.type) === "SettingsSwitch").length, 2);
+        assert.equal(root.root.findAll((node) => String(node.type) === "Switch").length, 2);
       }
       assert.deepEqual(fake.opened, []);
       assert.deepEqual(fake.screens, ["zeonest-features"]);
+    } finally {
+      await act(async () => root.unmount());
+      await cleanup();
+    }
+  }
+});
+
+test("web navigation resets the host scroller and restores both list scroll and search", async (t) => {
+  const ui = await uiFixture(t);
+  ui.setSettingsState(readySettings());
+  const fake = fakeClient();
+  const cleanup = ui.default(fake.client);
+  fake.resolve({ enabledIds: [], error: null });
+  const Component = fake.components.get("zeonest-features")!;
+  const scroller = { scrollTop: 0 };
+  const view = {
+    parentElement: { parentElement: scroller },
+    ownerDocument: { defaultView: { getComputedStyle: (node: unknown) => ({ overflowY: node === scroller ? "auto" : "visible" }) } },
+  };
+  let root!: ReactTestRenderer;
+  await act(async () => {
+    root = create(React.createElement(Component, props as unknown as PluginSurfaceProps), {
+      createNodeMock: (element) => (element.props as { collapsable?: boolean }).collapsable === false ? view : null,
+    });
+  });
+  try {
+    await act(async () => root.root.findByProps({ accessibilityLabel: "搜索功能" }).props.onChangeText("alpha"));
+    for (const offset of [216, 483]) {
+      scroller.scrollTop = offset;
+      await act(async () => root.root.findByProps({ accessibilityLabel: "功能甲：打开配置" }).props.onPress());
+      assert.equal(scroller.scrollTop, 0);
+      scroller.scrollTop = 830;
+      await act(async () => root.root.findByProps({ accessibilityLabel: "返回功能集" }).props.onPress());
+      assert.equal(scroller.scrollTop, offset);
+      assert.equal(root.root.findByProps({ accessibilityLabel: "搜索功能" }).props.value, "alpha");
+    }
+  } finally {
+    await act(async () => root.unmount());
+    await cleanup();
+  }
+});
+
+test("native navigation opens a fresh scroller and remounts the list at its captured offset", async (t) => {
+  const ui = await uiFixture(t);
+  ui.setSettingsState(readySettings());
+  for (const platform of ["ios", "android"]) {
+    const fake = fakeClient();
+    const cleanup = ui.default(fake.client);
+    fake.resolve({ enabledIds: [], error: null });
+    const Component = fake.components.get("zeonest-features")!;
+    const surface = { ...props, layout: { compact: true, platform } } as unknown as PluginSurfaceProps;
+    let root!: ReactTestRenderer;
+    await act(async () => { root = create(React.createElement(Component, surface)); });
+    try {
+      const scroll = () => root.root.findByProps({ testID: "zeonest-settings-scroll" });
+      assert.equal(scroll().props.contentOffset.y, 0);
+      scroll().props.onScroll({ nativeEvent: { contentOffset: { y: 269 } } });
+      await act(async () => root.root.findByProps({ accessibilityLabel: "功能甲：打开配置" }).props.onPress());
+      assert.equal(scroll().props.contentOffset.y, 0);
+      assert.equal(scroll().props.onScroll, undefined);
+      await act(async () => root.root.findByProps({ accessibilityLabel: "返回功能集" }).props.onPress());
+      assert.equal(scroll().props.contentOffset.y, 269);
     } finally {
       await act(async () => root.unmount());
       await cleanup();
@@ -252,10 +327,10 @@ test("child settings remain reachable while shell settings and startup are loadi
     let root!: ReactTestRenderer;
     await act(async () => { root = create(React.createElement(Component, props as unknown as PluginSurfaceProps)); });
     try {
-      const action = root.root.findAll((node) => String(node.type) === "SettingsAction" && node.props.actionLabel === "打开配置")[0]!;
+      const action = root.root.findByProps({ accessibilityLabel: "功能甲：打开配置" });
       await act(async () => action.props.onPress());
       assert.equal(root.root.findAllByType(ui.featureSettingsScreens.alpha.Component).length, 1);
-      const back = root.root.findAll((node) => String(node.type) === "SettingsAction" && node.props.actionLabel === "返回功能集")[0]!;
+      const back = root.root.findByProps({ accessibilityLabel: "返回功能集" });
       await act(async () => back.props.onPress());
       assert.equal(root.root.findAllByType(ui.featureSettingsScreens.alpha.Component).length, 0);
       assert.match(JSON.stringify(root.toJSON()), status === "loading" ? /正在读取本次运行状态/ : /startup failed/);
@@ -294,30 +369,32 @@ test("a late client snapshot after teardown cannot resurrect native contribution
   assert.deepEqual(fake.removed, ["zeonest-settings", "zeonest-features"]);
 });
 
-test("reload action exists even in empty/error states and never runs while saving or reloading", async (t) => {
-  const ui = await uiFixture(t, false);
+test("reload is contextual to pending switches and never runs while saving or reloading", async (t) => {
+  const ui = await uiFixture(t);
   let calls = 0;
-  for (const compact of [false, true]) {
-    for (const settings of [readySettings(), { status: "loading", saving: false }, readySettings({ status: "invalid", error: "invalid" }), readySettings({ saving: true })]) {
-      for (const running of [false, true]) {
-        ui.setSettingsState(settings);
-        const tree = ui.FeatureManager({ ...props, layout: { ...props.layout, compact },
-          reloadState: { status: running ? "running" : "idle", message: null },
-          reloadPlugin: () => { calls++; },
-        });
-        const action = nodes(tree).find((node) => node.props.label === "重新加载插件")!;
-        assert.equal(action.props.disabled, Boolean(settings.saving || running));
-        const before = calls;
-        action.props.onPress();
-        assert.equal(calls, before + (settings.saving || running ? 0 : 1));
-      }
+  for (const settings of [readySettings(), { status: "loading" }, readySettings({ status: "invalid", error: "invalid" })]) {
+    ui.setSettingsState(settings);
+    assert.equal(nodes(ui.FeatureManager(props)).some((node) => node.props.actionLabel === "重新加载"), false);
+  }
+  for (const saving of [false, true]) {
+    for (const running of [false, true]) {
+      ui.setSettingsState(readySettings({ values: { enabled: { alpha: true } }, saving }));
+      const tree = ui.FeatureManager({ ...props,
+        reloadState: { status: running ? "running" : "idle", message: null },
+        reloadPlugin: () => { calls++; },
+      });
+      const action = nodes(tree).find((node) => node.props.label === "1 项开关已保存，等待生效")!;
+      assert.equal(action.props.disabled, saving || running);
+      const before = calls;
+      action.props.onPress();
+      assert.equal(calls, before + (saving || running ? 0 : 1));
     }
   }
 });
 
 async function mountShell(t: { after(fn: () => Promise<void>): void }, onReload: () => Promise<{ error: string | null }>) {
   const ui = await uiFixture(t);
-  ui.setSettingsState(readySettings());
+  ui.setSettingsState(readySettings({ values: { enabled: { alpha: true } } }));
   const fake = fakeClient(onReload);
   const cleanup = ui.default(fake.client);
   fake.resolve({ enabledIds: [], error: null });
@@ -328,7 +405,7 @@ async function mountShell(t: { after(fn: () => Promise<void>): void }, onReload:
     await act(async () => root.unmount());
     await cleanup();
   });
-  const action = () => root.root.findAll((node) => String(node.type) === "SettingsAction" && node.props.label === "重新加载插件")[0]!;
+  const action = () => root.root.findByProps({ label: "1 项开关已保存，等待生效" });
   return { root, action, cleanup, ui };
 }
 
@@ -346,11 +423,11 @@ test("real settings hooks coalesce double clicks, lock switches and surface CLI 
   assert.equal(calls, 1);
   assert.equal(action().props.disabled, true);
   assert.equal(action().props.actionLabel, "正在重新加载…");
-  assert.ok(root.root.findAll((node) => String(node.type) === "SettingsSwitch").every((node) => node.props.disabled));
+  assert.ok(root.root.findAll((node) => String(node.type) === "Switch").every((node) => node.props.disabled));
   await act(async () => { finish({ error: "CLI missing" }); });
   assert.match(JSON.stringify(root.toJSON()), /CLI missing/);
   assert.equal(action().props.disabled, false);
-  assert.ok(root.root.findAll((node) => String(node.type) === "SettingsSwitch").every((node) => !node.props.disabled));
+  assert.ok(root.root.findAll((node) => String(node.type) === "Switch").every((node) => !node.props.disabled));
   await act(async () => { action().props.onPress(); finish({ error: null }); });
   assert.equal(calls, 2);
   assert.match(JSON.stringify(root.toJSON()), /确认本次运行状态/);
