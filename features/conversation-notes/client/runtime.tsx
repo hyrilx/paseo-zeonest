@@ -1,5 +1,7 @@
+import { settingsRpc } from "@getpaseo/plugin";
 import type { PluginButtonContentProps, PluginClientContext } from "@getpaseo/plugin/client";
 import { notePresence, PRESENCE_BATCH_SIZE, readNote, saveNote, type SaveInput } from "../shared/contracts";
+import { defaultPreferences, preferences, preferencesSchema } from "../shared/settings";
 import { createSessionNote, type SessionNote } from "./note";
 import { NotesPanel } from "./panel";
 
@@ -8,6 +10,7 @@ type Registration = ReturnType<Client["addComposerPill"]>;
 type Directory = Awaited<ReturnType<Client["paseo"]["agents"]["list"]>>;
 type Session = Directory["entries"][number]["agent"];
 interface Pill { workspaceId: string; registration: Registration; unsubscribe(): void }
+const readPreferences = settingsRpc(preferences.id).read;
 
 export function startNotes(client: Client) {
   const notes = new Map<string, SessionNote>();
@@ -18,6 +21,15 @@ export function startNotes(client: Client) {
     read: (sessionId: string) => client.rpc(readNote, { sessionId }),
     save: (input: SaveInput) => client.rpc(saveNote, input),
   };
+  async function loadPreferences() {
+    try {
+      const result = await client.rpc(readPreferences, {});
+      if (result.status === "ready") return preferencesSchema.parse(result.values);
+    } catch {
+      // Notes must remain usable if the independent host configuration cannot be read.
+    }
+    return defaultPreferences;
+  }
   let attempt: AbortController | undefined;
   let subscription: Directory["subscription"];
   let unobserve: (() => void) | undefined;
@@ -77,7 +89,8 @@ export function startNotes(client: Client) {
     }
     const note = source;
     const Content = (props: PluginButtonContentProps) =>
-      props.context === "agent" && props.agentId === id && props.workspaceId === workspaceId ? <NotesPanel {...props} note={note} /> : null;
+      props.context === "agent" && props.agentId === id && props.workspaceId === workspaceId
+        ? <NotesPanel {...props} note={note} loadPreferences={loadPreferences} /> : null;
     function presentation() {
       const state = note.get();
       if (state.status === "conflict" || (state.conflict && state.status !== "saving")) return { label: "笔记 · 有冲突", title: "会话笔记有版本冲突" };

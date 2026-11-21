@@ -1,22 +1,24 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
-import type { PluginButtonContentProps, PluginClientContext } from "@getpaseo/plugin/client";
+import { settingsRpc } from "@getpaseo/plugin";
+import type { PluginButtonContentProps, PluginClientContext, PluginSettingsScreenContribution, PluginSurfaceProps, SettingsState } from "@getpaseo/plugin/client";
 import { build } from "esbuild";
 import { act, createElement } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import type { startNotes as start } from "../client/runtime";
 import { notePresence, readNote, saveNote } from "../shared/contracts";
+import { defaultPreferences, preferences, preferencesSchema, type Preferences } from "../shared/settings";
 import { deferred } from "./deferred";
 
-const require = createRequire(import.meta.url);
-const compiled = await build({
-  entryPoints: [new URL("../client/runtime.tsx", import.meta.url).pathname],
-  bundle: true, write: false, platform: "node", format: "cjs", jsx: "automatic", external: ["react", "react/jsx-runtime"],
-  plugins: [{ name: "native-host", setup(builder) {
-    builder.onResolve({ filter: /^(@getpaseo\/plugin\/client\/ui|react-native)$/ }, (args) => ({ path: args.path, namespace: "test-host" }));
+const settingsRead = settingsRpc(preferences.id).read;
+const nativeHost = { name: "native-host", setup(builder: import("esbuild").PluginBuild) {
+    builder.onResolve({ filter: /^(@getpaseo\/plugin\/client(\/ui)?|react-native)$/ }, (args) => ({ path: args.path, namespace: "test-host" }));
     builder.onLoad({ filter: /.*/, namespace: "test-host" }, () => ({ loader: "js", contents: `
       import React from 'react'; const make = name => props => React.createElement(name, props, props.children);
+      export function useSettings(definition) { return getSettings(definition); }
+      export const SettingsCard = make('SettingsCard'), SettingsRow = make('SettingsRow'), SettingsSelect = make('SettingsSelect'),
+        SettingsSwitch = make('SettingsSwitch'), SettingsAction = make('SettingsAction');
       export const Text = make('Text'), View = make('View'), Pressable = make('Pressable');
       export const TextInput = React.forwardRef((props, ref) => React.createElement('TextInput', { ...props, ref }));
       export const Icon = make('Icon'), Markdown = make('Markdown'), ScrollView = make('ScrollView');
@@ -24,11 +26,19 @@ const compiled = await build({
       export const Platform = { select: options => options.default }, StyleSheet = { create: styles => styles };
       export const copyText = async () => {};
     ` }));
-  } }],
-});
-const module = { exports: {} as { startNotes: typeof start } };
-new Function("require", "module", "exports", compiled.outputFiles[0]!.text)(require, module, module.exports);
-const { startNotes } = module.exports;
+} };
+const require = createRequire(import.meta.url);
+async function load<T>(path: string, getSettings?: (definition: typeof preferences) => SettingsState<typeof preferencesSchema>) {
+  const compiled = await build({
+    entryPoints: [new URL(path, import.meta.url).pathname],
+    bundle: true, write: false, platform: "node", format: "cjs", jsx: "automatic", external: ["react", "react/jsx-runtime"],
+    plugins: [nativeHost],
+  });
+  const module = { exports: {} as T };
+  new Function("require", "module", "exports", "getSettings", compiled.outputFiles[0]!.text)(require, module, module.exports, getSettings);
+  return module.exports;
+}
+const { startNotes } = await load<{ startNotes: typeof start }>("../client/runtime.tsx");
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 const props: PluginButtonContentProps = {
   context: "agent", workspaceId: "w", agentId: "a", close() {}, host: { id: "h", label: "host" },
@@ -45,6 +55,8 @@ test("native pills follow the session directory and keep a failed draft in its o
   type Observer = Parameters<NonNullable<Directory["subscription"]>["subscribe"]>[0];
   const registered = new Map<string, Pill>();
   const reads: string[] = [];
+  let preferencesReads = 0;
+  let hostPreferences: () => Promise<unknown> = async () => ({ status: "ready", revision: "1", values: {} });
   const writes: { sessionId: string; markdown: string }[] = [];
   const presence = deferred<{ present: string[] }>();
   let fail = true;
@@ -62,6 +74,11 @@ test("native pills follow the session directory and keep a failed draft in its o
     } } },
     rpc: async ({ name }: { name: string }, input: { sessionId: string; markdown: string }) => {
       if (name === notePresence.name) return presence.promise;
+      if (name === settingsRead.name) {
+        assert.deepEqual(input, {});
+        preferencesReads++;
+        return hostPreferences();
+      }
       if (name === readNote.name) { reads.push(input.sessionId); return { revision: null, markdown: "" }; }
       assert.equal(name, saveNote.name);
       writes.push(input);
@@ -79,6 +96,7 @@ test("native pills follow the session directory and keep a failed draft in its o
   assert.deepEqual([...registered.keys()], ["a", "b"]);
   assert.ok([...registered.values()].every((pill) => pill.workspaceId === "w"));
   assert.deepEqual(reads, [], "presence does not read note bodies into the client");
+  assert.equal(preferencesReads, 0, "closed pills do not fetch settings");
   const content = (id: string) => {
     const behavior = registered.get(id)!.button.behavior;
     assert.equal(behavior.kind, "popover"); return behavior.Content;
@@ -153,6 +171,27 @@ test("native pills follow the session directory and keep a failed draft in its o
   await act(async () => { tab("编辑"); });
   assert.equal(bodyHeight(), editHeight);
   assert.equal(textbox().props.value, "# A\n\n**记录**\n- [x] 查资料");
+  const previewPreferences = { defaultView: "preview", editorSize: "large", showToolbar: false } satisfies Preferences;
+  const delayed = deferred<unknown>();
+  hostPreferences = () => delayed.promise;
+  await act(async () => { root.update(createElement(B, { ...props, agentId: "b" })); });
+  assert.equal(root.root.findAllByType("TextInput" as never).length, 0, "no flash of the default editor while preferences load");
+  assert.equal(bodyHeight(), editHeight);
+  hostPreferences = async () => ({ status: "ready", revision: "2", values: previewPreferences });
+  await act(async () => { root.update(createElement(A, props)); });
+  assert.equal(root.root.findByType("ScrollView" as never).props.testID, "conversation-notes-preview");
+  await act(async () => { tab("编辑"); });
+  assert.equal(bodyHeight(), editHeight);
+  assert.equal(textbox().props.style[2].fontSize, 17);
+  assert.equal(root.root.findAll((node) => node.props.accessibilityRole === "toolbar").length, 0);
+  await act(async () => { delayed.resolve({ status: "ready", revision: "1", values: {} }); });
+  assert.equal(textbox().props.style[2].fontSize, 17, "a late response from a closed panel does not change the current panel");
+  await act(async () => { root.update(createElement(B, { ...props, agentId: "b" })); });
+  assert.equal(root.root.findByType("ScrollView" as never).props.testID, "conversation-notes-preview", "the manual switch did not change the host default");
+  hostPreferences = async () => { throw new Error("offline"); };
+  await act(async () => { root.update(createElement(A, props)); });
+  assert.equal(textbox().props.style[2].fontSize, 14);
+  assert.ok(root.root.findAll((node) => node.props.accessibilityRole === "toolbar").length > 0);
   await act(async () => { mounted = false; root.unmount(); observer.snapshot(entries("b") as Parameters<Observer["snapshot"]>[0]); });
   assert.equal(writes[2]?.markdown, "# A\n\n**记录**\n- [x] 查资料");
   assert.equal(registered.has("a"), false);
@@ -161,4 +200,49 @@ test("native pills follow the session directory and keep a failed draft in its o
   await act(async () => {});
   assert.equal(registered.size, 0);
   assert.equal(released, 1); assert.equal(stopListening, 1);
+});
+
+test("native settings save the displayed revision, retain a failed draft, and never overwrite newer preferences", async () => {
+  type State = SettingsState<typeof preferencesSchema>;
+  const saves: [Preferences, string][] = [];
+  const state: Extract<State, { status: "ready" }> = {
+    status: "ready", values: defaultPreferences, revision: "first", saving: false, saveError: null,
+    async save(values, revision) {
+      saves.push([values, revision]);
+      if (saves.length === 1) { state.saveError = "offline"; return false; }
+      state.values = values; state.revision = "third"; state.saveError = null;
+      return true;
+    },
+    async reset() { return true; },
+    async reload() { state.saveError = null; },
+  };
+  const { default: { Component } } = await load<{ default: PluginSettingsScreenContribution }>("../client/settings.tsx", (definition) => {
+    assert.equal(definition.id, preferences.id); return state;
+  });
+  const page: PluginSurfaceProps = props;
+  let root!: ReactTestRenderer;
+  await act(async () => { root = create(createElement(Component, page)); });
+  try {
+    const field = (label: string) => root.root.find((node) => ["SettingsSelect", "SettingsSwitch"].includes(String(node.type)) && node.props.label === label);
+    const action = (label: string) => root.root.find((node) => node.type === ("SettingsAction" as never) && node.props.actionLabel === label);
+    assert.equal(action("保存").props.disabled, true);
+    await act(async () => { field("打开时的视图").props.onValueChange("preview"); });
+    await act(async () => { field("编辑字号").props.onValueChange("large"); });
+    await act(async () => { field("显示 Markdown 工具栏").props.onValueChange(false); });
+    await act(async () => { action("保存").props.onPress(); });
+    assert.deepEqual(saves, [[{ defaultView: "preview", editorSize: "large", showToolbar: false }, "first"]]);
+    assert.equal(field("编辑字号").props.value, "large");
+    assert.equal(action("保存").props.disabled, false, "failure leaves the draft available to retry");
+    state.revision = "second";
+    state.values = { ...defaultPreferences, editorSize: "small" };
+    await act(async () => { root.update(createElement(Component, { ...page })); });
+    assert.equal(action("保存").props.disabled, true);
+    assert.equal(field("打开时的视图").props.value, "preview", "a newer host revision does not replace the draft");
+    await act(async () => { action("放弃").props.onPress(); });
+    assert.equal(field("编辑字号").props.value, "small");
+    await act(async () => { field("打开时的视图").props.onValueChange("preview"); });
+    await act(async () => { action("保存").props.onPress(); });
+    assert.deepEqual(saves[1], [{ defaultView: "preview", editorSize: "small", showToolbar: true }, "second"]);
+    assert.equal(action("保存").props.disabled, true);
+  } finally { await act(async () => { root.unmount(); }); }
 });

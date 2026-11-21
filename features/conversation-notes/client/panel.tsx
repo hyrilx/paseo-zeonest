@@ -3,11 +3,17 @@ import { Platform, Pressable, StyleSheet, Text, View, type TextInput as NativeTe
 import type { PluginButtonContentProps } from "@getpaseo/plugin/client";
 import { copyText, Icon, Markdown, Modal, ScrollView, TextInput } from "@getpaseo/plugin/client/ui";
 import { MAX_NOTE_LENGTH } from "../shared/contracts";
+import type { Preferences } from "../shared/settings";
 import { formatMarkdown, toggleTaskMarker, type Format, type Selection, type TaskMarker } from "./markdown";
 import type { SessionNote } from "./note";
 import { previewMarkdown, type PreviewPart } from "./preview";
 
 type Colors = PluginButtonContentProps["theme"]["colors"];
+const editorSizes = {
+  small: { fontSize: 12, lineHeight: 18 },
+  standard: { fontSize: 14, lineHeight: 20 },
+  large: { fontSize: 17, lineHeight: 24 },
+} satisfies Record<Preferences["editorSize"], { fontSize: number; lineHeight: number }>;
 const shortcuts: { format: Format; icon: string; label: string }[] = [
   { format: "bold", icon: "Bold", label: "加粗" },
   { format: "heading", icon: "Heading", label: "标题" },
@@ -27,7 +33,7 @@ const styles = StyleSheet.create({
   body: { borderWidth: 1, borderRadius: 7 },
   toolbar: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", paddingHorizontal: 3, borderBottomWidth: 1 },
   viewport: { flex: 1, minHeight: 0 },
-  editor: { paddingHorizontal: 9, paddingVertical: 7, fontSize: 14, lineHeight: 20, textAlignVertical: "top" },
+  editor: { paddingHorizontal: 9, paddingVertical: 7, textAlignVertical: "top" },
   preview: { paddingHorizontal: 9, paddingVertical: 7, gap: 4 },
   list: { gap: 2 },
   item: { flexDirection: "row", alignItems: "flex-start", gap: 4 },
@@ -58,10 +64,22 @@ function Preview({ parts, colors, toggle }: { parts: PreviewPart[]; colors: Colo
   });
 }
 
-export function NotesPanel({ note, theme, layout, close }: PluginButtonContentProps & { note: SessionNote }) {
+interface NotesPanelState {
+  note: SessionNote;
+  loadPreferences(): Promise<Preferences>;
+}
+
+export function NotesPanel({ note, loadPreferences, theme, layout, close }: PluginButtonContentProps & NotesPanelState) {
   const { status, markdown, conflict } = useSyncExternalStore(note.subscribe, note.get, note.get);
   const { colors } = theme;
-  const [mode, setMode] = useState<"edit" | "preview">("edit");
+  const [preferences, setPreferences] = useState<Preferences>();
+  const [selectedMode, setSelectedMode] = useState<Preferences["defaultView"]>();
+  const mode = selectedMode ?? preferences?.defaultView;
+  useEffect(() => {
+    let active = true;
+    void loadPreferences().then((value) => { if (active) setPreferences(value); });
+    return () => { active = false; };
+  }, [loadPreferences]);
   const [statusOpen, setStatusOpen] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState("");
   const [requested, setRequested] = useState<{ selection: Selection; focus: boolean }>();
@@ -83,10 +101,10 @@ export function NotesPanel({ note, theme, layout, close }: PluginButtonContentPr
     note.edit(next.markdown);
     setRequested({ selection: next.selection, focus: true });
   }
-  function selectMode(next: typeof mode) {
+  function selectMode(next: Preferences["defaultView"]) {
     if (mode === next) return;
     if (next === "edit" && selection.current) setRequested({ selection: selection.current, focus: false });
-    setMode(next);
+    setSelectedMode(next);
   }
 
   const iconButton = (label: string, icon: string, onPress: () => void, key?: string) =>
@@ -136,7 +154,7 @@ export function NotesPanel({ note, theme, layout, close }: PluginButtonContentPr
   return <View testID="zeonest-conversation-notes" style={[styles.panel, { width: layout.compact ? undefined : 386 }]}>
     <View style={styles.header}>
       {layout.compact ? null : <Text accessibilityRole="header" style={{ color: colors.foreground, fontSize: 14, fontWeight: "600" }}>会话笔记</Text>}
-      {!blocked && <View accessibilityRole="tablist" accessibilityLabel="笔记模式" style={[styles.row, { padding: 2, backgroundColor: colors.surface1, borderRadius: 6 }]}>
+      {!blocked && preferences && <View accessibilityRole="tablist" accessibilityLabel="笔记模式" style={[styles.row, { padding: 2, backgroundColor: colors.surface1, borderRadius: 6 }]}>
         {(["edit", "preview"] as const).map((item) => <Pressable key={item} accessibilityRole="tab" accessibilityState={{ selected: mode === item }}
           accessibilityLabel={item === "edit" ? "编辑" : "预览"} aria-selected={mode === item} onPress={() => selectMode(item)}
           style={[styles.button, { minHeight: layout.compact ? 30 : 24, backgroundColor: mode === item ? colors.surface2 : undefined }]}>
@@ -155,16 +173,17 @@ export function NotesPanel({ note, theme, layout, close }: PluginButtonContentPr
         {layout.compact ? null : iconButton("关闭笔记", "X", close)}
       </View>
     </View>
-    {!blocked && <View testID="conversation-notes-body" style={[styles.body, { borderColor: colors.border, height: layout.compact ? 279 : 303 }]}>
-      {mode === "edit" ? <>
-        <View accessibilityRole="toolbar" accessibilityLabel="Markdown 格式" style={[styles.toolbar, { borderBottomColor: colors.border }]}>
+    {status !== "load-error" && <View testID="conversation-notes-body" style={[styles.body, { borderColor: colors.border, height: layout.compact ? 279 : 303 }]}>
+      {blocked || !preferences ? <Text accessibilityLiveRegion="polite" style={[styles.hint, styles.preview, { color: colors.foregroundMuted }]}>正在打开笔记…</Text>
+      : mode === "edit" ? <>
+        {preferences.showToolbar && <View accessibilityRole="toolbar" accessibilityLabel="Markdown 格式" style={[styles.toolbar, { borderBottomColor: colors.border }]}>
           {shortcuts.map(({ format: kind, icon, label }) => iconButton(label, icon, () => format(kind), kind))}
-        </View>
+        </View>}
         <TextInput testID="conversation-notes-editor" ref={input} accessibilityLabel="笔记正文" multiline submitBehavior="newline"
           autoCapitalize="none" autoCorrect={false} spellCheck={false} value={markdown}
           selection={requested?.selection} onSelectionChange={({ nativeEvent }) => { selection.current = nativeEvent.selection; }}
           onChangeText={note.edit} placeholder="写 Markdown…" placeholderTextColor={colors.foregroundMuted}
-          style={[styles.viewport, styles.editor, { color: colors.foreground,
+          style={[styles.viewport, styles.editor, editorSizes[preferences.editorSize], { color: colors.foreground,
             fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }) }]} />
       </> : <ScrollView testID="conversation-notes-preview" nestedScrollEnabled
         style={styles.viewport} contentContainerStyle={styles.preview}>

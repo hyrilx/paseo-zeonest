@@ -7,8 +7,10 @@ import test, { type TestContext } from "node:test";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import contribute from "../server/index";
 import contributeRpc from "../server/rpc";
+import contributeSettings from "../server/settings";
 import { NoteStore } from "../server/store";
 import { notePresence, readNote, saveNote, type SaveInput } from "../shared/contracts";
+import { preferences } from "../shared/settings";
 
 const blank = { revision: null, markdown: "" };
 const guard = () => {};
@@ -72,6 +74,17 @@ test("failed writes leave the previous revision readable and a stopped queued wr
   await writeFile(path, "{broken JSON");
   await assert.rejects(store.save(input("a", "不覆盖损坏记录", first.note.revision), guard));
   await assert.rejects(store.read("a", guard));
+});
+
+test("host preferences register independently of note activation and have safe defaults", () => {
+  const registered: (typeof preferences)[] = [];
+  const cleanup = contributeSettings({ registerSettings: (value: typeof preferences) => registered.push(value) } as unknown as PluginServerContext);
+  assert.deepEqual(registered, [preferences]);
+  assert.equal(preferences.scope, "host");
+  assert.equal(preferences.version, 1);
+  assert.deepEqual(preferences.schema.parse({}), { defaultView: "edit", editorSize: "standard", showToolbar: true });
+  assert.equal(preferences.schema.safeParse({ defaultView: "remember" }).success, false);
+  cleanup();
 });
 
 test("all RPCs register synchronously and deny calls while inactive or after cleanup", async (t) => {
