@@ -13,6 +13,7 @@ import { discoverProjects, type ProjectTarget } from "./projects";
 import { launch } from "./process";
 import type { Invocation, OwnedProcess } from "./process";
 import { assertPackageBindings, buildArguments, preparation, requirement, toolchains, toolIssues, verifyTool } from "./toolchains";
+import type { ResolvedTauriCli } from "./tauri-cli";
 
 const HISTORY = 24;
 const LOG_CHARS = 96 * 1024;
@@ -29,7 +30,8 @@ type Entry = z.infer<typeof entrySchema>;
 export type Workspace = { id: string; root: string };
 type NativeProbe = { adapter: "gradle" | "xcode"; stamp: string; context: string; tool: string; filter?: string; options: string[]; gradleScope?: GradleScope };
 type Plan = { command: Command; fingerprint: string; steps: Invocation[]; outputs: string[]; hints: string[]; locks: string[]; configure?: { base: string; dir: string; stamp: string; tool: string };
-  nativeProbe?: NativeProbe; consume?: NativeResult["consume"]; cargoReport?: { source?: string; dir: string } };
+  nativeProbe?: NativeProbe; consume?: NativeResult["consume"]; cargoReport?: { source?: string; dir: string };
+  tauriCli?: { context: string; installed?: ResolvedTauriCli } };
 type Job = { workspace: Workspace; entry: Entry; plan: Plan; process?: OwnedProcess; flush?: ReturnType<typeof setTimeout>; stopTimer?: ReturnType<typeof setTimeout>; before?: ReturnType<typeof observe>; reported?: Set<string>; reportLimited?: boolean };
 
 function cargoMessages(job: Job) {
@@ -258,6 +260,10 @@ export class Workbench {
     for (const [name, path] of Object.entries(build.environment ?? {})) notes.push(`${name}=${path}`);
     for (const [name, path] of Object.entries(tool.bindings ?? {})) notes.push(`${name} → ${path}`);
     if (prep.notice) notes.push(prep.notice);
+    if (build.tauriCli) {
+      const { request, installed } = build.tauriCli;
+      notes.push(`Tauri CLI 由 ${request.owner === "." ? "安装根目录" : request.owner} 声明；${installed ? `已找到 ${installed.version}，准备依赖后再次核对` : "准备依赖后确认入口，不使用宿主或其他包的 CLI"}。`);
+    }
     if (hints.length) notes.push(`产物线索（未经构建工具确认）：${hints.join("、")}`);
     if (!outputs.length && !build.cargoReport && !t.operation) notes.push("未取得原生产物路径；可手填要观察的工作区路径。");
     const context = nativeContext(tool.signature, build.nativeOptions ?? []);
@@ -269,17 +275,21 @@ export class Workbench {
       if (t.gradle) notes.push("Gradle 任务名与分组不能保证行为；确认这是本地构建或检查，不会发布、签名或操作设备。");
     }
     if (build.taskFilter) notes.push(`仅收录匹配 ${build.taskFilter} 的任务`);
-    const command: Command = { cwd: t.cwd, source: t.source, argv: [tool.executable, ...args], tool: tool.candidate,
+    const executable = build.executable ?? tool.executable;
+    const command: Command = { cwd: t.cwd, source: t.source, argv: [executable, ...args], tool: tool.candidate,
       ...(prep.steps.length ? { preparation: prep.steps.map(({ cwd, invocation }) => ({ cwd, argv: [invocation.executable, ...invocation.args] })) } : {}), ...(notes.length ? { notes } : {}) };
     const locks = [...new Set([w.root, build.cargo?.targetDir, build.cargo?.buildDir, ...(build.sharedWrites ?? [])].filter((p): p is string => !!p))];
-    const fingerprint = digest(JSON.stringify([w.root, targetId(t), t.stamp, tool.signature, command, outputs, locks, build.cargo, build.planInputs, consume?.id]));
+    const tauriCli = build.tauriCli && { installed: build.tauriCli.installed,
+      context: digest(JSON.stringify([t.tauri?.declaration, build.tauriCli.request, tool.signature, cwd, executable, args.slice(1),
+        outputs, locks, build.cargo, build.environment, build.planInputs, command.preparation])) };
+    const fingerprint = digest(JSON.stringify([w.root, targetId(t), t.stamp, tool.signature, command, outputs, locks, build.cargo, build.planInputs, consume?.id, tauriCli]));
     const configure = build.configureDir && t.cmake ? { base: t.cmake.dir, dir: build.configureDir, stamp: t.cmake.stamp, tool: tool.signature } : undefined;
     const nativeProbe = t.operation && (t.adapter === "gradle" || t.adapter === "xcode") ? { adapter: t.adapter, stamp: t.stamp, context, tool: tool.signature,
       filter: build.taskFilter, options: build.nativeOptions ?? [], gradleScope: t.gradle ? this.#gradleScope(w, t) : undefined } : undefined;
-    const main = { executable: tool.executable, args, cwd, env: { ...tool.env, ...build.environment }, bindings: tool.bindings, projectExecutable: build.projectExecutable, reapAfterExit: !!t.gradle,
+    const main = { executable, args, cwd, env: { ...tool.env, ...build.environment }, bindings: tool.bindings, reapAfterExit: !!t.gradle,
       bindingDirectory: t.cmake ? join(this.data, "cmake-bin", digest(JSON.stringify(tool.bindings ?? {}))) : undefined };
     const cargoReport = build.cargoReport && build.cargo ? { source: t.cargo?.name ? resolveWithin(w.root, t.source) : undefined, dir: build.cargo.targetDir } : undefined;
-    return { command, fingerprint, steps: [...prep.steps.map(({ invocation }) => invocation), main], outputs, hints, configure, nativeProbe, consume, cargoReport, locks };
+    return { command, fingerprint, steps: [...prep.steps.map(({ invocation }) => invocation), main], outputs, hints, configure, nativeProbe, consume, cargoReport, locks, tauriCli };
   }
   preview(w: Workspace, c: Configuration) {
     const { command, fingerprint } = this.#plan(w, c);
@@ -371,8 +381,21 @@ export class Workbench {
   }
 
   #step(job: Job, steps: Invocation[], index: number) {
-    const invocation = steps[index]!;
+    let invocation = steps[index]!;
     const preparing = index < steps.length - 1;
+    const approvedCli = job.plan.tauriCli;
+    if (!preparing && approvedCli) {
+      const refreshed = this.#plan(job.workspace, job.entry.run.configuration);
+      if (refreshed.tauriCli?.context !== approvedCli.context) throw new Error("准备依赖期间 Tauri 项目或工具配置发生变化，请重新预览");
+      const installed = refreshed.tauriCli.installed;
+      if (!installed) throw new Error("依赖准备后仍无法核对所声明的 Tauri CLI；检查安装结果后重试，不改用其他 CLI");
+      if (approvedCli.installed && (approvedCli.installed.path !== installed.path || approvedCli.installed.stamp !== installed.stamp)) {
+        throw new Error("依赖准备后 Tauri CLI 与预览不同，请重新预览并确认");
+      }
+      invocation = refreshed.steps.at(-1)!;
+      job.entry.run.command = { ...refreshed.command, preparation: job.plan.command.preparation };
+      this.#checkpoint(job);
+    }
     const phase = preparing ? "准备依赖" : job.entry.run.configuration.target.name;
     const relativeCwd = preparing ? job.plan.command.preparation![index]!.cwd : job.plan.command.cwd;
     if (!this.#sameRoot(job.workspace.root) || resolveWithin(job.workspace.root, relativeCwd) !== invocation.cwd) {

@@ -12,6 +12,7 @@ import type { Bindings, Invocation, OwnedProcess } from "./process";
 import { cargoContext } from "./rust-projects";
 import { cmakeBuildDir } from "./cmake";
 import { object, tauriConfig, type ProjectTarget } from "./projects";
+import { resolveTauriCli, type TauriCliRequest } from "./tauri-cli";
 
 export type Tool = { candidate: Candidate; signature: string; executable: string; env: NodeJS.ProcessEnv; bindings?: Bindings; overrides?: string[]; tauriCargoCli?: string; gradlePersistent?: boolean };
 export type Checks = Map<string, string>;
@@ -210,12 +211,6 @@ export function toolchains(t: ProjectTarget, env: NodeJS.ProcessEnv, checked: Ch
 // npm/pnpm prepend local package bins after launch. Detect an override before
 // the selected script or CLI can resolve a different runtime than the preview.
 export function assertPackageBindings(invocation: Invocation) {
-  if (invocation.projectExecutable) {
-    const { root, path } = invocation.projectExecutable;
-    if (!executable(path) || !inside(root, realpathSync(path))) {
-      throw new Error("依赖准备后未找到所选项目的 Tauri CLI；检查安装布局后刷新，不使用宿主的同名命令");
-    }
-  }
   const bindings = invocation.bindings;
   if (!bindings?.node) return;
   for (let dir = invocation.cwd;; dir = dirname(dir)) {
@@ -253,25 +248,50 @@ function assertJsConfig(root: string, t: ProjectTarget, tool: Tool, phase: "inst
     if (name.startsWith("npm_config_")) check(name.slice(11), "宿主环境");
     if (manager === "pnpm" && name.startsWith("pnpm_")) check(name.slice(5), "宿主环境");
   }
-  const nodeHome = dirname(dirname(tool.executable));
-  const userHome = env.HOME ?? homedir();
-  const configFiles = new Set([config.get("npm_config_userconfig") ?? join(userHome, ".npmrc"),
-    config.get("npm_config_globalconfig") ?? join(nodeHome, "etc/npmrc"),
-    ...(manager === "pnpm" ? [join(env.XDG_CONFIG_HOME ?? join(userHome, ".config"), "pnpm/rc")] : []),
-    join(cwd, ".npmrc"), join(resolveWithin(root, t.install?.cwd ?? t.cwd), ".npmrc")]);
-  for (const file of configFiles) {
+  const userHome = env.HOME || homedir();
+  const scan = (file: string, npmUser = false) => {
     let text: string;
     try { text = readBounded(realpathSync(resolve(cwd, file)), 512 * 1024); }
-    catch (error) { if (missing(error)) continue; throw new Error(`无法验证包管理器配置：${file}`, { cause: error }); }
+    catch (error) { if (missing(error)) return; throw new Error(`无法验证包管理器配置：${file}`, { cause: error }); }
+    const locations = new Map<string, string>();
     for (const line of text.split(/\r?\n/u)) {
-      const name = /^\s*([\w-]+(?:\[\])?)\s*=/u.exec(line)?.[1];
-      if (name) check(name, file);
+      const entry = /^\s*([\w-]+(?:\[\])?)\s*=\s*(.*?)\s*$/u.exec(line);
+      const name = entry?.[1];
+      const value = entry?.[2];
+      if (name === undefined || value === undefined) continue;
+      if (npmUser && name === "prefix") locations.set(name, value);
+      else check(name, file);
+      if (name === "globalconfig" || name === "userconfig") locations.set(name, value);
     }
-  }
+    return locations;
+  };
+  const projectFile = join(resolveWithin(root, t.install?.cwd ?? t.cwd), ".npmrc");
+  const project = scan(projectFile);
+  if (join(cwd, ".npmrc") !== projectFile) scan(join(cwd, ".npmrc"));
   if (manager === "pnpm") {
+    scan(config.get("npm_config_userconfig") ?? join(userHome, ".npmrc"));
+    scan(config.get("npm_config_globalconfig") ?? join(dirname(dirname(tool.executable)), "etc/npmrc"));
+    scan(join(env.XDG_CONFIG_HOME ?? join(userHome, ".config"), "pnpm/rc"));
     const text = readText(root, at(t.install?.cwd ?? t.cwd, "pnpm-workspace.yaml"));
     if (text !== undefined) for (const name of Object.keys(object(yaml(text, { maxAliasCount: 0 })))) check(name, "pnpm-workspace.yaml");
+    return;
   }
+  // npm reads its local project before the user's config. A user prefix only
+  // controls global installs and the location of the global npmrc in local mode.
+  const expand = (value: string) => {
+    let expanded = value.replace(/\s+[;#].*$/u, "").replace(/^(?:"(.*)"|'(.*)')$/u, "$1$2")
+      .replace(/\$\{([\w]+)\}/gu, (_, name: string) => env[name] ?? "${" + name + "}");
+    if (expanded.startsWith("~/")) expanded = join(userHome, expanded.slice(2));
+    if (!expanded || /[\\$'"\x00-\x1f]/u.test(expanded)) throw new Error("无法确认 npm 用户前缀或全局配置路径");
+    return resolve(cwd, expanded);
+  };
+  const userPath = config.get("npm_config_userconfig") || project?.get("userconfig");
+  const user = scan(userPath ? expand(userPath) : join(userHome, ".npmrc"), true);
+  const nodeHome = dirname(dirname(tool.bindings?.node || tool.candidate.paths[0] || tool.executable));
+  const prefix = user?.get("prefix");
+  const global = config.get("npm_config_globalconfig") || project?.get("globalconfig") || user?.get("globalconfig");
+  const defaultPrefix = env.PREFIX || (env.DESTDIR ? join(env.DESTDIR, nodeHome) : nodeHome);
+  scan(global ? expand(global) : join(prefix === undefined ? defaultPrefix : expand(prefix), "etc/npmrc"));
 }
 
 function jsTools(t: ProjectTarget, env: NodeJS.ProcessEnv, name: "npm" | "pnpm") {
@@ -350,12 +370,14 @@ export function buildArguments(root: string, t: ProjectTarget, opts: Configurati
       if (text !== undefined) tauriConfig(path, text);
       return [path, text === undefined ? null : digest(text)];
     });
-    const bins = t.tauri.manager ? [...new Set([t.cwd, t.install?.cwd ?? t.cwd])].map((dir) => resolve(root, dir, "node_modules/.bin/tauri")) : [];
-    const projectCli = bins.find((path) => executable(path)) ?? (t.tauri.manager === "npm" ? bins.at(-1) : bins[0]);
-    const invoke = t.tauri.manager === "npm" ? ["exec", "--no", "--", projectCli!] : t.tauri.manager === "pnpm" ? ["exec", projectCli!] : ["tauri"];
+    const tauriCli: TauriCliRequest | undefined = t.tauri.manager && t.tauri.cli ? { root, install: t.install?.cwd ?? t.cwd, manager: t.tauri.manager, ...t.tauri.cli } : undefined;
+    const installedCli = tauriCli && resolveTauriCli(tauriCli);
+    const node = tauriCli ? tool.bindings?.node : undefined;
+    if (tauriCli && !node) throw new Error("缺少 Tauri CLI 使用的所选 Node");
+    const invoke = tauriCli ? [installedCli?.path ?? "<依赖准备后确认项目 Tauri CLI>"] : ["tauri"];
     return { args: [...invoke, "build", ...(selected.debug ? ["--debug"] : []), "--no-bundle", ...selected.args], outputs: t.outputs,
-      cargo: rustContext(root, t.project, t.tauri.workspace, tool), environment: bindings, planInputs: inputs,
-      projectExecutable: projectCli ? { root, path: projectCli } : undefined };
+      executable: node, tauriCli: tauriCli && { request: tauriCli, installed: installedCli },
+      cargo: rustContext(root, t.project, t.tauri.workspace, tool), environment: bindings, planInputs: inputs };
   }
   if (t.cargo) {
     cargoOptions(root, t.cwd, opts);

@@ -5,7 +5,7 @@ import { delimiter, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 export type Bindings = Record<string, string>;
-export type Invocation = { executable: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; bindings?: Bindings; bindingDirectory?: string; projectExecutable?: { root: string; path: string }; reapAfterExit?: boolean };
+export type Invocation = { executable: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; bindings?: Bindings; bindingDirectory?: string; reapAfterExit?: boolean };
 type Output = (stream: "stdout" | "stderr", text: string) => void;
 type Exit = { code: number | null; signal: string | null; error?: string; stopped: boolean };
 export type OwnedProcess = { done: Promise<Exit>; stop(): void };

@@ -18,7 +18,7 @@ export type ProjectTarget = Target & {
   requirements: JsRequirements & { install?: JsRequirements; rust?: string; rustChannel?: string; rustPath?: string; rustIssue?: string; miseCmake?: string; miseJava?: string };
   cargo?: { name?: string; workspace: string };
   cmake?: { dir: string; stamp: string; preset?: string; target?: string; configurations?: Record<string, string[]>; writePaths?: Record<string, string[]>; defaultConfig?: string; tool?: string };
-  tauri?: { cli?: true; workspace: string; frontend: string; manager?: "npm" | "pnpm" };
+  tauri?: { cli?: { owner: string; spec: string }; workspace: string; frontend: string; manager?: "npm" | "pnpm"; declaration: string };
   install?: { cwd: string; lock?: string; workspace?: boolean; required: { from: string; name: string; version: string }[] };
   gradle?: Gradle;
   xcode?: Xcode;
@@ -95,8 +95,9 @@ function packageTools(root: string, project: string, installRoot: string, data: 
   const required = (project === installRoot ? [[project, data]] as const : [[installRoot, parent], [project, data]] as const)
     .flatMap(([from, pkg]) => Object.entries({ ...object(pkg.dependencies), ...object(pkg.devDependencies), ...object(pkg.optionalDependencies), ...object(pkg.peerDependencies) }).flatMap(([name, version]) =>
       /^(?:@[\w.-]+\/)?[\w-][\w.-]*$/u.test(name) && typeof version === "string" ? [{ from, name, version }] : [])).slice(0, 256);
+  const declaration = [declared, pnpm, installConfig, memberConfig, nodePin, pin(manager)];
   return { manager, install: { cwd: installRoot, lock: (manager === "pnpm" ? pnpmLock : npmLock)?.name, workspace: !!owner, required },
-    stamp: [declared, pnpm, pnpmLock, npmLock, installConfig, memberConfig, nodePin, pin(manager)],
+    declaration, stamp: [declaration, pnpmLock, npmLock],
     requirements: { node: version(object(data.engines).node) ?? version(object(parent.engines).node), miseNode: nodePin,
       managerEngine: version(object(data.engines)[manager]) ?? version(object(parent.engines)[manager]),
       manager: declared?.split("@")[1]?.split("+sha")[0], miseManager: pin(manager),
@@ -371,7 +372,8 @@ function discoverTauri(root: string, dirs: string[], jsRoots: Map<string, JsOwne
       if (formats !== 1) throw new Error("同一 Tauri Rust 目录存在多个基础配置，无法确认绑定");
       const nearby = dirs.filter((dir) => dir !== project && (project === "." || dir.startsWith(project + "/")) && read(at(dir, "package.json")) !== undefined);
       const parentPackage = read(at(project, "package.json"));
-      const frontend = parentPackage !== undefined || !nearby.length ? project : nearby.length === 1 && nearby[0] === native ? native : undefined;
+      const colocated = native !== project && read(at(native, "package.json")) !== undefined;
+      const frontend = colocated ? native : parentPackage !== undefined || !nearby.length ? project : undefined;
       if (!frontend) throw new Error("Tauri 前端目录存在多个或非同目录候选，无法确认 CLI 绑定");
       const pkgText = frontend === project ? parentPackage : read(at(frontend, "package.json"));
       const pkg = pkgText === undefined ? {} : json(pkgText);
@@ -382,11 +384,12 @@ function discoverTauri(root: string, dirs: string[], jsRoots: Map<string, JsOwne
       const installRoot = owner && "cwd" in owner ? owner.cwd : frontend;
       const parentText = frontend === installRoot ? pkgText : read(at(installRoot, "package.json"));
       const parent = parentText === undefined ? {} : json(parentText);
-      const dependency = (data: Record<string, unknown>) => object(data.devDependencies)["@tauri-apps/cli"] ?? object(data.dependencies)["@tauri-apps/cli"];
-      const declaredCli = pkgText !== undefined && !!(dependency(pkg) || dependency(parent));
-      const js = declaredCli ? packageTools(root, frontend, installRoot, pkg, parent, read, owner) : undefined;
-      if (declaredCli && !js) throw new Error("无法确认所声明的 Tauri JS CLI 使用 npm 或 pnpm");
-      const cli = js ? true : undefined;
+      const localCli = tauriCliSpec(pkg);
+      const inheritedCli = localCli === undefined ? tauriCliSpec(parent) : undefined;
+      const cli = localCli !== undefined ? { owner: frontend, spec: localCli } :
+        inheritedCli !== undefined ? { owner: installRoot, spec: inheritedCli } : undefined;
+      const js = cli ? packageTools(root, frontend, installRoot, pkg, parent, read, owner) : undefined;
+      if (cli && !js) throw new Error("无法确认所声明的 Tauri JS CLI 使用 npm 或 pnpm");
       const ownership = cargoWorkspaces.get(native);
       if (!ownership || "issue" in ownership) throw new Error(ownership?.issue ?? "无法确认 Tauri 应用的 Cargo 工作区归属");
       const workspace = ownership.cwd;
@@ -395,11 +398,22 @@ function discoverTauri(root: string, dirs: string[], jsRoots: Map<string, JsOwne
       const pin = rustPin(root, native);
       const rust = { rust: table(cargo["rust-version"]).workspace === true ? str(table(ws.package)["rust-version"]) : str(cargo["rust-version"]), ...pin };
       const outputs = frontendOutput ? [frontendOutput] : [];
+      const declaration = digest(JSON.stringify([conf, manifest, wsText, frontend, pkgText, parentText, js?.declaration, pin]));
       targets.push({ adapter: "tauri", project: native, source, cwd: frontend, name: "build (Debug, no bundle)",
-        stamp: digest(JSON.stringify([conf, manifest, wsText, frontend, pkgText, parentText, js?.stamp, pin])),
-        tauri: { cli, manager: js?.manager, workspace, frontend }, install: js?.install, requirements: { ...js?.requirements, ...rust }, outputs });
+        stamp: digest(JSON.stringify([declaration, js?.stamp])),
+        tauri: { cli, manager: js?.manager, workspace, frontend, declaration }, install: js?.install, requirements: { ...js?.requirements, ...rust }, outputs });
     } catch (error) { notices.push(`${source}：${(error as Error).message}`); }
   }
+}
+
+export const TAURI_CLI_PACKAGE = "@tauri-apps/cli";
+export function tauriCliSpec(pkg: Record<string, unknown>) {
+  const specs = [...new Set([pkg.dependencies, pkg.devDependencies, pkg.optionalDependencies]
+    .map((group) => object(group)[TAURI_CLI_PACKAGE]).filter((spec) => spec !== undefined))];
+  if (!specs.length) return;
+  const [spec] = specs;
+  if (specs.length !== 1 || typeof spec !== "string" || !spec || spec.length > 4096) throw new Error("Tauri CLI 依赖声明冲突或无效");
+  return spec;
 }
 
 export function tauriConfig(file: string, text: string) {

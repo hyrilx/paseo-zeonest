@@ -135,10 +135,48 @@ test("npm/pnpm refuse out-of-scope installation roots and scope-changing switche
     t.after(() => envOnly.close());
     rmSync(join(workspace.root, ".npmrc"));
     if (manager === "npm") assert.throws(() => envOnly.preview(workspace, selected), /宿主环境.*workspace/u);
+    else {
+      put(".npmrc", "prefix=~/global\n");
+      assert.throws(() => w.preview(workspace, selected), /\.npmrc.*prefix.*pnpm/u);
+      rmSync(join(root, ".npmrc"));
+    }
   }
   put("npm-mono/standalone/package.json", { name: "standalone", scripts });
   const standalone = { id: "standalone", root: join(root, "npm-mono/standalone") };
   assert.equal(w.discover(standalone).targets.find(({ name }) => name === "build")?.project, ".");
+});
+
+test("npm permits a user global-install prefix without accepting scope overrides", { skip: process.platform === "win32" }, async (t) => {
+  const { root, put } = fixture(t);
+  const workspace = { id: "npm", root: join(root, "mono") };
+  put("mono/package.json", { name: "parent", workspaces: ["desktop"] });
+  put("mono/desktop/package.json", { name: "desktop", scripts: { build: "fixture" } });
+  put("home/.npmrc", 'prefix="${HOME}/global install"\n');
+  const npm = put("bin/npm", `
+if (process.argv.includes('--versions')) console.log(JSON.stringify({node:process.versions.node,npm:'11.20.0'}));
+else require('node:fs').writeFileSync(process.argv.includes('install') ? 'installed' : 'built', process.cwd());`, true);
+  const service = (extra = {}) => new Workbench(join(root, "state"), { HOME: join(root, "home"), PATH: [join(root, "bin"), dirname(process.execPath)].join(delimiter), ...extra });
+  const w = service();
+  t.after(() => w.close());
+  const target = { adapter: "npm", project: "desktop", name: "build" } as const;
+  const selected = config(w, workspace, target, w.tools(workspace, target).candidates.find(({ paths }) => paths[1] === npm)?.id);
+  await w.verify(workspace, selected);
+  assert.equal((await finish(w, workspace, submit(w, workspace, selected).id)).run.status, "success");
+  assert.equal(readFileSync(join(workspace.root, "installed"), "utf8"), workspace.root);
+  assert.equal(readFileSync(join(workspace.root, "desktop/built"), "utf8"), join(workspace.root, "desktop"));
+  put("home/global install/etc/npmrc", "workspace=wrong\n");
+  assert.throws(() => w.preview(workspace, selected), /global install\/etc\/npmrc.*workspace/u);
+  rmSync(join(root, "home/global install/etc/npmrc"));
+  put("home/alternate.rc", "workspace=wrong\n");
+  put("mono/.npmrc", "userconfig=${HOME}/alternate.rc\n");
+  assert.throws(() => w.preview(workspace, selected), /alternate\.rc.*workspace/u);
+  rmSync(join(workspace.root, ".npmrc"));
+  put("home/.npmrc", "prefix=~/global install\nglobal=true\n");
+  assert.throws(() => w.preview(workspace, selected), /\.npmrc.*global/u);
+  put("home/.npmrc", "prefix=~/global install\n");
+  const redirected = service({ NPM_CONFIG_PREFIX: join(root, "other") });
+  t.after(() => redirected.close());
+  assert.throws(() => redirected.preview(workspace, selected), /宿主环境.*prefix/u);
 });
 
 test("mise TOML versions constrain both Node and the manager; unsupported declarations are diagnosed", { skip: process.platform === "win32" }, async (t) => {
@@ -181,7 +219,23 @@ test("Tauri accepts a unique same-directory front end without a parent package",
   assert.equal(match?.tauri?.frontend, "desktop/native");
   assert.equal(match?.install?.cwd, "desktop/native");
   put("desktop/side/package.json", { name: "side" });
+  assert.equal(discoverProjects(root).targets.find(({ adapter }) => adapter === "tauri")?.cwd, "desktop/native");
+  rmSync(join(root, "desktop/native/package.json"));
   assert.ok(!discoverProjects(root).targets.some(({ adapter }) => adapter === "tauri"));
+});
+
+test("Tauri binds a colocated application package even when a parent is a package", (t) => {
+  const { root, put } = fixture(t);
+  put("package.json", { name: "parent", workspaces: ["desktop"], devDependencies: { "@tauri-apps/cli": "^1" } });
+  put("desktop/package.json", { name: "desktop", devDependencies: { "@tauri-apps/cli": "^2" } });
+  put("desktop/Cargo.toml", '[package]\nname="desktop"\n');
+  put("desktop/tauri.conf.json", { build: { beforeBuildCommand: "npm run build" } });
+  const target = discoverProjects(root).targets.find(({ adapter }) => adapter === "tauri");
+  assert.equal(target?.project, "desktop");
+  assert.equal(target?.cwd, "desktop");
+  assert.deepEqual(target?.tauri?.cli, { owner: "desktop", spec: "^2" });
+  assert.equal(target?.tauri?.frontend, "desktop");
+  assert.equal(target?.install?.cwd, ".");
 });
 
 test("Cargo rejects external owners and nonmembers, but allows explicitly excluded and independent roots", (t) => {
@@ -277,6 +331,81 @@ else {
   assert.equal(context?.buildDir, join(root, "temp-objects"));
 });
 
+for (const manager of ["npm", "pnpm"] as const) {
+  test(`Tauri ${manager} resolves a member CLI after cold preparation and requires confirmation if an installed entry changes`, { skip: process.platform === "win32" }, async (t) => {
+    const { root, put } = fixture(t);
+    const ws = { id: manager, root: join(root, "workspace") };
+    const parent = (range: string) => put("workspace/package.json", { name: "parent", ...(manager === "npm" ? { workspaces: ["desktop"] } : {}), devDependencies: { "@tauri-apps/cli": range } });
+    parent("^1");
+    put("workspace/desktop/package.json", { name: "desktop", dependencies: { "@tauri-apps/cli": "^2" } });
+    if (manager === "pnpm") put("workspace/pnpm-workspace.yaml", "packages: ['desktop']\n");
+    put("workspace/desktop/src-tauri/Cargo.toml", '[package]\nname="desktop"\n');
+    put("workspace/desktop/src-tauri/tauri.conf.json", {});
+    const oldPackage = "node_modules/@tauri-apps/cli";
+    put(`workspace/${oldPackage}/package.json`, { name: "@tauri-apps/cli", version: "1.0.0", bin: { tauri: "run.js" } });
+    put(`workspace/${oldPackage}/run.js`, "process.exit(51)");
+    put("bin/tauri", "process.exit(52)", true);
+    const nextPackage = manager === "npm" ? `desktop/${oldPackage}` : "node_modules/.pnpm/@tauri-apps+cli@2.1.0/node_modules/@tauri-apps/cli";
+    const executable = put(`bin/${manager}`, `
+const fs = require('node:fs');
+if (process.argv.includes('--versions')) console.log(JSON.stringify({node:process.versions.node,npm:'11.20.0'}));
+else if (process.argv.includes('--version')) console.log('12.21.0');
+else if (process.argv.includes('install')) {
+  const directory = ${JSON.stringify(nextPackage)};
+  if (!fs.existsSync('skip-cli')) {
+    fs.mkdirSync(directory,{recursive:true});
+    fs.writeFileSync(directory+'/package.json',JSON.stringify({name:'@tauri-apps/cli',version:'2.1.0',bin:{tauri:'cli.js'}}));
+    fs.writeFileSync(directory+'/cli.js',"require('node:fs').writeFileSync('ran',process.env.TAURI_FRONTEND_PATH)" + (fs.existsSync('change-entry') ? ';process.exit(0)' : ''));
+    if (${JSON.stringify(manager)} === 'pnpm' && !fs.existsSync('desktop/node_modules/@tauri-apps/cli')) {
+      fs.mkdirSync('desktop/node_modules/@tauri-apps',{recursive:true});
+      fs.symlinkSync(require('node:path').resolve(directory),'desktop/node_modules/@tauri-apps/cli');
+    }
+  }
+} else process.exit(53);`, true);
+    const cargo = put("rust/toolchains/fixture/bin/cargo", "console.log('cargo 1.96.0')", true);
+    put("rust/toolchains/fixture/bin/rustc", "console.log('rustc 1.96.0')", true);
+    const w = new Workbench(join(root, "state"), { HOME: root, RUSTUP_HOME: join(root, "rust"), PATH: [join(root, "bin"), dirname(process.execPath)].join(delimiter) });
+    t.after(() => w.close());
+    const target = w.discover(ws).targets.find(({ adapter }) => adapter === "tauri")!;
+    const c = config(w, ws, target, w.tools(ws, target).candidates.find(({ paths }) => paths.includes(executable) && paths.includes(cargo))?.id);
+    await w.verify(ws, c);
+    const cold = w.preview(ws, c).command;
+    assert.match(cold.argv[1]!, /依赖准备后确认/u);
+    const first = await finish(w, ws, submit(w, ws, c).id);
+    assert.equal(first.run.status, "success", first.run.result);
+    assert.equal(first.run.command?.argv[1], join(ws.root, nextPackage, "cli.js"));
+    assert.deepEqual(first.run.command?.preparation, cold.preparation);
+    assert.equal(readFileSync(join(ws.root, "desktop/ran"), "utf8"), join(ws.root, "desktop"));
+    assert.deepEqual(w.preview(ws, c).command.argv, first.run.command?.argv);
+
+    rmSync(join(ws.root, "desktop/ran"));
+    put("workspace/change-entry", "");
+    const changed = await finish(w, ws, submit(w, ws, c).id);
+    assert.equal(changed.run.status, "failed");
+    assert.match(changed.run.result ?? "", /与预览不同.*重新预览/u);
+    assert.throws(() => readFileSync(join(ws.root, "desktop/ran")), { code: "ENOENT" });
+    const next = w.retry(ws, changed.run.id);
+    assert.equal(next.kind, "changed");
+    if (next.kind !== "changed") assert.fail("retry must request confirmation");
+    const retry = w.retry(ws, changed.run.id, next.fingerprint);
+    if (retry.kind !== "started") assert.fail("retry must accept the new preview");
+    assert.equal((await finish(w, ws, retry.run.id)).run.status, "success");
+
+    // npm can hoist a compatible member dependency; no .bin link is needed at either scope.
+    if (manager === "npm") {
+      rmSync(join(ws.root, nextPackage), { recursive: true });
+      parent("^2");
+      put(`workspace/${oldPackage}/package.json`, { name: "@tauri-apps/cli", version: "2.1.0", bin: "run.js" });
+      const hoisted = put(`workspace/${oldPackage}/run.js`, "console.log('hoisted-cli')");
+      put("workspace/skip-cli", "");
+      assert.equal(w.preview(ws, c).command.argv[1], hoisted);
+      const detail = await finish(w, ws, submit(w, ws, c).id);
+      assert.equal(detail.run.status, "success");
+      assert.ok(detail.rows.some(({ text }) => text.includes("hoisted-cli")));
+    }
+  });
+}
+
 test("Tauri binds sibling apps and app directories; selected child Node/Cargo leave unrelated commands alone", { skip: process.platform === "win32" }, async (t) => {
   const { root, put } = fixture(t);
   const workspace = { id: "ui", root: join(root, "ui") };
@@ -288,15 +417,18 @@ test("Tauri binds sibling apps and app directories; selected child Node/Cargo le
   const tauri = discoverProjects(workspace.root).targets.filter(({ adapter }) => adapter === "tauri");
   assert.deepEqual(tauri.map(({ project, cwd }) => [project, cwd]).sort(), [["secondary", "."], ["src-tauri", "."]]);
   put("ui/overlay.json", { build: { features: ["desktop"] } });
-  const cli = put("ui/node_modules/.bin/tauri", "process.exit(0)", true);
+  put("ui/node_modules/@tauri-apps/cli/package.json", { name: "@tauri-apps/cli", version: "2.0.0", bin: { tauri: "run.js" } });
+  const cli = put("ui/node_modules/@tauri-apps/cli/run.js", `
+const fs = require('node:fs'), cp = require('node:child_process');
+const call = (cmd, args) => cp.execFileSync(cmd, args, {encoding:'utf8'}).trim();
+fs.writeFileSync('resolved', JSON.stringify([process.execPath, call('cargo',['--version']), call('cc',[]), call('protoc',[]), process.env.TAURI_APP_PATH, process.env.TAURI_FRONTEND_PATH, ...process.argv.slice(1)]));`);
+  put("ui/node_modules/.bin/tauri", "process.exit(81)", true);
   symlinkSync("secondary", join(workspace.root, "alias"));
   put("host/cc", "console.log('host-compiler')", true);
   put("host/cargo", "console.log('cargo 1.70.0')", true);
   put("host/npm", `
-const fs = require('node:fs'), cp = require('node:child_process');
-const call = (cmd, args) => cp.execFileSync(cmd, args, {encoding:'utf8'}).trim();
-if (process.argv.includes('--versions')) console.log(JSON.stringify({node:call('node',['-p','process.versions.node']), npm:'11.20.0'}));
-else if (process.argv.includes('build')) fs.writeFileSync('resolved', JSON.stringify([call('node',['-p','process.execPath']), call('cargo',['--version']), call('cc',[]), call('protoc',[]), process.env.TAURI_APP_PATH, process.env.TAURI_FRONTEND_PATH, ...process.argv.slice(2)]));`, true);
+if (process.argv.includes('--versions')) console.log(JSON.stringify({node:process.versions.node,npm:'11.20.0'}));
+else if (!process.argv.includes('install')) process.exit(82);`, true);
   put("rust/toolchains/selected/bin/cargo", "console.log('cargo 1.96.0')", true);
   put("rust/toolchains/selected/bin/rustc", "console.log('rustc 1.96.0')", true);
   put("rust/toolchains/selected/bin/cc", "console.log('wrong-rust-compiler')", true);
@@ -318,7 +450,8 @@ else if (process.argv.includes('build')) fs.writeFileSync('resolved', JSON.strin
   const values = JSON.parse(readFileSync(join(workspace.root, "resolved"), "utf8")) as string[];
   assert.equal(realpathSync(values[0]!), realpathSync(selected.paths[0]!));
   assert.deepEqual(values.slice(1, 6), ["cargo 1.96.0", "host-compiler", "protoc from mise", join(workspace.root, "secondary"), workspace.root]);
-  assert.deepEqual(values.slice(6), ["exec", "--no", "--", cli, "build", "--debug", "--no-bundle", "--config", "overlay.json"]);
+  assert.deepEqual(values.slice(6), [cli, "build", "--debug", "--no-bundle", "--config", "overlay.json"]);
+  assert.deepEqual(result.run.command?.preparation, preview.command.preparation);
   put("ui/overlay.json", { build: { features: ["different"] } });
   assert.notEqual(w.preview(workspace, c).fingerprint, preview.fingerprint);
   for (const overrides of [{ TAURI_APP_PATH: "src-tauri" }, { TAURI_APP_PATH: "alias" }, { TAURI_FRONTEND_PATH: "../other" }, { TAURI_CONFIG: "{}" }]) {
@@ -334,8 +467,8 @@ else if (process.argv.includes('build')) fs.writeFileSync('resolved', JSON.strin
   put("ui/overlay.json", {});
   rmSync(cli);
   const noCli = await finish(w, workspace, submit(w, workspace, c).id);
-  assert.match(noCli.run.result ?? "", /未找到所选项目的 Tauri CLI/u);
-  put("ui/node_modules/.bin/tauri", "process.exit(0)", true);
+  assert.match(noCli.run.result ?? "", /仍无法核对所声明的 Tauri CLI/u);
+  put("ui/node_modules/@tauri-apps/cli/run.js", "process.exit(0)");
   put("ui/node_modules/.bin/cargo", "process.exit(18)", true);
   const blocked = await finish(w, workspace, submit(w, workspace, c).id);
   assert.equal(blocked.run.status, "failed");
