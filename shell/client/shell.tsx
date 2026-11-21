@@ -1,13 +1,15 @@
-import type { PluginClientContext, PluginClientContribution, PluginSettingsScreenContribution, PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { SettingsAction, SettingsCard } from "@getpaseo/plugin/client/ui";
+import { useSettings, type PluginClientContext, type PluginClientContribution, type PluginSettingsScreenContribution, type PluginSurfaceProps } from "@getpaseo/plugin/client";
+import { Icon } from "@getpaseo/plugin/client/ui";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { View } from "react-native";
+import { Pressable, Text, View } from "react-native";
 import { createLifetime, errorMessage } from "../shared/lifetime";
 import { runtimeRpc } from "../shared/runtime";
 import { reloadRpc } from "../shared/reload";
+import { shellSettings } from "../shared/settings";
 import type { FeatureMetadata } from "../shared/catalog";
 import { FeatureManager, type ReloadState } from "./feature-manager";
 import { createRuntimeStore } from "./runtime-store";
+import { useSettingsViewport } from "./settings-viewport";
 
 export function contributeShell(
   client: PluginClientContext,
@@ -19,9 +21,13 @@ export function contributeShell(
   const store = createRuntimeStore();
 
   function Settings(props: PluginSurfaceProps) {
+    // Keep the saved switches (and any in-flight save) while visiting child settings.
+    const settings = useSettings(shellSettings);
     const runtime = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
     const [reloadState, setReloadState] = useState<ReloadState>({ status: "idle", message: null });
     const [settingsId, setSettingsId] = useState<string | null>(null);
+    const [query, setQuery] = useState("");
+    const viewport = useSettingsViewport(props.layout.platform, settingsId);
     const reloading = useRef(false);
     const mounted = useRef(false);
     useEffect(() => {
@@ -48,18 +54,27 @@ export function contributeShell(
     const screen = Object.values(featureSettingsScreens).find((screen) => screen.id === settingsId);
     if (screen) {
       const Component = screen.Component;
-      return (
-        <View style={{ gap: props.layout.compact ? 16 : 24, backgroundColor: props.theme.colors.surface0 }}>
-          <SettingsCard>
-            <SettingsAction label={screen.title} actionLabel="返回功能集" onPress={() => setSettingsId(null)} />
-          </SettingsCard>
+      const colors = props.theme.colors;
+      return viewport.render(
+        <View style={{ gap: 12, backgroundColor: colors.surface0 }}>
+          <View style={{ alignItems: "flex-start", gap: 4 }}>
+            <Pressable accessibilityRole="button" accessibilityLabel="返回功能集" onPress={() => setSettingsId(null)} style={({ pressed }) => ({
+              flexDirection: "row", alignItems: "center", gap: 6, minHeight: 44, paddingRight: 8,
+              borderRadius: 6, backgroundColor: pressed ? colors.surface2 : "transparent",
+            })}>
+              <Icon name="ArrowLeft" size={16} color={colors.foregroundMuted} />
+              <Text style={{ color: colors.foreground, fontSize: 14 }}>返回功能集</Text>
+            </Pressable>
+            <Text accessibilityRole="header" style={{ color: colors.foreground, fontSize: 20, fontWeight: "600" }}>{screen.title}</Text>
+          </View>
           <Component key={screen.id} {...props} />
-        </View>
+        </View>,
       );
     }
-    return <FeatureManager {...props} runtime={runtime} featureCatalog={featureCatalog} featureSettingsScreens={featureSettingsScreens}
+    return viewport.render(<FeatureManager {...props} settings={settings} runtime={runtime} featureCatalog={featureCatalog} featureSettingsScreens={featureSettingsScreens}
       reloadState={reloadState} reloadPlugin={() => { void reloadPlugin(); }}
-      openSettings={setSettingsId} />;
+      width={viewport.width} query={query} setQuery={setQuery}
+      openSettings={(id) => { viewport.rememberListOffset(); setSettingsId(id); }} />);
   }
 
   lifetime.add(client.addSettingsScreen({
