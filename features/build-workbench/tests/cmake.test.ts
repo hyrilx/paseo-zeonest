@@ -23,7 +23,7 @@ test("CMake targets require a fresh explicit File API result and stay in their b
   assert.deepEqual(discovery().map((t) => t.name), ["configure"]);
   prepareCmake(root, configure.dir);
   const reply = `${configure.dir}/.cmake/api/v1/reply`;
-  put(`${configure.dir}/CMakeCache.txt`, `CMAKE_HOME_DIRECTORY:INTERNAL=${root}\n`);
+  put(`${configure.dir}/CMakeCache.txt`, `CMAKE_HOME_DIRECTORY:INTERNAL=${root}\nfmt_DIR:PATH=fmt_DIR-NOTFOUND\nOptionalThing_DIR:PATH=OptionalThing_DIR-NOTFOUND\n`);
   put(`${reply}/index-0000.json`, { reply: { "codemodel-v2": { jsonFile: "codemodel.json" } } });
   put(`${reply}/codemodel.json`, { configurations: [{ name: "Debug", targets: [
     { name: "example", jsonFile: "example.json" }, { name: "-bad", jsonFile: "example.json" },
@@ -36,6 +36,7 @@ test("CMake targets require a fresh explicit File API result and stay in their b
   const [, example] = discovery();
   assert.deepEqual(discovery().map((t) => t.name), ["configure", "example"]);
   assert.equal(example?.cmake?.tool, "chosen-tool");
+  assert.equal(example?.blocked, undefined);
   assert.deepEqual(example?.outputs, [`${configure.dir}/apps/example`]);
   put("apps/CMakeLists.txt", "add_executable(player player.cpp)");
   assert.deepEqual(discovery().map((t) => t.name), ["configure"]);

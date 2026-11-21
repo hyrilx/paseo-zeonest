@@ -12,7 +12,8 @@ export const config = z.object({
   target: targetKey, tool: toolId, options: z.array(token).max(16), artifacts: z.array(path).max(8),
 });
 export const saved = config.extend({ name: z.string().trim().min(1).max(64) });
-export const command = z.object({ cwd: path, argv: z.array(z.string()), tool: candidate, source: path });
+const commandStep = z.object({ cwd: path, argv: z.array(z.string()) });
+export const command = commandStep.extend({ tool: candidate, source: path, preparation: z.array(commandStep).max(4).optional() });
 export const status = z.enum(["queued", "running", "stopping", "success", "failed", "stopped", "interrupted"]);
 export const run = z.object({
   id: z.uuid(), sequence: z.number().int(), status, configuration: config, command, fingerprint: z.string(),

@@ -13,7 +13,7 @@ const labels: Record<Run["status"], string> = { queued: "排队中", running: "�
 const assetLabels = { new: "新增", changed: "变化", existing: "已有", missing: "缺失", removed: "已移除", unavailable: "无法观察" };
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 const projectLabel = (target: rpc.TargetKey) => `${target.project === "." ? "根目录" : target.project} · ${target.adapter}`;
-const commandText = (command: Command) => command.argv.map((arg) => /^[\w@./:=+-]+$/u.test(arg) ? arg : JSON.stringify(arg)).join(" ");
+const commandText = (command: Pick<Command, "argv">) => command.argv.map((arg) => /^[\w@./:=+-]+$/u.test(arg) ? arg : JSON.stringify(arg)).join(" ");
 
 export function BuildPanel(props: PluginWorkspacePanelProps) {
   return <Workbench key={JSON.stringify([props.host.id, props.workspaceId])} {...props} />;
@@ -167,7 +167,7 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
         <Button colors={colors} label="刷新目标" onPress={() => { setFailure(""); refresh((x) => x + 1); }} />
         <Button colors={colors} label={selected?.operation ? "执行探测" : "运行"} primary disabled={!action || !plan?.command.tool.version || !!confirm} onPress={() => { if (plan) perform(() => submit(plan)); }} />
       </View>
-      {selected?.operation ? <Note colors={colors}>探测会执行项目配置。完成后刷新目标，读取工具确认的构建目标。</Note> : null}
+      {selected?.operation ? <Note colors={colors}>探测会执行项目配置，并可能下载工具声明的项目依赖。完成后可刷新目标。</Note> : null}
       {selected?.blocked ? <Note colors={colors} warning>{selected.blocked}</Note> : null}
       {selected && !selected.blocked && !plan?.command.tool.version ? <Note colors={colors}>运行前请在工具链中选择并检查版本。</Note> : null}
       {configurationKey && planError ? <Note colors={colors} warning>{planError}</Note> : null}
@@ -293,6 +293,11 @@ function RunDetail({ colors, workspaceId, id, update, busy, retry, stop }: {
 
 function CommandPreview({ plan, colors }: { plan: Command; colors: Colors }) {
   return <View style={[styles.tile, { borderColor: colors.border, backgroundColor: colors.surface1 }]}>
+    {plan.preparation?.map((step) => <View key={JSON.stringify(step)} style={styles.step}>
+      <Note colors={colors}>先准备依赖 · 目录：{step.cwd}</Note>
+      <Text selectable style={[styles.code, { color: colors.foreground }]}>{commandText(step)}</Text>
+    </View>)}
+    {plan.preparation?.length ? <Note colors={colors}>准备成功后执行</Note> : null}
     <Text selectable style={[styles.code, { color: colors.foreground }]}>{commandText(plan)}</Text>
     <Note colors={colors}>目录：{plan.cwd} · 来源：{plan.source}{"\n"}{plan.tool.version ?? "版本未验证"}{"\n"}{plan.tool.paths.join("\n")}</Note>
   </View>;
@@ -322,7 +327,7 @@ const styles = StyleSheet.create({
   actions: { flexDirection: "row", alignItems: "flex-end", flexWrap: "wrap", gap: 8 },
   runs: { flexDirection: "row", alignItems: "flex-start", gap: 16 }, stacked: { flexDirection: "column", alignItems: "stretch" },
   list: { flex: 1, minWidth: 0, gap: 8 }, detail: { flex: 2, minWidth: 0, gap: 10 },
-  tile: { padding: 12, gap: 5, borderWidth: 1, borderRadius: 8 }, code: { fontFamily: "monospace", lineHeight: 20 },
+  tile: { padding: 12, gap: 5, borderWidth: 1, borderRadius: 8 }, step: { gap: 4, paddingBottom: 5 }, code: { fontFamily: "monospace", lineHeight: 20 },
   field: { gap: 5, paddingHorizontal: 12, paddingVertical: 6, minWidth: 156, flexGrow: 1 },
   input: { borderRadius: 6, borderWidth: 1, paddingHorizontal: 9, paddingVertical: 7, minHeight: 36 },
   button: { borderRadius: 6, borderWidth: 1, minHeight: 36, paddingHorizontal: 12, justifyContent: "center" },

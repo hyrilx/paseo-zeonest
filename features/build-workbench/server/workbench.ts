@@ -6,24 +6,24 @@ import { adapter, artifact, live, log, retryable, run, saved, target, targetId }
 import type { Command, Configuration, Log, Run, Saved, TargetKey } from "../shared/contracts";
 import { changes, observe } from "./artifacts";
 import { finishCmake, prepareCmake } from "./cmake";
-import { parseNativeProbe } from "./native-projects";
+import { nativeTarget, parseNativeProbe } from "./native-projects";
 import { digest, inside, missing, readBounded, resolveWithin, workspaceRoot } from "./paths";
-import { discoverProjects, lookup } from "./projects";
+import { discoverProjects, type ProjectTarget } from "./projects";
 import { launch } from "./process";
 import type { Invocation, OwnedProcess } from "./process";
-import { buildArguments, requirement, toolchains, toolIssues, verifyTool } from "./toolchains";
+import { buildArguments, preparation, requirement, toolchains, toolIssues, verifyTool } from "./toolchains";
 
 const HISTORY = 24;
 const LOG_CHARS = 96 * 1024;
 const LOG_ROWS = 512;
 const MAX_ACTIVE = 12;
 const MAX_RUNNING = 2;
-const entrySchema = z.object({ run, rows: z.array(log), cursor: z.number(), artifacts: z.array(artifact), artifactsLimited: z.boolean(), probeStamp: z.string().optional() });
+const entrySchema = z.object({ run, rows: z.array(log), cursor: z.number(), artifacts: z.array(artifact), artifactsLimited: z.boolean(), probeStamp: z.string().optional(), probeRoot: z.string().optional() });
 const document = z.object({ sequence: z.number(), configurations: z.array(saved), tools: z.partialRecord(adapter, z.string()).default({}), history: z.array(entrySchema) });
 type State = z.infer<typeof document>;
 type Entry = z.infer<typeof entrySchema>;
 export type Workspace = { id: string; root: string };
-type Plan = { command: Command; fingerprint: string; invocation: Invocation; outputs: string[]; locks?: string[]; configure?: { dir: string; stamp: string; tool: string }; nativeProbe?: { adapter: "gradle" | "xcode"; stamp: string } };
+type Plan = { command: Command; fingerprint: string; steps: Invocation[]; outputs: string[]; locks?: string[]; configure?: { dir: string; stamp: string; tool: string }; nativeProbe?: { adapter: "gradle" | "xcode"; stamp: string } };
 type Job = { workspace: Workspace; entry: Entry; plan: Plan; process?: OwnedProcess; flush?: ReturnType<typeof setTimeout>; stopTimer?: ReturnType<typeof setTimeout>; before?: ReturnType<typeof observe>; probeOutput?: string; probeLimited?: boolean };
 
 export function conflicts(a: { root: string; locks?: string[] }, b: { root: string; locks?: string[] }) {
@@ -83,23 +83,38 @@ export class Workbench {
     catch { job.entry.run.result = [job.entry.run.result, "无法保存本次运行记录"].filter(Boolean).join("；"); }
   }
 
+  #discovery(w: Workspace) {
+    const result = discoverProjects(w.root);
+    const history = this.#state(w.id).history;
+    result.targets = result.targets.flatMap((t) => {
+      if (!t.operation || !(t.gradle || t.xcode)) return [t];
+      const probe = history.find((entry) => entry.probeStamp === t.stamp && entry.probeRoot === w.root &&
+        entry.run.status === "success" && targetId(entry.run.configuration.target) === targetId(t));
+      return [t, ...(probe?.run.confirmedTargets ?? []).flatMap((name) => {
+        const item = nativeTarget(t, name);
+        return item ? [item] : [];
+      })];
+    }).slice(0, 512);
+    return result;
+  }
+
+  #lookup(w: Workspace, key: TargetKey): ProjectTarget {
+    const result = this.#discovery(w).targets.find((item) => targetId(item) === targetId(key));
+    if (!result) throw new Error("目标已删除、移动或不可用，请刷新后重新选择");
+    return result;
+  }
+
   discover(w: Workspace) {
-    const { targets, notices } = discoverProjects(w.root);
-    const state = this.#state(w.id);
-    const confirmations = new Map<string, string[]>();
-    for (const { run, probeStamp } of state.history) {
-      const key = JSON.stringify([run.configuration.target.adapter, run.configuration.target.project, probeStamp]);
-      if (probeStamp && run.status === "success" && run.confirmedTargets && !confirmations.has(key)) confirmations.set(key, run.confirmedTargets);
-    }
-    return { targets: targets.map((t) => target.parse({ ...t, confirmed: !t.operation && (t.cmake?.tool ? true : confirmations.get(JSON.stringify([t.adapter, t.project, t.stamp]))?.includes(t.name)) })),
-      notices, configurations: state.configurations };
+    const { targets, notices } = this.#discovery(w);
+    return { targets: targets.map((t) => target.parse({ ...t, confirmed: t.confirmed ?? !!t.cmake?.tool })),
+      notices, configurations: this.#state(w.id).configurations };
   }
   #cache(w: Workspace, t: TargetKey) {
     const prefix = JSON.stringify([w.id, w.root, t.adapter, t.project]) + ":";
     return new Map([...this.#checks].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => [key.slice(prefix.length), value]));
   }
   tools(w: Workspace, k: TargetKey) {
-    const t = lookup(w.root, k);
+    const t = this.#lookup(w, k);
     const candidates = toolchains(t, this.environment, this.#cache(w, t), w.root).map((tool) => tool.candidate);
     return { candidates, requirement: requirement(t), issues: toolIssues(t, this.environment), selected: this.#state(w.id).tools[t.adapter] };
   }
@@ -117,13 +132,13 @@ export class Workbench {
     if (this.#jobs.some((job) => conflicts({ root: w.root }, { root: job.workspace.root, locks: job.plan.locks }))) {
       throw new Error("此工作区有排队或运行的任务，请在任务结束后检查工具");
     }
-    const t = lookup(w.root, c.target);
+    const t = this.#lookup(w, c.target);
     const tool = toolchains(t, this.environment, this.#cache(w, t), w.root).find(({ candidate }) => candidate.id === c.tool);
     if (!tool) throw new Error(toolIssues(t, this.environment).join("；") || "工具不存在或路径已变更，请刷新后重新选择");
     this.#verificationRoot = w.root;
     try {
-      const found = await verifyTool(w.root, t, tool, this.#probes, this.accept);
-      const updated = lookup(w.root, c.target);
+      const found = await verifyTool(t, tool, this.#probes, this.accept);
+      const updated = this.#lookup(w, c.target);
       const refreshed = toolchains(updated, this.environment, new Map(), w.root).find(({ candidate }) => candidate.id === c.tool);
       if (refreshed?.signature !== tool.signature || updated.stamp !== t.stamp) throw new Error("检查期间工具或项目声明发生变化，请重试");
       if (this.#checks.size >= 128) { const oldest = this.#checks.keys().next(); if (!oldest.done) this.#checks.delete(oldest.value); }
@@ -135,7 +150,7 @@ export class Workbench {
   #plan(w: Workspace, c: Configuration): Plan {
     this.accept();
     if (w.root !== workspaceRoot(w.root)) throw new Error("工作区目录已变化，请刷新");
-    const t = lookup(w.root, c.target);
+    const t = this.#lookup(w, c.target);
     if (t.blocked) throw new Error(t.blocked);
     const tool = toolchains(t, this.environment, this.#cache(w, t), w.root).find(({ candidate }) => candidate.id === c.tool);
     if (!tool) throw new Error("所选工具不存在或路径已变更，请重新选择");
@@ -147,11 +162,13 @@ export class Workbench {
       resolveWithin(w.root, dir);
     }
     const cwd = resolveWithin(w.root, t.cwd);
-    const command = { cwd: t.cwd, source: t.source, argv: [tool.executable, ...args], tool: tool.candidate };
+    const prep = preparation(w.root, t, tool);
+    const command: Command = { cwd: t.cwd, source: t.source, argv: [tool.executable, ...args], tool: tool.candidate,
+      ...(prep.length ? { preparation: prep.map(({ cwd, invocation }) => ({ cwd, argv: [invocation.executable, ...invocation.args] })) } : {}) };
     const fingerprint = digest(JSON.stringify([w.root, targetId(t), t.stamp, tool.signature, command, outputs]));
     const configure = t.operation === "probe" && t.cmake ? { ...t.cmake, tool: tool.signature } : undefined;
     const nativeProbe = t.operation && (t.adapter === "gradle" || t.adapter === "xcode") ? { adapter: t.adapter, stamp: t.stamp } : undefined;
-    return { command, fingerprint, invocation: { executable: tool.executable, args, cwd, env: tool.env }, outputs, configure, nativeProbe, locks: t.writes?.map((p) => resolveWithin(w.root, p)) };
+    return { command, fingerprint, steps: [...prep.map(({ invocation }) => invocation), { executable: tool.executable, args, cwd, env: tool.env }], outputs, configure, nativeProbe, locks: t.writes?.map((p) => resolveWithin(w.root, p)) };
   }
   preview(w: Workspace, c: Configuration) {
     const { command, fingerprint } = this.#plan(w, c);
@@ -232,43 +249,64 @@ export class Workbench {
         job.before = observe(job.workspace.root, job.plan.outputs);
         Object.assign(job.entry.run, { status: "running", startedAt: Date.now() });
         this.#checkpoint(job);
-        job.process = launch(current.invocation, (stream, text) => {
-          if (job.plan.nativeProbe && stream === "stdout" && !job.probeLimited) {
-            if ((job.probeOutput?.length ?? 0) + text.length <= 256 * 1024) job.probeOutput = (job.probeOutput ?? "") + text;
-            else { job.probeOutput = undefined; job.probeLimited = true; }
-          }
-          this.#append(job, stream, text);
-        });
+        this.#step(job, current.steps, 0);
         running.push(job);
-        void job.process.done.then((exit) => {
-          const description = exit.error ?? (exit.signal ? `信号 ${exit.signal}` : `退出码 ${exit.code}`);
-          let status: Run["status"] = exit.stopped ? "stopped" : exit.code === 0 && !exit.error ? "success" : "failed";
-          let result = description;
-          if (status === "success" && !this.#sameRoot(job.workspace.root)) {
-            status = "failed"; result = "工作区路径已变化，无法确认产物或探测结果";
-          }
-          if (status === "success" && job.plan.configure) {
-            const { dir, stamp, tool } = job.plan.configure;
-            try { finishCmake(job.workspace.root, dir, stamp, tool); result += "；刷新目标以读取 File API"; }
-            catch (error) { status = "failed"; result = (error as Error).message; }
-          }
-          if (status === "success" && job.plan.nativeProbe) {
-            const { adapter, stamp } = job.plan.nativeProbe;
-            try {
-              if (job.probeLimited) throw new Error("探测输出超过读取上限");
-              const reported = parseNativeProbe(adapter, job.probeOutput ?? "");
-              const key = job.entry.run.configuration.target;
-              const declared = discoverProjects(job.workspace.root).targets.filter((t) => t.adapter === adapter && t.project === key.project && t.stamp === stamp && !t.operation);
-              job.entry.probeStamp = stamp;
-              job.entry.run.confirmedTargets = declared.filter((t) => reported.includes(t.name)).map((t) => t.name).slice(0, 64);
-              result += `；确认 ${job.entry.run.confirmedTargets.length} 个已声明目标，刷新后可查看`;
-            } catch (error) { status = "failed"; result = (error as Error).message; }
-          }
-          this.#finish(job, status, result);
-          this.#pump();
-        });
       } catch (e) { this.#finish(job, "failed", (e as Error).message); }
     }
+  }
+
+  #step(job: Job, steps: Invocation[], index: number) {
+    const invocation = steps[index]!;
+    const preparing = index < steps.length - 1;
+    const phase = preparing ? "准备依赖" : job.entry.run.configuration.target.name;
+    const relativeCwd = preparing ? job.plan.command.preparation![index]!.cwd : job.plan.command.cwd;
+    if (!this.#sameRoot(job.workspace.root) || resolveWithin(job.workspace.root, relativeCwd) !== invocation.cwd) {
+      throw new Error("工作区或命令目录已变化，请刷新");
+    }
+    if (preparing || index > 0) this.#append(job, "stdout", `\n[${phase}] ${JSON.stringify([invocation.executable, ...invocation.args])}\n`);
+    job.process = launch(invocation, (stream, text) => {
+      if (!preparing && job.plan.nativeProbe && stream === "stdout" && !job.probeLimited) {
+        if ((job.probeOutput?.length ?? 0) + text.length <= 256 * 1024) job.probeOutput = (job.probeOutput ?? "") + text;
+        else { job.probeOutput = undefined; job.probeLimited = true; }
+      }
+      this.#append(job, stream, text);
+    });
+    void job.process.done.then((exit) => {
+      const stopping = !this.#active || ["stopping", "interrupted"].includes(job.entry.run.status);
+      if (preparing && !stopping && !exit.stopped && exit.code === 0 && !exit.error) {
+        try { this.#step(job, steps, index + 1); }
+        catch (error) { this.#finish(job, "failed", (error as Error).message); this.#pump(); }
+        return;
+      }
+      const description = exit.error ?? (exit.signal ? `信号 ${exit.signal}` : `退出码 ${exit.code}`);
+      let status: Run["status"] = (exit.stopped || stopping) ? "stopped" : exit.code === 0 && !exit.error ? "success" : "failed";
+      let result = preparing ? `依赖准备未完成：${description}` : description;
+      if (status === "success" && !this.#sameRoot(job.workspace.root)) {
+        status = "failed"; result = "工作区路径已变化，无法确认产物或探测结果";
+      }
+      if (status === "success" && job.plan.configure) {
+        const { dir, stamp, tool } = job.plan.configure;
+        try { finishCmake(job.workspace.root, dir, stamp, tool); result += "；刷新目标以读取 File API"; }
+        catch (error) { status = "failed"; result = (error as Error).message; }
+      }
+      if (status === "success" && job.plan.nativeProbe) {
+        const { adapter, stamp } = job.plan.nativeProbe;
+        try {
+          if (job.probeLimited) throw new Error("探测输出超过读取上限");
+          const reported = parseNativeProbe(adapter, job.probeOutput ?? "");
+          const key = job.entry.run.configuration.target;
+          const probe = discoverProjects(job.workspace.root).targets.find((t) => targetId(t) === targetId(key) && t.stamp === stamp && t.operation);
+          if (!probe) throw new Error("探测期间项目声明已变化，请重新探测");
+          job.entry.probeStamp = stamp;
+          job.entry.probeRoot = job.workspace.root;
+          job.entry.run.confirmedTargets = reported.filter((name) => nativeTarget(probe, name));
+          result += `；发现 ${job.entry.run.confirmedTargets.length} 个可选目标，刷新后可查看`;
+        } catch (error) { status = "failed"; result = (error as Error).message; }
+      }
+      this.#finish(job, status, result);
+      this.#pump();
+
+    });
   }
 
   #append(job: Job, stream: Log["stream"], text: string) {

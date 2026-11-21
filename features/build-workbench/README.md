@@ -4,9 +4,30 @@
 
 功能默认关闭。启用后，从 Paseo 工作区 tab 栏的「＋」打开。选择目标，在「工具链」中检查所选工具，再核对命令和工作目录。关闭 tab 不会停止任务；重开后可以继续查看同一工作区的记录。
 
-发现目标只读工作区清单。构建以 daemon 用户权限运行，只在信任项目代码时启动；路径校验不等于沙盒。任务状态、配置和有界日志保存在宿主 `PASEO_HOME/zeonest/build-workbench/`，不会存储整个环境；项目输出的敏感内容仍可能进入日志。产物保留在工作区，列表表示构建前后的观察结果，不证明文件来源。停止支持 POSIX 进程组；自行脱离进程组的程序不受此机制控制。
+发现和预览只读工作区文件。主动探测或运行后，项目工具可准备构建依赖，例如下载 Gradle Wrapper、解析 Cargo crates 或 Swift packages。npm/pnpm 项目缺少声明的直接依赖时，预览会列出安装命令，准备成功后再执行构建。工具候选包含宿主 PATH 和已有 mise 安装（例如 CMake 应用包、由 `protobuf` 提供的 `protoc`）。
+
+构建以 daemon 用户权限运行，只在信任项目代码时启动；路径校验不等于沙盒。任务状态、配置和有界日志保存在宿主 `PASEO_HOME/zeonest/build-workbench/`，不会存储整个环境；项目输出的敏感内容仍可能进入日志。产物保留在工作区，列表表示构建前后的观察结果，不证明文件来源。停止支持 POSIX 进程组；自行脱离进程组的程序不受此机制控制。
+
+## 适配范围
+
+| 技术栈 | 发现与构建 |
+| --- | --- |
+| npm/pnpm | 从 `package.json` 和 workspace 声明发现脚本；缺依赖时在项目或所属 workspace 根准备依赖。 |
+| Cargo | 从 `Cargo.toml` 发现 crate 和 workspace 成员；由 Cargo 处理依赖与 `build.rs`，可把宿主已有的 `protoc` 提供给构建。 |
+| CMake | 显式 configure，支持有界读取 configure preset，再从 File API 枚举目标；由 CMake 判断生成器、编译器和依赖。 |
+| Tauri | 从 Tauri 配置发现 Debug `--no-bundle` 构建，使用项目的 JS CLI 或已安装的 `cargo-tauri`；前端钩子由项目配置决定。 |
+| Gradle | 识别 Groovy、Kotlin 构建入口；显式执行 `tasks --all` 后列出构建、检查等任务。使用项目 Wrapper 或已安装 Gradle，允许 Wrapper 和构建依赖下载。 |
+| Xcode | 从 workspace 或独立工程查询 scheme，运行无签名的 Debug 模拟器构建；完整 Xcode 和模拟器 SDK 由宿主提供。 |
+
+脚本产物使用清单线索、已存在的常见输出目录或手动输入的相对路径；这些线索不用于放开并发。项目名、示例模块、构建钩子和 SDK 版本不作为适配条件。
 
 ## 验收记录
+
+### 通用适配回归
+
+- 用隔离的 Groovy/Java 工程和空 `GRADLE_USER_HOME` 运行真实 Wrapper：首次探测下载 Gradle `9.5.1-all` 并枚举任务；随后用 mise Temurin `17.0.21` 执行 `:compileJava`，成功观察到 `Sample.class`。另用 fixture 覆盖非 `:app` 的嵌套模块与项目自选 JDK。
+- 用不含 mise 的 PATH 启动服务，从 mise 安装发现 CMake `4.5.1`、Ninja `1.13.2` 和 `protobuf` 的 `protoc 36.2`。CMake 在找不到一个可选依赖时仍从 RelWithDebInfo preset 的 File API 发现并构建目标；Cargo fixture 的 `build.rs` 成功调用 `protoc` 生成描述文件。
+- Fixture 验证 npm/pnpm 缺依赖时的命令预览、准备失败或停止后不启动构建、Xcode 工程和 workspace 的实际查询结果，以及 Tauri 的非固定前端钩子。未在原样本仓库安装依赖或修改配置。
 
 ### paseo-zeonest
 
@@ -31,11 +52,11 @@
 
 ### eligos
 
-- 从普通目录分别发现 `eligos-core`、`fake-client`。两个 `build.rs` 引用的四个 `.proto` 均在工作区内；它们会生成 `src/protos`。当前没有可用的 `protoc`，工作台在启动前阻止构建，未写入原项目。测试覆盖了越界输入被拒绝和源码生成目录被识别。
-- 发现 `eligos-livestream` 的 Tauri Debug `--no-bundle` 目标，分别观察前端 `dist` 和 `src-tauri/target/debug/eligos-livestream`。系统可定位 macOS SDK，但样本缺少 `node_modules/.bin/tauri`，没有安装前端依赖或执行 Tauri 构建。真实 Rust 生成与 Tauri 可执行文件均待验。
+- 从普通目录分别发现 `eligos-core`、`fake-client`。两个 `build.rs` 引用的四个 `.proto` 均在工作区内；它们会生成 `src/protos`。首轮未运行源码生成；通用适配已可从 mise 定位 `protoc`，由实际构建脚本处理输入和生成目录。尚未在隔离副本重跑该样本。
+- 发现 `eligos-livestream` 的 Tauri Debug `--no-bundle` 目标，分别观察前端 `dist` 和 `src-tauri/target/debug/eligos-livestream`。系统可定位 macOS SDK；首轮没有安装该样本的前端依赖，也没有执行 Tauri 构建。真实 Rust 生成与 Tauri 可执行文件均待验。
 
 ### alkaa
 
-- 静态发现 Gradle `:app:assembleDebug`、`:desktop-app:createDistributable`，以及 `ios-app/alkaa.xcworkspace` 中的共享 scheme `alkaa`。已安装的 Temurin 17 通过 Java 版本检查，但缺少项目所需的 Gradle `9.5.1-all` Wrapper 缓存，未启动 Wrapper 或触发下载。Android SDK 当前只有 `android-37.0` 平台，项目要求 `android-36`。
+- 该样本待验证 Gradle `:app:assembleDebug`、`:desktop-app:createDistributable`，以及 `ios-app/alkaa.xcworkspace` 的 `alkaa` scheme。首轮因 Wrapper 未缓存而没有运行；该限制已移除，冷 Wrapper 下载在隔离工程通过。样本检查时 Android SDK 只有 `android-37.0` 平台，项目需要 `android-36`。
 - `xcode-select -p` 指向 `/Library/Developer/CommandLineTools`，没有完整 Xcode。该 scheme 的现有构建阶段会调用 Gradle 生成 Kotlin 框架。真实 Gradle launcher/daemon JVM、APK、桌面分发目录及 iOS 模拟器产物均待验；未运行签名、设备或发布任务。
-- Fixture 覆盖了 Wrapper 缓存与 SDK 检查、显式枚举后确认当前工作区已声明的目标、APK 路径，以及 Xcode 的 Debug 模拟器参数、禁用签名和 `.app` 产物观察。
+- Xcode fixture 验证了 scheme 枚举、Debug 模拟器参数、禁用签名和 `.app` 产物观察。

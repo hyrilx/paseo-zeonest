@@ -1,22 +1,23 @@
 import { lstatSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { minimatch } from "minimatch";
 import { parse as yaml } from "yaml";
-import type { Target, TargetKey } from "../shared/contracts";
-import { targetId } from "../shared/contracts";
+import type { Target } from "../shared/contracts";
 import { at, digest, projectDirs, readText, resolveWithin } from "./paths";
 import { array, literal, section } from "./manifests";
 import { discoverCmake } from "./cmake";
 import { discoverGradle, discoverXcode } from "./native-projects";
 import type { Gradle, Xcode } from "./native-projects";
+import { misePin } from "./mise";
 
 export type ProjectTarget = Target & {
   cwd: string;
   stamp: string;
-  requirements: { node?: string; manager?: string; managerEngine?: string; miseNode?: string; rust?: string; rustChannel?: string; protoc?: boolean };
+  requirements: { node?: string; manager?: string; managerEngine?: string; miseNode?: string; rust?: string; rustChannel?: string; miseCmake?: string; miseJava?: string };
   cargo?: { name?: string; targetDir: string };
-  cmake?: { dir: string; stamp: string; tool?: string };
-  tauri?: { cli: string; targetDir: string };
+  cmake?: { dir: string; stamp: string; preset?: string; target?: string; configuration?: string; tool?: string };
+  tauri?: { cli?: true; targetDir: string; manager?: "npm" | "pnpm" };
+  install?: { cwd: string; lock: boolean; required: string[] };
   gradle?: Gradle;
   xcode?: Xcode;
   // Only populate this when the adapter can bound its writes. Artifact paths are not locks.
@@ -35,13 +36,48 @@ export function json(text: string) {
   return object(value);
 }
 
-function npmOutputs(project: string, manifest: Record<string, unknown>): string[] {
-  // Published bundle directories are observation hints, not proof of exclusive writes.
-  const files = Array.isArray(manifest.files) ? manifest.files : [];
-  const dirs = files.filter((p): p is string => typeof p === "string" && /^(client|server)\/bundle\.(js|d\.ts)$/u.test(p));
-  const output = new Set(dirs.map((p) => at(project, p.split("/")[0]!)));
-  if (Object.values(object(manifest.scripts)).some((s) => typeof s === "string" && /(?:^|\s)(?:vite build|tsup)(?:\s|$)/u.test(s))) output.add(at(project, "dist"));
-  return [...output];
+function outputHints(root: string, project: string, manifest: Record<string, unknown>): string[] {
+  // Literal package publication/entry paths and existing conventional directories are hints only.
+  const names = [...(Array.isArray(manifest.files) ? manifest.files : []), manifest.main, manifest.module, manifest.types];
+  const hints = new Set<string>();
+  for (const name of names) {
+    if (typeof name !== "string" || /[*?\[\]{}]/u.test(name)) continue;
+    const path = at(project, name.replace(/^\.\//u, "").replace(/\/$/u, ""));
+    try { resolveWithin(root, path); hints.add(path); }
+    catch { /* Ignore paths that cannot be observed within the workspace. */ }
+  }
+  for (const name of ["dist", "build", "out", "lib"]) {
+    const path = at(project, name);
+    try { if (lstatSync(resolveWithin(root, path)).isDirectory()) hints.add(path); }
+    catch { /* Conventional outputs are still candidates before the first build. */ }
+  }
+  return [...(hints.size ? hints : ["dist", "build", "out"].map((name) => at(project, name)))].slice(0, 16);
+}
+
+type Read = (path: string) => string | undefined;
+
+function packageTools(root: string, project: string, installRoot: string, data: Record<string, unknown>, parent: Record<string, unknown>, read: Read) {
+  const lock = (name: string) => {
+    try {
+      const stat = lstatSync(resolveWithin(root, at(installRoot, name)), { bigint: true });
+      return stat.isFile() ? [name, stat.size, stat.mtimeNs, stat.ctimeNs].join(":") : undefined;
+    } catch { return undefined; }
+  };
+  const pin = (name: string) => misePin([project, installRoot, "."], name, read);
+  const nodePin = pin("node");
+  const declared = version(data.packageManager) ?? version(parent.packageManager);
+  if (declared && !/^(?:npm|pnpm)@/u.test(declared)) return;
+  const pnpm = read(at(installRoot, "pnpm-workspace.yaml"));
+  const pnpmLock = lock("pnpm-lock.yaml");
+  const npmLock = lock("npm-shrinkwrap.json") ?? lock("package-lock.json");
+  const manager = declared ? declared.startsWith("pnpm@") ? "pnpm" : "npm" : pnpm || pnpmLock ? "pnpm" : "npm";
+  const required = [...new Set(Object.keys({ ...object(parent.dependencies), ...object(parent.devDependencies), ...object(data.dependencies), ...object(data.devDependencies) }))]
+    .filter((p) => /^(?:@[\w.-]+\/)?[\w-][\w.-]*$/u.test(p)).slice(0, 256);
+  return { manager, install: { cwd: installRoot, lock: !!(manager === "pnpm" ? pnpmLock : npmLock), required },
+    stamp: [declared, pnpm, pnpmLock, npmLock, nodePin, pin(manager)],
+    requirements: { node: version(object(data.engines).node) ?? version(object(parent.engines).node), miseNode: nodePin,
+      managerEngine: version(object(data.engines)[manager]) ?? version(object(parent.engines)[manager]),
+      manager: declared?.split("@")[1]?.split("+sha")[0] ?? pin(manager) } } as const;
 }
 
 export function discoverProjects(root: string): Discovery {
@@ -57,122 +93,150 @@ export function discoverProjects(root: string): Discovery {
     try { manifest = json(rootText); }
     catch (e) { notices.push("package.json：" + (e as Error).message); }
   }
-  const projects = new Set(["."]);
-  const patterns = Array.isArray(manifest.workspaces) ? manifest.workspaces : object(manifest.workspaces).packages;
-  for (const project of declaredDirs(root, patterns, notices)) projects.add(project);
-  const pnpm = read("pnpm-workspace.yaml");
-  if (pnpm !== undefined) {
-    try { for (const path of declaredDirs(root, object(yaml(pnpm, { maxAliasCount: 0 })).packages, notices)) projects.add(path); }
-    catch (e) { notices.push("pnpm-workspace.yaml：" + (e as Error).message); }
+  const dirs = projectDirs(root).dirs;
+  const jsRoots = new Map<string, string>();
+  const packages = new Map<string, { text: string; data: Record<string, unknown> }>();
+  const readPackage = (dir: string) => {
+    if (packages.has(dir)) return;
+    const source = at(dir, "package.json");
+    const text = dir === "." ? rootText : read(source);
+    if (text === undefined) return;
+    try { packages.set(dir, { text, data: dir === "." ? manifest : json(text) }); }
+    catch (e) { notices.push(source + "：" + (e as Error).message); }
+  };
+  // Traverse shallow to deep; the nearest declared workspace owns installation.
+  for (const dir of dirs) {
+    readPackage(dir);
+    const data = packages.get(dir)?.data ?? {};
+    const fromNpm = Array.isArray(data.workspaces) ? data.workspaces : object(data.workspaces).packages;
+    const pnpmPath = at(dir, "pnpm-workspace.yaml");
+    const pnpm = read(pnpmPath);
+    let patterns = fromNpm;
+    if (pnpm !== undefined) {
+      try { patterns = object(yaml(pnpm, { maxAliasCount: 0 })).packages; }
+      catch (e) { notices.push(pnpmPath + "：" + (e as Error).message); }
+    }
+    if (pnpm !== undefined || Array.isArray(fromNpm)) jsRoots.set(dir, dir);
+    for (const sub of declaredDirs(resolveWithin(root, dir), patterns, notices)) {
+      const member = at(dir, sub);
+      jsRoots.set(member, dir);
+      readPackage(member);
+    }
   }
-  const mise = read("mise.toml") ?? read(".mise.toml");
-  const miseTools = mise ? section(mise, "tools") : undefined;
-  const miseNode = literal(miseTools, "node");
-  const misePnpm = literal(miseTools, "pnpm");
-  const packageManager = version(manifest.packageManager);
-  const manager = pnpm !== undefined || packageManager?.startsWith("pnpm@");
-  for (const project of projects) {
+  for (const [project, { text, data }] of packages) {
     const source = at(project, "package.json");
-    const text = project === "." ? rootText : read(source);
-    if (!text) continue;
     try {
-      const data = project === "." ? manifest : json(text);
-      const engine = version(object(data.engines).node) ?? version(object(manifest.engines).node);
-      const tool = manager ? "pnpm" : "npm";
+      const installRoot = jsRoots.get(project) ?? project;
+      const parent = packages.get(installRoot);
+      const info = packageTools(root, project, installRoot, data, parent?.data ?? {}, read);
+      if (!info) { notices.push(`${source}：包管理器不是 npm 或 pnpm。`); continue; }
       for (const [name, script] of Object.entries(object(data.scripts))) {
-        if (name === "tauri" && read(at(project, "src-tauri/tauri.conf.json"))) continue;
         if (!safeName(name) || typeof script !== "string" || !script.trim() || /^(pre|post)(install|publish)|(?::watch$)|^(install|publish|deploy|release|push|sign|dev|start|watch|preview)(:|$)/iu.test(name)) continue;
         if (targets.length >= 512) { notices.push("目标发现达到上限（512 项）"); break; }
-        targets.push({ adapter: tool, project, name, source, cwd: project, stamp: digest(JSON.stringify([rootText, text, pnpm, mise])),
-          requirements: { node: engine, miseNode, managerEngine: version(object(data.engines)[tool]) ?? version(object(manifest.engines)[tool]), manager: (tool === "pnpm" && misePnpm) || (packageManager?.startsWith(tool + "@") ? packageManager.slice(tool.length + 1).split("+sha")[0] : undefined) },
-          outputs: npmOutputs(project, data),
+        targets.push({ adapter: info.manager, project, name, source, cwd: project, stamp: digest(JSON.stringify([parent?.text, text, info.stamp])),
+          requirements: info.requirements, install: info.install, outputs: outputHints(root, project, data),
         });
       }
     } catch (e) { notices.push(source + "：" + (e as Error).message); }
   }
-  discoverCargo(root, read, notices, targets);
-  discoverTauri(root, read, notices, targets);
+  discoverCargo(root, dirs, read, notices, targets);
+  discoverTauri(root, dirs, jsRoots, read, notices, targets);
   discoverCmake(root, notices, targets);
-  discoverGradle(root, notices, targets);
+  discoverGradle(root, dirs, notices, targets);
   discoverXcode(root, notices, targets);
   if (!targets.length) notices.push("未找到任务。已检查 npm/pnpm、Cargo、CMake、Tauri、Gradle 与 Xcode 清单；修改清单后可刷新。");
   return { targets: targets.slice(0, 512), notices: notices.slice(0, 32) };
 }
 
-function discoverCargo(root: string, read: (path: string) => string | undefined, notices: string[], targets: ProjectTarget[]) {
-  const manifest = read("Cargo.toml");
-  const workspace = manifest === undefined ? undefined : section(manifest, "workspace");
-  const members = new Set(declaredDirs(root, [...array(workspace, "members"), ...array(workspace, "exclude").map((p) => "!" + p)], notices));
-  const dirs = manifest === undefined ? projectDirs(root).dirs : [".", ...members];
-  const toolchain = read("rust-toolchain.toml");
-  const channel = toolchain ? literal(section(toolchain, "toolchain"), "channel") : undefined;
-  for (const project of dirs) {
-    const source = at(project, "Cargo.toml");
-    const text = project === "." ? manifest : read(source);
-    if (!text || targets.length >= 512) continue;
-    const pkg = section(text, "package");
-    const name = literal(pkg, "name");
-    if (pkg !== undefined && (!name || !/^[\w-]+$/u.test(name))) { notices.push(source + "：未读取到有效的 [package].name"); continue; }
-    if (!name && (project !== "." || workspace === undefined)) { notices.push(source + "：未读取到 [package] 或 [workspace]"); continue; }
-    const wd = members.has(project) ? "." : project;
-    const targetDir = at(wd, "target");
-    const outputs = name ? [at(targetDir, "debug/" + name), at(targetDir, "debug/lib" + name.replaceAll("-", "_") + ".rlib")] : [at(targetDir, "debug")];
-    const buildScript = read(at(project, "build.rs"));
-    const protoc = !!buildScript && /prost_build::/u.test(buildScript);
-    const inputs: string[] = [];
-    const missing: string[] = [];
-    if (protoc) {
-      for (const path of buildScript.matchAll(/"([^"\r\n]+\.proto)"/gu)) {
-        const rel = relative(root, resolve(root, project, path[1]!));
-        try { if (readText(root, rel) === undefined) missing.push(rel); else inputs.push(rel); }
-        catch { missing.push(rel); }
-      }
-      if (/\.out_dir\("src\/protos"\)/u.test(buildScript)) {
-        outputs.push(at(project, "src/protos"));
-        notices.push(`${source}：prost 构建会写入 src/protos；验证项目时建议使用副本。`);
-      }
-    }
-    targets.push({ adapter: "cargo", project, name: name ?? "build (workspace)", source, cwd: wd, stamp: digest(JSON.stringify([manifest, text, toolchain, buildScript, inputs])), requirements: {
-      rust: literal(pkg, "rust-version"), rustChannel: channel, protoc,
-    }, blocked: missing.length ? `缺少或无法读取 protobuf 输入：${missing.slice(0, 8).join("、")}` : undefined, cargo: { name, targetDir }, outputs });
+function rustChannel(project: string, read: Read) {
+  const parts = project === "." ? [] : project.split("/");
+  for (let n = parts.length; n >= 0; n--) {
+    const dir = parts.slice(0, n).join("/") || ".";
+    const toml = read(at(dir, "rust-toolchain.toml"));
+    const channel = toml ? literal(section(toml, "toolchain"), "channel") : read(at(dir, "rust-toolchain"))?.trim();
+    if (channel) return channel;
   }
 }
 
-function discoverTauri(root: string, read: (path: string) => string | undefined, notices: string[], targets: ProjectTarget[]) {
-  for (const project of projectDirs(root).dirs) {
-    const source = at(project, "src-tauri/tauri.conf.json");
-    const conf = read(source);
-    if (!conf) continue;
-    const pkgText = read(at(project, "package.json"));
-    const manifest = read(at(project, "src-tauri/Cargo.toml"));
-    if (!pkgText || !manifest) { notices.push(`${source}：缺少前端或 Cargo 清单`); continue; }
+function observePath(root: string, base: string, path: string | undefined) {
+  if (!path || isAbsolute(path) || /^[a-z][\w+.-]*:/iu.test(path)) return undefined;
+  const rel = relative(root, resolve(root, base, path));
+  if (!rel) return undefined;
+  try { resolveWithin(root, rel); return rel; }
+  catch { return undefined; }
+}
+
+function discoverCargo(root: string, dirs: string[], read: Read, notices: string[], targets: ProjectTarget[]) {
+  const projects = new Map(dirs.flatMap((dir): [string, string][] => {
+    const manifest = read(at(dir, "Cargo.toml"));
+    return manifest === undefined ? [] : [[dir, manifest]];
+  }));
+  const workspaces = new Map<string, string>();
+  for (const [dir, manifest] of projects) {
+    const workspace = section(manifest, "workspace");
+    if (workspace === undefined) continue;
+    const path = resolve(root, dir);
+    for (const rel of declaredDirs(path, [...array(workspace, "members"), ...array(workspace, "exclude").map((p) => "!" + p)], notices)) {
+      const member = at(dir, rel);
+      workspaces.set(member, dir);
+      if (!projects.has(member)) {
+        const text = read(at(member, "Cargo.toml"));
+        if (text !== undefined) projects.set(member, text);
+      }
+    }
+  }
+  for (const [project, text] of projects) {
+    const source = at(project, "Cargo.toml");
+    const pkg = section(text, "package");
+    const name = literal(pkg, "name");
+    if (pkg !== undefined && (!name || !/^[\w-]+$/u.test(name))) { notices.push(source + "：未读取到有效的 [package].name"); continue; }
+    const ws = section(text, "workspace");
+    if (!name && ws === undefined) continue;
+    const cwd = workspaces.get(project) ?? project;
+    const build = read(at(project, ".cargo/config.toml")) ?? read(at(cwd, ".cargo/config.toml"));
+    const targetDir = observePath(root, cwd, build ? literal(section(build, "build"), "target-dir") : undefined);
+    const dir = targetDir ?? at(cwd, "target");
+    const channel = rustChannel(project, read);
+    const script = read(at(project, "build.rs"));
+    const stamp = digest(JSON.stringify([text, projects.get(cwd), channel, build, script]));
+    const base = { adapter: "cargo" as const, project, source, cwd, stamp, requirements: { rust: literal(pkg, "rust-version"), rustChannel: channel } };
+    if (name) targets.push({ ...base, name, cargo: { name, targetDir: dir }, outputs: [at(dir, `debug/${name}`), at(dir, `debug/lib${name.replaceAll("-", "_")}.rlib`)] });
+    if (ws !== undefined) targets.push({ ...base, name: "build (workspace)", cargo: { targetDir: dir }, outputs: [at(dir, "debug")] });
+  }
+}
+
+function discoverTauri(root: string, dirs: string[], jsRoots: Map<string, string>, read: Read, notices: string[], targets: ProjectTarget[]) {
+  for (const native of dirs) {
+    const jsonPath = at(native, "tauri.conf.json");
+    const tomlPath = at(native, "Tauri.toml");
+    const rawJson = read(jsonPath);
+    const source = rawJson === undefined ? tomlPath : jsonPath;
+    const conf = rawJson ?? read(tomlPath);
+    if (conf === undefined) continue;
+    const manifest = read(at(native, "Cargo.toml"));
+    if (!manifest) { notices.push(`${source}：缺少 Cargo.toml`); continue; }
+    const project = native === "." ? "." : dirname(native);
     try {
-      const pkg = json(pkgText);
-      const build = object(json(conf).build);
+      const pkgText = read(at(project, "package.json"));
+      const pkg = pkgText === undefined ? {} : json(pkgText);
+      const build = rawJson !== undefined ? object(json(conf).build) : undefined;
+      const frontend = build ? version(build.frontendDist) : literal(section(conf, "build"), "frontendDist");
+      const frontendOutput = observePath(root, native, frontend);
       const cargo = section(manifest, "package");
+      const installRoot = jsRoots.get(project) ?? project;
+      const parentText = project === installRoot ? pkgText : read(at(installRoot, "package.json"));
+      const parent = parentText === undefined ? {} : json(parentText);
+      const dependency = (data: Record<string, unknown>) => object(data.devDependencies)["@tauri-apps/cli"] ?? object(data.dependencies)["@tauri-apps/cli"];
+      const js = pkgText === undefined || !(dependency(pkg) || dependency(parent)) ? undefined : packageTools(root, project, installRoot, pkg, parent, read);
+      const cli = js ? true : undefined;
+      const targetDir = at(native, "target");
+      const channel = rustChannel(native, read);
+      const rust = { rust: literal(cargo, "rust-version"), rustChannel: channel };
       const name = literal(cargo, "name");
-      const frontend = version(build.frontendDist);
-      if (!name || !/^[\w-]+$/u.test(name) || !frontend || !/^\.\.\/[\w/-]+$/u.test(frontend) ||
-        build.beforeBuildCommand !== "pnpm build" || object(pkg.scripts).tauri !== "tauri" ||
-        typeof object(pkg.devDependencies)["@tauri-apps/cli"] !== "string" || !read(at(project, "pnpm-lock.yaml"))) {
-        notices.push(`${source}：当前支持 pnpm、项目内 Tauri CLI、pnpm build 前端 hook 和工作区内 frontendDist。`); continue;
-      }
-      const mise = read(at(project, "mise.toml")) ?? read("mise.toml");
-      const miseTools = mise ? section(mise, "tools") : undefined;
-      const packageManager = version(pkg.packageManager);
-      const cli = at(project, "node_modules/.bin/tauri");
-      const targetDir = at(project, "src-tauri/target");
-      let blocked: string | undefined;
-      if (process.platform !== "darwin") blocked = "当前 Tauri 工具链检查仅支持 macOS。";
-      else {
-        try { if (!lstatSync(resolveWithin(root, cli)).isFile()) blocked = "缺少项目内 Tauri CLI"; }
-        catch { blocked = "缺少项目内 Tauri CLI（node_modules/.bin/tauri），工作台不会安装依赖。"; }
-      }
-      targets.push({ adapter: "tauri", project, source, cwd: project, name: "build (Debug, no bundle)", blocked,
-        stamp: digest(JSON.stringify([conf, manifest, pkgText, mise])), tauri: { cli, targetDir }, requirements: {
-          node: version(object(pkg.engines).node), managerEngine: version(object(pkg.engines).pnpm), miseNode: literal(miseTools, "node"),
-          manager: literal(miseTools, "pnpm") ?? (packageManager?.startsWith("pnpm@") ? packageManager.slice(5).split("+sha")[0] : undefined), rust: literal(cargo, "rust-version"),
-        }, outputs: [at(project, frontend.slice(3)), at(targetDir, `debug/${name}`)] });
+      const outputs = [...(frontendOutput ? [frontendOutput] : []), name && /^[\w-]+$/u.test(name) ? at(targetDir, `debug/${name}`) : at(targetDir, "debug")];
+      targets.push({ adapter: "tauri", project: native, source, cwd: project, name: "build (Debug, no bundle)",
+        stamp: digest(JSON.stringify([conf, manifest, pkgText, parentText, js?.stamp, channel])),
+        tauri: { cli, manager: js?.manager, targetDir }, install: js?.install, requirements: { ...js?.requirements, ...rust }, outputs });
     } catch (error) { notices.push(`${source}：${(error as Error).message}`); }
   }
 }
@@ -202,10 +266,4 @@ function scanDeclared(root: string, patterns: string[]) {
     for (const p of matches) if (excluded) selected.delete(p); else selected.add(p);
   }
   return { dirs: [...selected], limited: scan.limited };
-}
-
-export function lookup(root: string, key: TargetKey) {
-  const result = discoverProjects(root).targets.find((item) => targetId(item) === targetId(key));
-  if (!result) throw new Error("目标已删除、移动或不可用，请刷新后重新选择");
-  return result;
 }

@@ -36,7 +36,7 @@ test("static discovery is bounded, never runs scripts and keeps package identiti
   }
   symlinkSync(join(base, "other"), join(base, "apps", "outside"));
   manifest(base, { workspaces: ["apps/*", "apps/outside"], scripts: { build: "touch SHOULD_NOT_EXIST" } });
-  assert.deepEqual(discoverProjects(base).targets.map((item) => item.project).sort(), [".", "apps/server", "apps/web"]);
+  assert.deepEqual(discoverProjects(base).targets.map((item) => item.project).sort(), [".", "apps/server", "apps/web", "other"]);
   assert.throws(() => readFileSync(join(base, "SHOULD_NOT_EXIST")), /ENOENT/u);
 });
 
@@ -45,7 +45,7 @@ test("pnpm and Cargo declarations stay separate and preserve project pins", (t) 
   mkdirSync(join(root, "apps/web"), { recursive: true });
   mkdirSync(join(root, "crates/api"), { recursive: true });
   manifest(root, { packageManager: "pnpm@11.3.0", scripts: { build: "pnpm --filter ui build" } });
-  manifest(join(root, "apps/web"), { scripts: { build: "tsc -b && vite build" } });
+  manifest(join(root, "apps/web"), { files: ["dist/"], scripts: { build: "tsc -b && vite build" } });
   writeFileSync(join(root, "pnpm-workspace.yaml"), "packages:\n  - 'apps/*'\n");
   writeFileSync(join(root, "mise.toml"), '[tools]\nnode = "24.14.0"\n');
   writeFileSync(join(root, "Cargo.toml"), '[workspace]\nmembers = [\n "crates/api",\n]\n');
@@ -58,24 +58,24 @@ test("pnpm and Cargo declarations stay separate and preserve project pins", (t) 
   assert.ok(targets.some((entry) => entry.adapter === "pnpm" && entry.project === "."));
 });
 
-test("prost inputs stay in scope and Tauri declares separate frontend and native outputs", (t) => {
+test("Cargo leaves build.rs to Cargo and Tauri does not require a particular JS hook or lockfile", (t) => {
   const root = fixture(t);
   for (const dir of ["core", "proto", "desktop/src-tauri"]) mkdirSync(join(root, dir), { recursive: true });
   writeFileSync(join(root, "core/Cargo.toml"), '[package]\nname = "core"\n');
   writeFileSync(join(root, "core/build.rs"), 'prost_build::Config::new().out_dir("src/protos").compile_protos(&["../proto/input.proto", "../../outside.proto"], &[]);');
   writeFileSync(join(root, "proto/input.proto"), 'syntax = "proto3";');
   writeFileSync(join(root, "desktop/src-tauri/Cargo.toml"), '[package]\nname = "desktop"\n');
-  writeFileSync(join(root, "desktop/pnpm-lock.yaml"), 'lockfileVersion: "9.0"\n');
-  manifest(join(root, "desktop"), { scripts: { tauri: "tauri" }, devDependencies: { "@tauri-apps/cli": "^2" } });
-  writeFileSync(join(root, "desktop/src-tauri/tauri.conf.json"), JSON.stringify({ build: { beforeBuildCommand: "pnpm build", frontendDist: "../dist" } }));
+  manifest(join(root, "desktop"), { scripts: { "tauri:check": "tauri info" }, dependencies: { "@tauri-apps/cli": "^2" } });
+  writeFileSync(join(root, "desktop/src-tauri/Tauri.toml"), '[build]\nfrontendDist = "../assets"\nbeforeBuildCommand = "npm run generate"\n');
   const { targets } = discoverProjects(root);
   const cargo = targets.find((entry) => entry.project === "core");
-  assert.equal(cargo?.requirements.protoc, true);
-  assert.match(cargo?.blocked ?? "", /outside\.proto/u);
-  assert.ok(cargo?.outputs.includes("core/src/protos"));
+  assert.equal(cargo?.blocked, undefined);
+  assert.ok(!cargo?.outputs.includes("core/src/protos"));
   const tauri = targets.find((entry) => entry.adapter === "tauri");
-  assert.deepEqual(tauri?.outputs, ["desktop/dist", "desktop/src-tauri/target/debug/desktop"]);
-  assert.ok(tauri?.blocked);
+  assert.deepEqual(tauri?.outputs, ["desktop/assets", "desktop/src-tauri/target/debug/desktop"]);
+  assert.equal(tauri?.tauri?.manager, "npm");
+  assert.deepEqual(tauri?.install?.required, ["@tauri-apps/cli"]);
+  assert.ok(targets.some((entry) => entry.adapter === "npm" && entry.name === "tauri:check"));
 });
 
 test("output locks are symmetric, including canonical directories shared by different scopes", () => {
@@ -84,6 +84,7 @@ test("output locks are symmetric, including canonical directories shared by diff
   assert.equal(conflicts({ root: "/a", locks: ["/a/out"] }, { root: "/a/out", locks: ["/a/out/nested"] }), true);
   assert.equal(matchesVersion("v24.14.0", ">=22 <25"), true);
   assert.equal(matchesVersion("11.20.1", "11.20.0"), false);
+  assert.equal(matchesVersion("v22.3.1", "20.0.0 - 20.9.0 || 22.x"), true);
 });
 
 test("workspace ownership, queued conflict, independent output, parent/child stop and failed retry", { skip: process.platform === "win32", timeout: 18_000 }, async (t) => {
@@ -131,7 +132,7 @@ test("workspace ownership, queued conflict, independent output, parent/child sto
   await until(() => workbench.detail(a, one.id, 0), (d) => d.run.status === "stopped");
   const success = await until(() => workbench.detail(b, two.id, 0), (d) => d.run.status === "success");
   assert.match(success.rows.map((r) => r.text).join(""), /DONE-B/u);
-  assert.deepEqual(success.artifacts, [{ path: "built.txt", state: "new" }]);
+  assert.deepEqual(success.artifacts.filter((item) => item.state !== "missing"), [{ path: "built.txt", state: "new" }]);
   const failed = submit(a, { ...ca, target: target("fail") });
   const failure = await until(() => workbench.detail(a, failed.id, 0), (d) => d.run.status === "failed");
   assert.equal(failure.truncated, true);
