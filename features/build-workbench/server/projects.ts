@@ -4,14 +4,14 @@ import JSON5 from "json5";
 import { minimatch } from "minimatch";
 import { parse as yaml } from "yaml";
 import { WORKSPACE_TARGET_LIMIT, type Target } from "../shared/contracts";
-import { at, digest, projectDirs, readText, resolveWithin } from "./paths";
+import { at, digest, inside, parentDirectories, projectDirs, readDeclaration, readText, resolveWithin } from "./paths";
 import { dependencyPaths, rustPin, str, strings, table, toml } from "./rust-projects";
 import { discoverCmake } from "./cmake";
 import { discoverGradle, discoverXcode } from "./native-projects";
 import type { Gradle, Xcode } from "./native-projects";
 import { misePin } from "./mise";
 
-type JsRequirements = { node?: string; manager?: string; managerEngine?: string; miseNode?: string };
+type JsRequirements = { node?: string; manager?: string; managerEngine?: string; miseNode?: string; miseManager?: string };
 export type ProjectTarget = Target & {
   cwd: string;
   stamp: string;
@@ -72,7 +72,7 @@ function packageTools(root: string, project: string, installRoot: string, data: 
   const nodePin = pin("node");
   const declared = version(data.packageManager) ?? version(parent.packageManager);
   if (declared && !/^(?:npm|pnpm)@/u.test(declared)) return;
-  const pnpm = read(at(installRoot, "pnpm-workspace.yaml"));
+  const pnpm = readText(root, at(installRoot, "pnpm-workspace.yaml"));
   const pnpmLock = lock("pnpm-lock.yaml");
   const npmLock = lock("npm-shrinkwrap.json") ?? lock("package-lock.json");
   if ([data, parent].some((pkg) => object(pkg.devEngines).packageManager !== undefined)) {
@@ -82,6 +82,7 @@ function packageTools(root: string, project: string, installRoot: string, data: 
   const manager = owner?.manager ?? explicit ?? (pnpm !== undefined || pnpmLock ? "pnpm" : "npm");
   if (explicit && explicit !== manager) throw new Error(`packageManager 声明与 ${installRoot} 的 ${manager} 工作区冲突`);
   if (!owner && !explicit && pnpmLock && npmLock) throw new Error("同时找到 npm 和 pnpm 锁文件，请用 packageManager 明确选择");
+  assertJsBoundary(root, installRoot, manager, !!owner);
   const installConfig = readText(root, at(installRoot, ".npmrc"));
   const memberConfig = project === installRoot ? undefined : readText(root, at(project, ".npmrc"));
   const workspaceConfig = pnpm === undefined ? {} : object(yaml(pnpm, { maxAliasCount: 0 }));
@@ -98,9 +99,45 @@ function packageTools(root: string, project: string, installRoot: string, data: 
     stamp: [declared, pnpm, pnpmLock, npmLock, installConfig, memberConfig, nodePin, pin(manager)],
     requirements: { node: version(object(data.engines).node) ?? version(object(parent.engines).node), miseNode: nodePin,
       managerEngine: version(object(data.engines)[manager]) ?? version(object(parent.engines)[manager]),
-      manager: declared?.split("@")[1]?.split("+sha")[0] ?? pin(manager),
+      manager: declared?.split("@")[1]?.split("+sha")[0], miseManager: pin(manager),
       install: project === installRoot ? undefined : { node: version(object(parent.engines).node), managerEngine: version(object(parent.engines)[manager]),
-        miseNode: misePin(installRoot, "node", read), manager: version(parent.packageManager)?.split("@")[1]?.split("+sha")[0] ?? misePin(installRoot, manager, read) } } } as const;
+        miseNode: misePin(installRoot, "node", read), manager: version(parent.packageManager)?.split("@")[1]?.split("+sha")[0], miseManager: misePin(installRoot, manager, read) } } } as const;
+}
+
+function assertJsBoundary(root: string, installRoot: string, manager: "npm" | "pnpm", declaredRoot: boolean) {
+  // Check ancestors of the actual installation directory, not just the directories scanned for targets.
+  const directory = resolveWithin(root, installRoot);
+  if (manager === "pnpm" && declaredRoot) return; // pnpm uses the nearest workspace declaration.
+  for (const parent of parentDirectories(directory)) {
+    const external = !inside(root, parent);
+    const read = (name: string) => external ? readDeclaration(parent, name) : readText(root, at(relative(root, parent) || ".", name));
+    const rel = relative(parent, directory);
+    if (manager === "npm") {
+      const pnpm = read("pnpm-workspace.yaml");
+      if (pnpm !== undefined) {
+        const declaration: unknown = yaml(pnpm, { maxAliasCount: 0 });
+        const config = object(declaration);
+        const patterns = Object.hasOwn(config, "packages") ? config.packages : [];
+        if ((declaration !== null && (typeof declaration !== "object" || Array.isArray(declaration))) || !validatedPatterns(patterns) ||
+            patternIncludes(rel, workspacePatterns(patterns, "pnpm"), "pnpm")) {
+          throw new Error(`上级 pnpm 工作区 ${parent} 可能包含该包；请打开该目录确认包归属，不改用 npm 运行`);
+        }
+      }
+      const text = read("package.json");
+      const data = text === undefined ? {} : json(text);
+      const patterns = Array.isArray(data.workspaces) ? data.workspaces : object(data.workspaces).packages;
+      if (data.workspaces === undefined) continue;
+      if (!validatedPatterns(patterns) || patternIncludes(rel, workspacePatterns(patterns, "npm"), "npm")) {
+        throw new Error(`npm 可能将包并入上级工作区 ${parent}；请打开该目录确认安装根`);
+      }
+    } else {
+      const text = read("pnpm-workspace.yaml");
+      if (text === undefined) continue;
+      // Even an excluded package can inherit pnpm workspace settings. Do not
+      // run a standalone pnpm install inside an unresolved ancestor workspace.
+      throw new Error(`pnpm 发现上级工作区 ${parent}，无法确认独立安装范围；请打开该目录确认包归属`);
+    }
+  }
 }
 
 export function discoverProjects(root: string): Discovery {
@@ -145,13 +182,13 @@ export function discoverProjects(root: string): Discovery {
         manager = "pnpm";
         const config: unknown = yaml(pnpm, { maxAliasCount: 0 });
         if (config !== null && (typeof config !== "object" || Array.isArray(config))) throw new Error("pnpm 工作区声明不是映射");
-        const data = object(config);
-        patterns = Object.hasOwn(data, "packages") ? data.packages : [];
+        const pnpmConfig = object(config);
+        patterns = Object.hasOwn(pnpmConfig, "packages") ? pnpmConfig.packages : [];
         if (version(data.packageManager)?.startsWith("npm@")) throw new Error("pnpm 工作区与 npm packageManager 声明冲突");
       } else if (version(data.packageManager)?.startsWith("pnpm@") && fromNpm !== undefined) {
         throw new Error("pnpm 工作区需用 pnpm-workspace.yaml 声明成员");
       }
-      if ((patterns !== undefined || data.workspaces !== undefined) && (!Array.isArray(patterns) || patterns.length > 64 || patterns.some((p) => !supportedPattern(p)))) {
+      if ((patterns !== undefined || data.workspaces !== undefined) && !validatedPatterns(patterns)) {
         throw new Error("工作区成员模式无法确认");
       }
     } catch (e) { issue = `${pnpmPath}：${(e as Error).message}`; notices.push(issue); }
@@ -220,6 +257,14 @@ function observePath(root: string, base: string, path: string | undefined) {
   catch { return undefined; }
 }
 
+function cargoExcluded(workspace: Record<string, unknown>, rel: string) {
+  const exclusions = strings(workspace.exclude).map((glob) => glob.replace(/^\.\//u, "").replace(/\/$/u, ""));
+  const parts = rel.split("/");
+  return parts.some((_, i) => exclusions.some((glob) => minimatch(parts.slice(0, i + 1).join("/"), glob, { nobrace: true, noext: true, nonegate: true })));
+}
+
+type CargoOwner = { cwd: string } | { issue: string };
+
 function discoverCargo(root: string, dirs: string[], read: Read, notices: string[], targets: ProjectTarget[]) {
   const projects = new Map<string, { text: string; data: ReturnType<typeof toml> }>();
   function load(dir: string) {
@@ -248,28 +293,59 @@ function discoverCargo(root: string, dirs: string[], read: Read, notices: string
       if (seen.has(member)) continue;
       seen.add(member);
       const entry = load(member);
-      if (!entry || (member !== dir && entry.data.workspace)) continue;
+      if (!entry || (member !== dir && (entry.data.workspace || cargoExcluded(workspace, relative(resolve(root, dir), resolve(root, member)))))) continue;
       workspaces.set(member, dir);
       for (const dep of dependencyPaths(entry.data, workspace)) {
         const next = observePath(root, dep.startsWith("\0") ? dir : member, dep.replace(/^\0/u, ""));
-        if (!next || (dir !== "." && !next.startsWith(dir + "/")) || exclude.some((glob) => minimatch(relative(resolve(root, dir), resolve(root, next)), glob, { nobrace: true, noext: true }))) continue;
+        if (!next || (dir !== "." && !next.startsWith(dir + "/")) || cargoExcluded(workspace, relative(resolve(root, dir), resolve(root, next)))) continue;
         if (!seen.has(next) && pending.length < 1024) pending.push(next);
       }
     }
     if (pending.length >= 256) notices.push(`${dir}：Cargo 成员扫描达到上限`);
   }
+  const ownership = new Map<string, CargoOwner>();
+  const outsideManifests = new Map<string, string | undefined>();
   for (const [project, { text, data }] of projects) {
     const source = at(project, "Cargo.toml");
     const pkg = table(data.package);
     const name = str(pkg.name);
     if (data.package && (!name || !/^[\w-]+$/u.test(name))) { notices.push(source + "：未读取到有效的 [package].name"); continue; }
     if (!name && !data.workspace) continue;
-    const explicit = str(pkg.workspace);
-    const owner = explicit ? observePath(root, project, explicit) ?? (resolve(root, project, explicit) === root ? "." : undefined) : workspaces.get(project);
-    if (explicit && (!owner || !projects.get(owner)?.data.workspace || workspaces.get(project) !== owner)) {
-      notices.push(`${source}：无法确认 package.workspace 的成员归属`); continue;
+    let cwd: string;
+    try {
+      const directory = resolveWithin(root, project);
+      if (data.workspace) cwd = project;
+      else if (pkg.workspace !== undefined) {
+        const explicit = str(pkg.workspace);
+        if (!explicit) throw new Error("无法确认 package.workspace 的成员归属");
+        const parent = resolve(directory, explicit);
+        if (!inside(root, parent)) throw new Error(`Cargo 工作区位于当前范围之外，请打开父工作区 ${parent}`);
+        cwd = relative(root, parent) || ".";
+        resolveWithin(root, cwd);
+        if (!projects.get(cwd)?.data.workspace || workspaces.get(project) !== cwd) throw new Error("无法确认 package.workspace 的成员归属");
+      } else {
+        cwd = project;
+        for (const parent of parentDirectories(directory)) {
+          const local = inside(root, parent);
+          const parentKey = relative(root, parent) || ".";
+          if (!local && !outsideManifests.has(parent)) outsideManifests.set(parent, readDeclaration(parent, "Cargo.toml"));
+          const external = outsideManifests.get(parent);
+          const declaration = local ? load(parentKey)?.data : external === undefined ? undefined : toml(external);
+          if (!declaration?.workspace) continue;
+          if (cargoExcluded(table(declaration.workspace), relative(parent, directory))) break;
+          if (!local) throw new Error(`Cargo 工作区位于当前范围之外，请打开父工作区 ${parent}`);
+          if (workspaces.get(project) !== parentKey) throw new Error(`当前包位于 ${parentKey} 的 Cargo 工作区下，但未确认是成员；请检查 members、路径依赖和 exclude`);
+          cwd = parentKey;
+          break;
+        }
+      }
+    } catch (error) {
+      const issue = (error as Error).message;
+      ownership.set(project, { issue });
+      notices.push(`${source}：${issue}`);
+      continue;
     }
-    const cwd = owner ?? project;
+    ownership.set(project, { cwd });
     const ws = table(projects.get(cwd)?.data.workspace);
     const pin = rustPin(root, cwd);
     const rust = table(pkg["rust-version"]).workspace === true ? str(table(ws.package)["rust-version"]) : str(pkg["rust-version"]);
@@ -278,10 +354,10 @@ function discoverCargo(root: string, dirs: string[], read: Read, notices: string
     if (name) targets.push({ ...base, name, cargo: { name, workspace: cwd } });
     if (data.workspace) targets.push({ ...base, name: "build (workspace)", cargo: { workspace: cwd } });
   }
-  return workspaces;
+  return ownership;
 }
 
-function discoverTauri(root: string, dirs: string[], jsRoots: Map<string, JsOwner>, cargoWorkspaces: Map<string, string>, read: Read, notices: string[], targets: ProjectTarget[]) {
+function discoverTauri(root: string, dirs: string[], jsRoots: Map<string, JsOwner>, cargoWorkspaces: Map<string, CargoOwner>, read: Read, notices: string[], targets: ProjectTarget[]) {
   const apps = dirs.flatMap((native) => {
     const entries = ["tauri.conf.json", "tauri.conf.json5", "Tauri.toml"].map((name) => at(native, name))
       .flatMap((source) => { const conf = read(source); return conf === undefined ? [] : [{ source, conf }]; });
@@ -293,32 +369,35 @@ function discoverTauri(root: string, dirs: string[], jsRoots: Map<string, JsOwne
     try {
       // Explicit CLI bindings distinguish sibling Rust apps, regardless of directory name.
       if (formats !== 1) throw new Error("同一 Tauri Rust 目录存在多个基础配置，无法确认绑定");
-      const pkgText = read(at(project, "package.json"));
-      if (!pkgText && dirs.some((dir) => dir !== project && (project === "." || dir.startsWith(project + "/")) && read(at(dir, "package.json")) !== undefined)) {
-        throw new Error("Tauri 前端目录没有 package.json，但下层存在候选；无法确认 CLI 会选择哪个前端");
-      }
+      const nearby = dirs.filter((dir) => dir !== project && (project === "." || dir.startsWith(project + "/")) && read(at(dir, "package.json")) !== undefined);
+      const parentPackage = read(at(project, "package.json"));
+      const frontend = parentPackage !== undefined || !nearby.length ? project : nearby.length === 1 && nearby[0] === native ? native : undefined;
+      if (!frontend) throw new Error("Tauri 前端目录存在多个或非同目录候选，无法确认 CLI 绑定");
+      const pkgText = frontend === project ? parentPackage : read(at(frontend, "package.json"));
       const pkg = pkgText === undefined ? {} : json(pkgText);
       const confData = tauriConfig(source, conf);
       const frontendOutput = observePath(root, native, str(table(confData.build).frontendDist));
       const cargo = table(toml(manifest).package);
-      const owner = jsRoots.get(project);
-      const installRoot = owner && "cwd" in owner ? owner.cwd : project;
-      const parentText = project === installRoot ? pkgText : read(at(installRoot, "package.json"));
+      const owner = jsRoots.get(frontend);
+      const installRoot = owner && "cwd" in owner ? owner.cwd : frontend;
+      const parentText = frontend === installRoot ? pkgText : read(at(installRoot, "package.json"));
       const parent = parentText === undefined ? {} : json(parentText);
       const dependency = (data: Record<string, unknown>) => object(data.devDependencies)["@tauri-apps/cli"] ?? object(data.dependencies)["@tauri-apps/cli"];
       const declaredCli = pkgText !== undefined && !!(dependency(pkg) || dependency(parent));
-      const js = declaredCli ? packageTools(root, project, installRoot, pkg, parent, read, owner) : undefined;
+      const js = declaredCli ? packageTools(root, frontend, installRoot, pkg, parent, read, owner) : undefined;
       if (declaredCli && !js) throw new Error("无法确认所声明的 Tauri JS CLI 使用 npm 或 pnpm");
       const cli = js ? true : undefined;
-      const workspace = cargoWorkspaces.get(native) ?? native;
+      const ownership = cargoWorkspaces.get(native);
+      if (!ownership || "issue" in ownership) throw new Error(ownership?.issue ?? "无法确认 Tauri 应用的 Cargo 工作区归属");
+      const workspace = ownership.cwd;
       const wsText = workspace === native ? manifest : read(at(workspace, "Cargo.toml"));
       const ws = wsText ? table(toml(wsText).workspace) : {};
       const pin = rustPin(root, native);
       const rust = { rust: table(cargo["rust-version"]).workspace === true ? str(table(ws.package)["rust-version"]) : str(cargo["rust-version"]), ...pin };
       const outputs = frontendOutput ? [frontendOutput] : [];
-      targets.push({ adapter: "tauri", project: native, source, cwd: project, name: "build (Debug, no bundle)",
-        stamp: digest(JSON.stringify([conf, manifest, wsText, pkgText, parentText, js?.stamp, pin])),
-        tauri: { cli, manager: js?.manager, workspace, frontend: project }, install: js?.install, requirements: { ...js?.requirements, ...rust }, outputs });
+      targets.push({ adapter: "tauri", project: native, source, cwd: frontend, name: "build (Debug, no bundle)",
+        stamp: digest(JSON.stringify([conf, manifest, wsText, frontend, pkgText, parentText, js?.stamp, pin])),
+        tauri: { cli, manager: js?.manager, workspace, frontend }, install: js?.install, requirements: { ...js?.requirements, ...rust }, outputs });
     } catch (error) { notices.push(`${source}：${(error as Error).message}`); }
   }
 }
@@ -334,10 +413,10 @@ function supportedPattern(p: unknown): p is string {
     !p.replace(/^!+/u, "").replace(/^\.?\/+/u, "").split("/").some((part) => part === ".." || part.startsWith("."));
 }
 
-export function declaredDirs(root: string, raw: unknown, notices: string[], manager: "npm" | "pnpm" | "cargo" = "cargo") {
-  if (!Array.isArray(raw)) return [];
-  const patterns = raw.slice(0, 64).filter(supportedPattern);
-  let series = patterns;
+const validatedPatterns = (raw: unknown): raw is string[] => Array.isArray(raw) && raw.length <= 64 && raw.every(supportedPattern);
+type WorkspaceManager = "npm" | "pnpm" | "cargo";
+
+function workspacePatterns(patterns: string[], manager: WorkspaceManager) {
   if (manager === "npm") {
     const positives: string[] = [];
     let negatives: string[] = [];
@@ -350,8 +429,27 @@ export function declaredDirs(root: string, raw: unknown, notices: string[], mana
         positives.push(pattern);
       }
     }
-    series = [...positives, ...negatives.map((p) => "!" + p)];
-  } else if (manager === "pnpm") series = [...patterns.filter((p) => !p.startsWith("!")), ...patterns.filter((p) => p.startsWith("!"))];
+    return [...positives, ...negatives.map((p) => "!" + p)];
+  }
+  return manager === "pnpm" ? [...patterns.filter((p) => !p.startsWith("!")), ...patterns.filter((p) => p.startsWith("!"))] : patterns;
+}
+
+const normalizePattern = (p: string) => p.replace(/^\.\//u, "").replace(/\/$/u, "");
+const matchesPattern = (path: string, pattern: string, manager: WorkspaceManager) =>
+  minimatch(path, pattern, { nonegate: true, nocomment: true, nobrace: manager === "cargo", noext: manager === "cargo" });
+
+function patternIncludes(path: string, patterns: string[], manager: WorkspaceManager) {
+  let included = false;
+  for (const raw of patterns) {
+    const excluded = raw.startsWith("!");
+    if (matchesPattern(path, normalizePattern(excluded ? raw.slice(1) : raw), manager)) included = !excluded;
+  }
+  return included;
+}
+
+export function declaredDirs(root: string, raw: unknown, notices: string[], manager: WorkspaceManager = "cargo") {
+  if (!Array.isArray(raw)) return [];
+  const series = workspacePatterns(raw.slice(0, 64).filter(supportedPattern), manager);
   const { dirs, limited } = scanDeclared(root, series, manager);
   if (limited) notices.push("项目声明扫描达到上限（深度 4、目录 256、条目 4096）");
   return dirs;
@@ -363,9 +461,9 @@ function scanDeclared(root: string, patterns: string[], manager: "npm" | "pnpm" 
   const selected = new Set<string>();
   for (const raw of patterns) {
     const excluded = raw.startsWith("!");
-    const pattern = (excluded ? raw.slice(1) : raw).replace(/^\.\//u, "").replace(/\/$/u, "");
+    const pattern = normalizePattern(excluded ? raw.slice(1) : raw);
     if (!pattern || pattern.split("/").some((s) => !s || s === ".." || s.startsWith("."))) continue;
-    const matches = scan.dirs.filter((p) => p !== "." && minimatch(p, pattern, { nonegate: true, nocomment: true, nobrace: manager === "cargo", noext: manager === "cargo" }));
+    const matches = scan.dirs.filter((p) => p !== "." && matchesPattern(p, pattern, manager));
     if (!/[?*\[\]{}()]/u.test(pattern)) {
       try { if (lstatSync(resolveWithin(root, pattern)).isDirectory()) matches.push(pattern); }
       catch { /* The declaration may refer to an absent or external package. */ }

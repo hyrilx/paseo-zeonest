@@ -32,13 +32,16 @@ test("CMake targets require a fresh explicit File API result and stay in their b
   put(`${reply}/index-0000.json`, { reply: { "codemodel-v2": { jsonFile: "codemodel.json" }, "cmakeFiles-v1": { jsonFile: "cmake-files.json" } } });
   put(`${reply}/cmake-files.json`, { inputs: [{ path: "options.cmake" }] });
   put(`${reply}/codemodel.json`, { configurations: [{ name: "Debug", targets: [
-    { name: "example", jsonFile: "example.json" }, { name: "-bad", jsonFile: "example.json" },
-    { name: "utility", jsonFile: "utility.json" }, { name: "outside", jsonFile: "../outside.json" },
-  ] }, { name: "Release", targets: [{ name: "example", jsonFile: "release.json" }] }] });
-  put(`${reply}/release.json`, { type: "EXECUTABLE", artifacts: [{ path: "Release/example" }] });
-  put(`${reply}/example.json`, { type: "EXECUTABLE", artifacts: [{ path: "apps/example" }, { path: join(root, "outside") }, { path: "../outside" }] });
-  put(`${reply}/utility.json`, { type: "UTILITY" });
+    { id: "example-id", name: "example", jsonFile: "example.json" },
+    { id: "utility-id", name: "utility", jsonFile: "utility.json" },
+  ] }, { name: "Release", targets: [{ id: "example-id", name: "example", jsonFile: "release.json" }] }] });
+  put(`${reply}/release.json`, { id: "example-id", type: "EXECUTABLE", artifacts: [{ path: "Release/example" }] });
+  const debug = { id: "example-id", type: "EXECUTABLE", artifacts: [{ path: "apps/example" }, { path: join(root, "outside") }, { path: "../outside" }] };
+  put(`${reply}/example.json`, { ...debug, dependencies: [{ id: "unreported" }] });
+  put(`${reply}/utility.json`, { id: "utility-id", type: "UTILITY" });
   assert.deepEqual(discovery().map((t) => t.name), ["configure"]);
+  assert.throws(() => finishCmake(root, ".", configure.dir, dir, configure.stamp, "chosen-tool"), /未报告依赖目标/u);
+  put(`${reply}/example.json`, debug);
   finishCmake(root, ".", configure.dir, dir, configure.stamp, "chosen-tool");
   const [, example] = discovery();
   assert.deepEqual(discovery().map((t) => t.name), ["configure", "example"]);
@@ -54,7 +57,7 @@ test("CMake targets require a fresh explicit File API result and stay in their b
   assert.deepEqual(discovery().map((t) => t.name), ["configure"]);
 });
 
-test("CMake rechecks relative and absolute external inputs and locks shared writes by configuration", { skip: process.platform === "win32" }, async (t) => {
+test("CMake rechecks external inputs and locks transitive dependency writes per configuration",  { skip: process.platform === "win32" }, async (t) => {
   const base = workspaceRoot(mkdtempSync(join(tmpdir(), "zeonest-cmake-external-")));
   t.after(() => rmSync(base, { recursive: true, force: true }));
   const put = (path: string, value: string, mode = 0o600) => {
@@ -70,7 +73,7 @@ const args = process.argv.slice(2), root = process.cwd();
 const base = path.dirname(root);
 if (args[0] === '--version') console.log('cmake version 4.5.1');
 else if (args[0] === '--build') {
-  const shared = path.join(base, 'shared', 'portable');
+  const shared = path.join(base, 'shared', 'libcore.a');
   fs.mkdirSync(path.dirname(shared), { recursive:true });
   fs.writeFileSync(shared, 'output');
   setTimeout(() => {}, 500);
@@ -83,9 +86,12 @@ else if (args[0] === '--build') {
   json('index-0001',{reply:{'codemodel-v2':{jsonFile:'model.json'},'cmakeFiles-v1':{jsonFile:'files.json'}}});
   fs.writeFileSync(path.join(out,'generated.cmake'), 'generated');
   json('files',{inputs:[{path:'../layout.cmake',isExternal:true},{path:path.join(base,'named.cmake'),isExternal:true},{path:path.relative(root,path.join(out,'generated.cmake')),isGenerated:true}]});
-  json('model',{configurations:['Debug','Release'].map((name) => ({name,targets:[{name:'portable',jsonFile:name+'.json'}]}))});
-  json('Debug',{type:'EXECUTABLE',artifacts:[{path:'Debug/portable'}]});
-  json('Release',{type:'EXECUTABLE',artifacts:[{path:path.join(base,'shared','portable')}]});
+  json('model',{configurations:['Debug','Release'].map((name) => ({name,targets:[{name:'portable',id:'app::id',jsonFile:name+'.json'},{name:'generated',id:'utility::id',jsonFile:name+'-utility.json'},{name:'core',id:'lib::id',jsonFile:name+'-core.json'}]}))});
+  for (const name of ['Debug','Release']) {
+    json(name,{id:'app::id',type:'EXECUTABLE',artifacts:[{path:name+'/portable'}],dependencies:[{id:'utility::id'}]});
+    json(name+'-utility',{id:'utility::id',type:'UTILITY',dependencies:[{id:'lib::id'}]});
+    json(name+'-core',{id:'lib::id',type:'STATIC_LIBRARY',artifacts:[{path:name==='Release'?path.join(base,'shared','libcore.a'):'Debug/libcore.a'}]});
+  }
 }
 `, 0o700);
   for (const id of ["left", "right"]) put(`${id}/CMakeLists.txt`, "cmake_minimum_required(VERSION 3.20)\nproject(Portable)\n");
@@ -116,7 +122,8 @@ else if (args[0] === '--build') {
   }
   const defaultPlan = w.preview(left, build(left, []));
   assert.ok(!defaultPlan.command.argv.includes("--config"));
-  assert.deepEqual(w.discover(left).targets.find(({ name }) => name === "portable")?.outputs, []);
+  assert.ok(w.discover(left).targets.find(({ name }) => name === "portable")?.outputs[0]?.endsWith("/Release/portable"));
+  assert.deepEqual(w.discover(left).targets.find(({ name }) => name === "core")?.outputs, []);
   const explicit = w.preview(right, build(right, ["--config", "Release"]));
   assert.notEqual(defaultPlan.command.argv[2], explicit.command.argv[2]);
   assert.match(discoverProjects(left.root).targets.find(({ name }) => name === "portable")?.cmake?.configurations?.Debug?.[0] ?? "", /Debug\/portable/u);
@@ -124,7 +131,7 @@ else if (args[0] === '--build') {
   const second = start(right, build(right, ["--config", "Release"]));
   assert.equal(first.status, "running");
   assert.equal(second.status, "queued");
-  assert.deepEqual((await settle(left, first.id)).artifacts, []);
+  assert.ok((await settle(left, first.id)).artifacts.every(({ path }) => path.endsWith("/Release/portable")));
   assert.equal((await settle(right, second.id)).run.status, "success");
   for (const input of ["layout.cmake", "named.cmake"]) {
     put(input, `modified ${input}`);

@@ -94,10 +94,113 @@ test("JavaScript tool verification checks installation root and member independe
     writeMember(node);
     assert.match((await w.verify(workspace, selection())).version ?? "", new RegExp(version.replaceAll(".", "\\."), "u"));
     put(".npmrc", `use-node-version=1.2.3\n`);
-    await assert.rejects(() => w.verify(workspace, selection()), /无法验证包管理器运行时配置/u);
-    assert.throws(() => w.preview(workspace, selection()), /无法验证包管理器运行时配置/u);
+    await assert.rejects(() => w.verify(workspace, selection()), /无法验证所选运行时/u);
+    assert.throws(() => w.preview(workspace, selection()), /无法验证所选运行时/u);
     rmSync(join(root, ".npmrc"));
   }
+});
+
+test("npm/pnpm refuse out-of-scope installation roots and scope-changing switches", { skip: process.platform === "win32" }, async (t) => {
+  const { root, put } = fixture(t);
+  const env = { HOME: root, PATH: [join(root, "bin"), dirname(process.execPath)].join(delimiter) };
+  const w = new Workbench(join(root, "state"), env);
+  t.after(() => w.close());
+  const scripts = { build: "fixture" };
+  for (const manager of ["npm", "pnpm"] as const) {
+    const mono = `${manager}-mono`;
+    put(`bin/${manager}`, manager === "npm" ? `console.log(JSON.stringify({node:process.versions.node,npm:'11.20.0'}))` : "console.log('12.21.0')", true);
+    put(`${mono}/package.json`, { name: "owner", ...(manager === "npm" ? { workspaces: ["packages/*"] } : {}) });
+    if (manager === "pnpm") put(`${mono}/pnpm-workspace.yaml`, 'packages: ["packages/*"]\n');
+    for (const name of ["alpha", "beta"]) put(`${mono}/packages/${name}/package.json`, { name, scripts, packageManager: `${manager}@${manager === "npm" ? "11" : "12"}` });
+    const workspace = { id: mono, root: join(root, mono) };
+    const child = { ...workspace, id: "child", root: join(workspace.root, "packages/alpha") };
+    assert.ok(!w.discover(child).targets.some(({ name }) => name === "build"));
+    assert.ok(w.discover(child).notices.some((notice) => notice.includes("上级工作区")));
+    // Native membership also applies when the leaf has no manager hint.
+    put(`${mono}/packages/alpha/package.json`, { name: "alpha", scripts });
+    assert.ok(!w.discover(child).targets.some(({ name }) => name === "build"));
+    assert.ok(w.discover(child).notices.some((notice) => notice.includes("请打开")));
+    const target = { adapter: manager, project: "packages/alpha", name: "build" };
+    const selected = config(w, workspace, target);
+    put(`${mono}/.npmrc`, "audit=false\n");
+    const { command } = w.preview(workspace, selected);
+    assert.equal(command.cwd, "packages/alpha");
+    assert.deepEqual(command.preparation?.map(({ cwd }) => cwd), ["."]);
+    const version = await w.verify(workspace, selected);
+    assert.ok(version.version);
+    put(`${mono}/.npmrc`, manager === "npm" ? "workspace[]=beta\naudit=false\n" : "lockfile-dir=../elsewhere\n");
+    assert.throws(() => w.preview(workspace, selected), /可改变.*执行范围/u);
+    await assert.rejects(() => w.verify(workspace, selected), /可改变.*执行范围/u);
+    const envOnly = new Workbench(join(root, `${mono}-env`), { ...env, NPM_CONFIG_WORKSPACE: "beta" });
+    t.after(() => envOnly.close());
+    rmSync(join(workspace.root, ".npmrc"));
+    if (manager === "npm") assert.throws(() => envOnly.preview(workspace, selected), /宿主环境.*workspace/u);
+  }
+  put("npm-mono/standalone/package.json", { name: "standalone", scripts });
+  const standalone = { id: "standalone", root: join(root, "npm-mono/standalone") };
+  assert.equal(w.discover(standalone).targets.find(({ name }) => name === "build")?.project, ".");
+});
+
+test("mise TOML versions constrain both Node and the manager; unsupported declarations are diagnosed", { skip: process.platform === "win32" }, async (t) => {
+  const { root, put } = fixture(t);
+  const nodePath = put("bin/node", "console.log('v26.1.0');", true);
+  const npmPath = put("bin/npm", "console.log(JSON.stringify({node:'26.1.0',npm:'11.20.0'}));", true);
+  put("project/package.json", { name: "sample", scripts: { build: "fixture" }, packageManager: "npm@11.20.0" });
+  const pin = (entry: string) => put("project/.mise.toml", `[tools]\n${entry}\n`);
+  const ws = { id: "mise", root: join(root, "project") };
+  const w = new Workbench(join(root, "state"), { HOME: root, PATH: join(root, "bin") });
+  t.after(() => w.close());
+  const select = () => {
+    const target = { adapter: "npm", project: ".", name: "build" } as const;
+    const choice = w.tools(ws, target).candidates.find(({ paths }) => paths.includes(nodePath) && paths.includes(npmPath));
+    assert.ok(choice);
+    return config(w, ws, target, choice.id);
+  };
+  pin('node={version="22"}');
+  await assert.rejects(() => w.verify(ws, select()), /需要 Node 22/u);
+  pin('node=["22", "26"]');
+  await assert.rejects(() => w.verify(ws, select()), /需要 Node 22/u);
+  pin('node=[{version="26"}, "22"]\nnpm="10"');
+  await assert.rejects(() => w.verify(ws, select()), /npm 10/u);
+  pin('node="lts"');
+  await assert.rejects(() => w.verify(ws, select()), /需要 Node lts/u);
+  pin('node={other="22"}');
+  assert.ok(!w.discover(ws).targets.some(({ name }) => name === "build"));
+  assert.ok(w.discover(ws).notices.some((note) => /无法确认 mise 的 node 声明/u.test(note)));
+  pin('node={version="26"}\nnpm="11"');
+  assert.match((await w.verify(ws, select())).version ?? "", /Node v26\.1\.0/u);
+});
+
+test("Tauri accepts a unique same-directory front end without a parent package", (t) => {
+  const { root, put } = fixture(t);
+  put("desktop/native/Cargo.toml", '[package]\nname="desktop"\n');
+  put("desktop/native/tauri.conf.json", {});
+  put("desktop/native/package.json", { name: "web", devDependencies: { "@tauri-apps/cli": "^2" } });
+  const match = discoverProjects(root).targets.find(({ adapter }) => adapter === "tauri");
+  assert.equal(match?.cwd, "desktop/native");
+  assert.equal(match?.tauri?.frontend, "desktop/native");
+  assert.equal(match?.install?.cwd, "desktop/native");
+  put("desktop/side/package.json", { name: "side" });
+  assert.ok(!discoverProjects(root).targets.some(({ adapter }) => adapter === "tauri"));
+});
+
+test("Cargo rejects external owners and nonmembers, but allows explicitly excluded and independent roots", (t) => {
+  const { root, put } = fixture(t);
+  put("mono/Cargo.toml", '[workspace]\nmembers=["left","right"]\nexclude=["excluded"]\n');
+  for (const name of ["left", "right", "unlisted", "excluded/leaf", "independent"]) {
+    put(`mono/${name}/Cargo.toml`, `[package]\nname="${name.split('/').at(-1)}"\n${name === "independent" ? "[workspace]\n" : ""}`);
+  }
+  put("mono/right/tauri.conf.json", "{}");
+  const full = discoverProjects(join(root, "mono"));
+  for (const name of ["left", "right"]) assert.equal(full.targets.find((target) => target.adapter === "cargo" && target.name === name)?.cwd, ".");
+  assert.ok(!full.targets.some(({ name }) => name === "unlisted"));
+  assert.ok(full.notices.some((note) => /unlisted.*未确认是成员/u.test(note)));
+  for (const name of ["left", "right", "unlisted"]) {
+    const result = discoverProjects(join(root, "mono", name));
+    assert.ok(!result.targets.some(({ adapter }) => adapter === "cargo" || adapter === "tauri"));
+    assert.ok(result.notices.some((note) => note.includes("请打开父工作区")));
+  }
+  for (const name of ["excluded/leaf", "independent"]) assert.ok(discoverProjects(join(root, "mono", name)).targets.some(({ adapter }) => adapter === "cargo"));
 });
 
 test("Cargo implicit members inherit workspace context and path pin; external shared targets queue", { skip: process.platform === "win32" }, async (t) => {

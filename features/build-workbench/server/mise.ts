@@ -1,7 +1,7 @@
 import { accessSync, constants, opendirSync, realpathSync, statSync } from "node:fs";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
-import { array, literal, section } from "./manifests";
+import { parse } from "smol-toml";
 import { at } from "./paths";
 
 export function ancestors(project: string) {
@@ -13,10 +13,20 @@ export function misePin(project: string, name: string, read: (path: string) => s
   for (const dir of ancestors(project)) {
     for (const file of ["mise.local.toml", ".mise.local.toml", "mise.toml", ".mise.toml", ".config/mise.toml", ".config/mise/config.toml"]) {
       const text = read(at(dir, file));
-      if (!text) continue;
-      const tools = section(text, "tools");
-      const pin = literal(tools, name) ?? array(tools, name)[0];
-      if (pin) return pin;
+      if (text === undefined) continue;
+      const path = at(dir, file);
+      try {
+        const { tools } = parse(text);
+        if (tools === undefined) continue;
+        if (!tools || typeof tools !== "object" || Array.isArray(tools)) throw new Error("[tools] 必须是表");
+        if (!Object.hasOwn(tools, name)) continue;
+        const entry = (tools as Record<string, unknown>)[name];
+        const list = Array.isArray(entry) ? entry : [entry];
+        const pins = list.map((item) => typeof item === "string" ? item : item && typeof item === "object" ? (item as { version?: unknown }).version : undefined);
+        if (!pins.length || !pins.every((pin) => typeof pin === "string" && /^[\w.+*-][\w.+* -]{0,127}$/u.test(pin))) throw new Error("需声明可验证的版本字符串、版本数组或含 version 的表");
+        // mise puts the first version on PATH first; do not substitute later versions.
+        return pins[0] as string;
+      } catch (error) { throw new Error(`${path}：无法确认 mise 的 ${name} 声明（${(error as Error).message}）`); }
     }
   }
 }
@@ -45,9 +55,18 @@ export function autoInstallRisk(path: string) {
   catch { return true; }
 }
 
+const installs = (env: NodeJS.ProcessEnv) => join(env.MISE_DATA_DIR ?? join(env.XDG_DATA_HOME ?? join(env.HOME ?? homedir(), ".local/share"), "mise"), "installs");
+
+export function matchesInstalledAlias(name: string, alias: string, path: string, env: NodeJS.ProcessEnv) {
+  if (!/^[\w][\w.+-]*$/u.test(alias)) return false;
+  try {
+    const installed = realpathSync(join(installs(env), name, alias));
+    return statSync(installed).isDirectory() && realpathSync(path).startsWith(installed + "/");
+  } catch { return false; }
+}
+
 export function installedExecutables(name: string, env: NodeJS.ProcessEnv, preferred?: string) {
-  const data = env.MISE_DATA_DIR ?? join(env.XDG_DATA_HOME ?? join(env.HOME ?? homedir(), ".local/share"), "mise");
-  const root = join(data, "installs");
+  const root = installs(env);
   const sameName = join(root, name);
   const knownPackage = name === "protoc" ? join(root, "protobuf") : sameName;
   const candidates = new Map<string, string>();

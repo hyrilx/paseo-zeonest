@@ -86,7 +86,7 @@ function gradleInputs(root: string, project: string, settings: string) {
 export function discoverGradle(root: string, dirs: string[], notices: string[], targets: ProjectTarget[]) {
   for (const project of dirs) {
     try {
-      const names = ["settings.gradle.kts", "settings.gradle", "build.gradle.kts", "build.gradle"];
+      const names = ["settings.gradle", "settings.gradle.kts", "build.gradle", "build.gradle.kts"];
       const inputs = names.map((name) => readText(root, at(project, name)));
       const index = inputs.findIndex((value) => value !== undefined);
       if (index < 0) continue;
@@ -103,8 +103,9 @@ export function discoverGradle(root: string, dirs: string[], notices: string[], 
         gradle = { wrapper, jar };
       }
       const input = gradleInputs(root, project, inputs[0] ?? inputs[1] ?? "");
-      if (input.volatile) notices.push(`${source}：无法完整追踪构建逻辑；每次执行目标前需要新探测。`);
-      gradle.volatile = input.volatile || index >= 2;
+      const competingScripts = (inputs[0] !== undefined && inputs[1] !== undefined) || (inputs[2] !== undefined && inputs[3] !== undefined);
+      gradle.volatile = input.volatile || competingScripts || index >= 2;
+      if (gradle.volatile) notices.push(`${source}：无法完整追踪构建逻辑；每次执行目标前需要新探测。`);
       const miseJava = misePin(project, "java", (path) => readText(root, path));
       const stamp = digest(JSON.stringify([inputs, properties, input.files, miseJava]));
       targets.push({ adapter: "gradle", project, source, cwd: project, requirements: { miseJava }, stamp, gradle, name: "tasks --all", operation: "probe", outputs: [] });

@@ -30,7 +30,7 @@
 
 打开面板、切换配置、刷新静态目标只读文件，不启动项目进程。Cargo workspace 声明、npm/pnpm 包清单、CMake preset、Gradle 设置和 Xcode 工程可以给出候选。静态读取不能保证得出完整目标集：CMake configure、Gradle 任务枚举、Xcode scheme 枚举等命令要单独展示并经用户触发，返回工具确认的目标。刷新不会自动运行项目脚本、启动设备或补装工具。
 
-适配以技术栈的清单、工作区声明和工具查询为准。npm/pnpm 按各自的成员模式确定包管理器和安装根；pnpm 未声明 `packages` 时只包含根包，嵌套包归属不明时显示原因，不改用 npm 运行。Cargo 处理显式成员和根内路径依赖，以实际启动目录读取 Cargo 配置及 Rust 声明。Tauri 将 CLI、前端目录和 Rust 应用一一绑定；同一启动目录下存在多个无法分别定位的应用时提示歧义，不将它们当作不同的可执行目标。验收样本中的包名、模块名、插件、JDK/SDK 版本、依赖名和输出路径不作为通用判定条件。
+适配以技术栈的清单、工作区声明和工具查询为准。npm/pnpm 按各自的成员模式确定包管理器和安装根；pnpm 未声明 `packages` 时只包含根包，嵌套包归属不明时显示原因，不改用 npm 运行。所选 JS 包或 Cargo crate 归属上级 workspace 时，若其根不在当前工作区内，提示打开父目录，不从当前工作区启动。npm/pnpm 的包选择、安装根等覆盖若改变所选范围，拒绝执行并指出设置。Cargo 处理显式成员和根内路径依赖，以实际启动目录读取 Cargo 配置及 Rust 声明；原生会拒绝的非成员不作为独立 crate 运行。Tauri 将 CLI、前端目录和 Rust 应用一一绑定；同一启动目录下存在多个无法分别定位的应用时提示歧义，不将它们当作不同的可执行目标。验收样本中的包名、模块名、插件、JDK/SDK 版本、依赖名和输出路径不作为通用判定条件。
 
 Gradle 从 Groovy/Kotlin 入口调用原生任务枚举，Xcode 从工程或工作区查询 scheme。Gradle 探测与任务提交、出队启动核对同一工具和顺序一致的全局 argv；`--parallel`、`-Pchannel=prod` 等会改变项目配置。探测筛选只影响列表；`--tests`、`--args` 和 `--rerun` 只传给任务。声明或工具变化后重新探测。切换目标或子项目时清空临时选项和手填产物路径；可主动复制本工作区的探测选项或载入保存的配置。CMake 为不同工具、configure 参数和 preset 分开保存受管构建目录，只有匹配当前 File API 配置输入及生成结果的目标可运行。原生报告中的外部输入也要校验；读不到或超出范围时不接受结果。重新配置时撤下该入口的旧目标；成功后发布新配置的目标。
 
@@ -38,7 +38,7 @@ Gradle 逐行读取任务枚举，与面板滚动日志分开。任务可来自�
 
 Gradle 共享缓存位于单个 daemon 的 `PASEO_HOME/zeonest/build-workbench/gradle-tasks/`，按已校验的项目真实路径分文件，与 workspace ID 和运行历史无关。每个项目最多保留最近 16 个探测上下文及筛选组合。共享文件和其他工作区的发现响应只提供任务元数据，不返回原始探测选项；发起方历史仍可用于复制。旧格式不读取。失败或取消不会覆写缓存；刷新只读，历史淘汰不影响缓存。
 
-持久共享只接受可确认的已安装 Gradle 发行版与 JDK，以及受限的声明式布局（字面根名和模块、内建插件）。工具文件、环境或已知声明变化即重新探测。Wrapper 的有效启动链、自定义 catalog、`apply`、included build、`projectDir`、动态构建逻辑及不能确认的 init/JVM 配置不作为可持久共享的输入：仍可主动探测，结果只在发起 workspace 的当前工作台会话供一次启动。不同 worktree 的实际路径不同，不复用；不协调多个 daemon 对同一数据目录的写入。Xcode 保留按工作区缓存，CMake 保留受管生成目录。
+持久共享只接受可确认的已安装 Gradle 发行版与 JDK，以及受限的声明式布局（字面根名和模块、内建插件）。工具文件、环境或已知声明变化即重新探测。Wrapper 的有效启动链、Groovy 与 Kotlin 入口并存、自定义 catalog、`apply`、included build、`projectDir`、动态构建逻辑及不能确认的 init/JVM 配置不作为可持久共享的输入：仍可主动探测，结果只在发起 workspace 的当前工作台会话供一次启动。不同 worktree 的实际路径不同，不复用；不协调多个 daemon 对同一数据目录的写入。Xcode 保留按工作区缓存，CMake 保留受管生成目录。
 
 发现与执行都遵守工作区边界。客户端提交的是已识别的目标及校验过的选项，不传任意可执行文件和目录。服务端在运行前重查目录和目标；路径越界、目标失效或选项不受支持时不启动。构建脚本仍以 daemon 用户的权限运行，信任 workspace 的项目代码是执行前提。防路径越界约束的是工作台自身的发现、执行入口和产物浏览，不等同于沙盒。
 
@@ -53,11 +53,11 @@ Gradle 共享缓存位于单个 daemon 的 `PASEO_HOME/zeonest/build-workbench/g
 | 选择 | 保存工作区选择，只作用于本功能启动的进程，不改全局 `PATH`、项目文件或系统默认 SDK。展示实际路径与已确认版本；不把完整环境和凭据写进配置、日志或 RPC 返回值。 |
 | 使用 | 发现固定路径已失效或版本不匹配时阻止运行并提示，不默默降级到 `PATH` 上的另一个版本。工具检查优先使用 mise 的实际安装路径而非 shim。用户主动执行的项目探测和构建允许按项目声明下载依赖或准备构建环境。 |
 
-工具选择绑定实际启动链中的命令名，不将 mise 安装的整个目录加入 `PATH`。例如补充 `protoc` 不替换 `cc`，Tauri CLI 查找的 Cargo 和 rustc 与所选工具一致；会换用其他 Node 的项目声明或本地 `.bin` 冲突无法确认时，报告原因。Rust 固定路径或 channel 无法解析时不自动替换。mise 声明从所选项目向工作区根查找；同一宿主可列出多个 Xcode 安装和多组 Tauri Rust/JS 工具链。Gradle 自行解释 Java toolchain、Android SDK 和 Kotlin 编译策略；为使单次运行可停止而追加的 Gradle JVM 参数在预览中显示。Ninja 和 protoc 属于可选补充，不是 CMake 或 Cargo 版本检查的前置条件。
+工具选择绑定实际启动链中的命令名，不将 mise 安装的整个目录加入 `PATH`。例如补充 `protoc` 不替换 `cc`，Tauri CLI 查找的 Cargo 和 rustc 与所选工具一致；会换用其他 Node 的项目声明或本地 `.bin` 冲突无法确认时，报告原因。Rust 固定路径或 channel 无法解析时不自动替换。mise 声明从所选项目向工作区根查找，支持版本字符串、数组的首选项或含 `version` 的工具表，无法解析或不匹配时提示；同一宿主可列出多个 Xcode 安装和多组 Tauri Rust/JS 工具链。Gradle 自行解释 Java toolchain、Android SDK 和 Kotlin 编译策略；为使单次运行可停止而追加的 Gradle JVM 参数在预览中显示。Ninja 和 protoc 属于可选补充，不是 CMake 或 Cargo 版本检查的前置条件。
 
 ## 构建选项
 
-构建意图由已发现的原生目标表达。Gradle 从任务列表选择模块及 variant，例如 `:mobile:assembleDemoRelease`，也接受 `-P`、`-D` 和并行度。Xcode 保持无签名 iOS 模拟器构建，configuration 留空使用 scheme 默认。Cargo 支持 profile、features 和 target；CMake 区分 configure 的生成器和缓存参数、build 的 configuration 和并行度。CMake 留空时不传 `--config`，显式配置只观察 File API 中对应目标和配置的产物。Tauri 支持 Debug/Release、配置叠加、features、target 和常见 Cargo 参数，默认 Debug，始终使用 `--no-bundle`。npm/pnpm 将选项传给所选脚本；例如 `--mode staging` 是否有效由脚本决定。
+构建意图由已发现的原生目标表达。Gradle 从任务列表选择模块及 variant，例如 `:mobile:assembleDemoRelease`，也接受 `-P`、`-D` 和并行度。Xcode 保持无签名 iOS 模拟器构建，configuration 留空使用 scheme 默认；检查、探测和构建不继承 `XCODE_XCCONFIG_FILE`，预览注明这一点。Cargo 支持 profile、features 和 target；CMake 区分 configure 的生成器和缓存参数、build 的 configuration 和并行度。CMake 留空时不传 `--config`，显式配置只观察 File API 中对应目标和配置的产物。Tauri 支持 Debug/Release、配置叠加、features、target 和常见 Cargo 参数，默认 Debug，始终使用 `--no-bundle`。npm/pnpm 将选项传给所选脚本；例如 `--mode staging` 是否有效由脚本决定。
 
 参数输入支持引号和反斜杠，预览保留参数边界。适配器校验的是该次操作和参数语义，不固定项目属性值或构建变体。决定工作目录、目标和操作的参数由工作台设置；不提供替换可执行文件、修改 CMake 受管构建目录或切换至发布、签名、设备操作的入口。
 
@@ -78,7 +78,7 @@ npm/pnpm 独立包没有依赖声明时不安排安装。对于有依赖声明�
 ## 输出与产物
 
 - **输出**：stdout/stderr 按运行 ID 和游标分段读取；新输出持续追加，关闭 tab 不停止任务，重开可继续读。记录有大小和保留上限，截断处明确提示。输出是只读文本，不提供终端输入。记录配置及状态时避免写入敏感环境，项目自行打印的内容仍按构建日志处理。
-- **产物**：优先使用 Cargo 的 `compiler-artifact` 消息和 CMake File API。无法取得原生路径时可以手填工作区相对路径；`dist/` 等约定仅作为「线索」，不据此推断产物来源或解开并发。Gradle、Xcode 和 Tauri 不根据模块、scheme 或 crate 名推断原生产物。列表区分新增、变化、已有和未观察到。Cargo 按实际 cwd 合并用户、祖先和当前目录配置，展开 TOML `include` 后应用环境覆盖，无法确认写入位置或编译器与所选工具冲突时停止。Cargo 的 `target-dir` / `build-dir` 和 CMake 选定配置的已知写入位置纳入冲突锁，即使位于工作区外也不开放浏览。失败或停止仍可查看已捕获的输出和变化；工作台不复制、发布或清理产物。
+- **产物**：优先使用 Cargo 的 `compiler-artifact` 消息和 CMake File API。无法取得原生路径时可以手填工作区相对路径；`dist/` 等约定仅作为「线索」，不据此推断产物来源或解开并发。Gradle、Xcode 和 Tauri 不根据模块、scheme 或 crate 名推断原生产物。列表区分新增、变化、已有和未观察到。Cargo 按实际 cwd 合并用户、祖先和当前目录配置，展开 TOML `include` 后应用环境覆盖，无法确认写入位置或编译器与所选工具冲突时停止。Cargo 的 `target-dir` / `build-dir` 和 CMake 选定配置下目标及其 File API 依赖链的已知写入位置纳入冲突锁，即使位于工作区外也不开放浏览。无法完整读取 CMake 依赖图时要求重新配置；不推导自定义脚本的任意写入。失败或停止仍可查看已捕获的输出和变化；工作台不复制、发布或清理产物。
 - **生命周期**：已保存配置与有界记录由该子功能管理，按 workspace 隔离；壳不读取或重置。插件停止时拒绝新的业务调用并清理自己启动的任务资源。daemon 重启时不恢复之前的进程，不把仍显示在历史中的进程当作可控制的活动任务。
 
 ## 适配与项目验收

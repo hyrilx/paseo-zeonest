@@ -220,6 +220,7 @@ test("Xcode listing and selectable simulator configuration keep schemes and arti
 const assert = require('node:assert/strict');
 const args = process.argv.slice(2);
 assert.equal(process.env.DEVELOPER_DIR, ${JSON.stringify(developer)});
+assert.equal(process.env.XCODE_XCCONFIG_FILE, undefined);
 if (args.includes('-version')) console.log(args.includes('-sdk') ? '26.1' : 'Xcode 26.1\\nBuild version fixture');
 else if (args.includes('-list')) {
   assert.ok(!args.includes('-disableAutomaticPackageResolution'));
@@ -241,7 +242,7 @@ else {
   put(join(workspace.root, "ios/sample.xcodeproj/project.pbxproj"), "shellScript = ./gradlew generated;");
   const alt = join(home, "Applications/Xcode-Beta.app/Contents/Developer/usr/bin/xcodebuild");
   put(alt, 'console.log("Xcode Beta");', true);
-  const w = new Workbench(join(home, "records"), { DEVELOPER_DIR: developer, HOME: home });
+  const w = new Workbench(join(home, "records"), { DEVELOPER_DIR: developer, HOME: home, XCODE_XCCONFIG_FILE: join(home, "forced-signing.xcconfig") });
   t.after(() => w.close());
   const probe = configuration(w, workspace, { adapter: "xcode", project: name, name: "list schemes" });
   assert.ok(w.tools(workspace, probe.target).candidates.some((tool) => tool.paths.includes(alt)));
@@ -259,6 +260,7 @@ else {
   assert.ok(other);
   assert.throws(() => w.preview(workspace, { ...build, tool: other.id }), /未确认此目标/u);
   const configured = { ...build, options: ["-configuration", "Custom Release"] };
+  for (const c of [probe, configured]) assert.ok(w.preview(workspace, c).command.notes?.some((note) => note.includes("不继承 XCODE_XCCONFIG_FILE")));
   const argv = w.preview(workspace, configured).command.argv;
   const derived = argv[argv.indexOf("-derivedDataPath") + 1]!.slice(workspace.root.length + 1);
   assert.throws(() => w.preview(workspace, { ...configured, artifacts: [".zeonest-build"] }), /隐藏目录/u);

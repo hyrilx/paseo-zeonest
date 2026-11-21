@@ -135,24 +135,36 @@ function fileApiResult(root: string, dir: string, project: string) {
       return [abs, real, digest(text)];
     } catch (error) { throw new Error(`无法确认 CMake 配置输入：${abs}，请重新配置`, { cause: error }); }
   });
-  type Entry = { name?: unknown; jsonFile?: unknown };
+  type Entry = { name?: unknown; id?: unknown; jsonFile?: unknown };
+  type NativeTarget = { name: string; type: string; outputs: string[]; writes: string[]; dependencies: string[] };
   const document = parse<{ configurations?: { name?: string; targets?: Entry[] }[] }>(model);
   const configurations = document?.configurations;
   if (!Array.isArray(configurations) || !configurations.length) throw new Error("File API 未返回构建配置");
   if (configurations.length > 32 || configurations.some((item) => !Array.isArray(item?.targets) || item.targets.length > 512)) throw new Error("CMake File API 构建配置或目标列表超过读取范围");
   const targets = new Map<string, { outputs: Record<string, string[]>; writes: Record<string, string[]> }>();
   for (const config of configurations.slice(0, 32)) {
-    if (!config || typeof config.name !== "string" || !/^([\w][\w.+-]{0,63})?$/u.test(config.name) || !Array.isArray(config.targets)) continue;
+    if (typeof config.name !== "string" || !/^([\w][\w.+-]{0,63})?$/u.test(config.name) || !Array.isArray(config.targets)) throw new Error("无法确认 CMake File API 构建配置，请重新配置");
+    const byId = new Map<string, NativeTarget>();
+    let edges = 0;
     for (const item of config.targets) {
-      if (typeof item?.name !== "string" || !/^[\w][\w.+-]{0,127}$/u.test(item.name) || !basename(item.jsonFile)) continue;
-      const detail = parse<{ type?: string; artifacts?: { path?: string }[] }>(item.jsonFile);
-      if (!detail || !["EXECUTABLE", "STATIC_LIBRARY", "SHARED_LIBRARY", "MODULE_LIBRARY"].includes(detail.type ?? "")) continue;
-      const artifacts = Array.isArray(detail.artifacts) ? detail.artifacts : [];
-      if (artifacts.length > 64) throw new Error("CMake File API 产物超过读取范围");
+      if (typeof item?.name !== "string" || typeof item.id !== "string" || !item.id || item.id.length > 1024 || byId.has(item.id) || !basename(item.jsonFile)) {
+        throw new Error("CMake File API 目标引用不完整，请重新配置");
+      }
+      const detail = parse<{ id?: string; type?: string; artifacts?: { path?: string }[]; dependencies?: { id?: string }[] }>(item.jsonFile);
+      if (!detail || detail.id !== item.id || typeof detail.type !== "string") throw new Error("CMake File API 目标描述不完整，请重新配置");
+      const artifacts = detail.artifacts ?? [];
+      const refs = detail.dependencies ?? [];
+      if (!Array.isArray(artifacts) || artifacts.length > 64 || !Array.isArray(refs) || (edges += refs.length) > 8192) {
+        throw new Error("CMake File API 产物或依赖超过读取范围");
+      }
+      const dependencies = refs.map((ref) => {
+        if (typeof ref?.id !== "string" || !ref.id || ref.id.length > 1024) throw new Error("CMake File API 依赖引用不完整，请重新配置");
+        return ref.id;
+      });
       const outputPaths: string[] = [];
       const writes: string[] = [];
       for (const item of artifacts) {
-        if (typeof item?.path !== "string" || !item.path || item.path.length > 4096) continue;
+        if (typeof item?.path !== "string" || !item.path || item.path.length > 4096) throw new Error("CMake File API 产物路径不完整，请重新配置");
         const abs = resolve(build, item.path);
         const real = canonicalWrite(abs);
         writes.push(real);
@@ -161,9 +173,29 @@ function fileApiResult(root: string, dir: string, project: string) {
         try { if (rel) { resolveWithin(root, rel); outputPaths.push(rel); } }
         catch { /* External or linked artifacts participate in locks, not browsing. */ }
       }
+      byId.set(item.id, { name: item.name, type: detail.type, outputs: outputPaths, writes, dependencies });
+    }
+    // File API dependencies refer to target IDs in this configuration, not names.
+    // Include known writes from transitive dependencies, even through utility targets.
+    for (const [id, item] of byId) {
+      if (!/^[\w][\w.+-]{0,127}$/u.test(item.name) || !["EXECUTABLE", "STATIC_LIBRARY", "SHARED_LIBRARY", "MODULE_LIBRARY"].includes(item.type)) continue;
+      const seen = new Set<string>();
+      const pending = [id];
+      const writes = new Set<string>();
+      for (let i = 0; i < pending.length; i++) {
+        const next = pending[i]!;
+        if (seen.has(next)) continue;
+        seen.add(next);
+        const dependency = byId.get(next);
+        if (!dependency) throw new Error("CMake File API 未报告依赖目标，请重新配置");
+        for (const path of dependency.writes) writes.add(path);
+        if (writes.size > 4096) throw new Error("CMake File API 依赖产物超过读取范围");
+        pending.push(...dependency.dependencies);
+      }
       const existing = targets.get(item.name) ?? { outputs: Object.create(null) as Record<string, string[]>, writes: Object.create(null) as Record<string, string[]> };
-      existing.outputs[config.name] = [...new Set(outputPaths)];
-      existing.writes[config.name] = [...new Set(writes)];
+      if (Object.hasOwn(existing.writes, config.name)) throw new Error("同一 CMake 配置没有唯一目标，请重新配置");
+      existing.outputs[config.name] = [...new Set(item.outputs)];
+      existing.writes[config.name] = [...writes].sort();
       targets.set(item.name, existing);
     }
   }

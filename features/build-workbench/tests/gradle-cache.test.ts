@@ -222,6 +222,28 @@ test("untrackable Gradle declarations keep a one-use result scoped to the worksp
   assert.equal(found(open(), workspace, name), undefined);
 });
 
+test("coexisting Groovy and Kotlin settings invalidate a shared result and produce only a one-use result", { skip: process.platform === "win32" }, async (t) => {
+  const { root, project, put, open } = fixture(t);
+  const directory = join(root, "checkout");
+  project(directory);
+  const author = { id: "writer", root: directory };
+  const peer = { ...author, id: "reader" };
+  const w = open();
+  const c = configuration(w, author, probe());
+  await w.verify(author, c);
+  await execute(w, author, c);
+  const name = ":module:assemble";
+  assert.ok(found(w, peer, name));
+  put(join(directory, "settings.gradle.kts"), 'rootProject.name = "kotlinAlternate"\n');
+  assert.equal(found(w, peer, name), undefined);
+  await w.verify(author, c);
+  await execute(w, author, c);
+  assert.ok(found(w, author, name));
+  assert.equal(found(w, peer, name), undefined);
+  await execute(w, author, { ...c, target: key(name) });
+  assert.equal(found(w, author, name), undefined);
+});
+
 test("Gradle uses ordered global args at submit and dequeue; old cache does not export raw options", { skip: process.platform === "win32" }, async (t) => {
   const { root, store, project, open, put } = fixture(t);
   const directory = join(root, "checkout");

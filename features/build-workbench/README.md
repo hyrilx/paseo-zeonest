@@ -4,7 +4,7 @@
 
 功能默认关闭。启用后，从 Paseo 工作区 tab 栏的「＋」打开。选择目标，在「工具链」中检查所选工具，再核对命令和工作目录。关闭 tab 不会停止任务；重开后可以继续查看同一工作区的记录。
 
-发现和预览不执行项目命令。主动探测或运行后，项目工具可以下载 Gradle Wrapper、解析 Cargo crates 或 Swift packages 等依赖。npm/pnpm workspace 和有依赖声明的包在运行时先执行原生 `install`，由包管理器按自己的锁文件、配置和缓存决定复用或安装。预览列出安装根和命令；安装失败或被停止即结束本次任务。再次运行或重试都不会因残留 `node_modules` 或 PnP 文件跳过准备。工具候选包含宿主 PATH 和已有 mise 安装，例如 CMake 应用包、`protobuf` 提供的 `protoc`。
+发现和预览不执行项目命令。主动探测或运行后，项目工具可以下载 Gradle Wrapper、解析 Cargo crates 或 Swift packages 等依赖。npm/pnpm workspace 和有依赖声明的包在运行时先执行原生 `install`，由包管理器按自己的锁文件、配置和缓存决定复用或安装。预览列出安装根和命令；安装失败或被停止即结束本次任务。再次运行或重试都不会因残留 `node_modules` 或 PnP 文件跳过准备。工具候选包含宿主 PATH 和已有 mise 安装，例如 CMake 应用包、`protobuf` 提供的 `protoc`。mise 的 `[tools]` 支持字符串、数组的首选项和含 `version` 的工具表；无法解析或版本不匹配时会提示。
 
 构建以 daemon 用户权限运行，只在信任项目代码时启动；路径校验不等于沙盒。任务状态、配置和有界日志保存在宿主 `PASEO_HOME/zeonest/build-workbench/`，不会存储整个环境；项目输出的敏感内容仍可能进入日志。产物保留在工作区，列表表示构建前后的观察结果，不证明文件来源。停止支持 POSIX 进程组；自行脱离进程组的程序不受此机制控制。
 
@@ -12,16 +12,16 @@
 
 | 技术栈 | 发现与构建 |
 | --- | --- |
-| npm/pnpm | 按各自 workspace 成员规则选择包和安装根；pnpm 未声明 `packages` 时只包含根包。选项传给脚本，例如 `--mode staging` 由脚本解释。 |
-| Cargo | 从实际启动目录读取配置、TOML `include` 和输出目录环境变量。识别 workspace 显式成员及根内路径依赖，支持 Rust `channel` / `path` 固定、profile、features 和 target。声明的编译器与所选工具不同时拒绝启动；产物由 Cargo 报告。 |
-| CMake | 先 configure，再从 File API 选择目标。更换工具或 configure 参数使用独立构建目录；File API 列出的配置输入（含外部文件）变化后重新配置。支持 `--config Release --parallel 4`；留空时使用 CMake 默认值。 |
-| Tauri | 显式绑定可确认的 Rust 应用和前端目录，包括非 `src-tauri` 布局。使用所选 Rust 工具及项目 JS CLI 或已选 `cargo-tauri`；绑定冲突或项目 CLI 缺失时不换用其他 CLI。默认 Debug，可选 `--release`、features 和 target，保持 `--no-bundle`。 |
+| npm/pnpm | 按各自成员规则确定脚本包和安装根；pnpm 未声明 `packages` 时只包含根包。若安装根在外部，请打开父工作区。`.npmrc` 或宿主环境中的包选择、锁文件目录等覆盖若会改变执行范围，先移除覆盖；其他设置继续生效。选项如 `--mode staging` 由脚本解释。 |
+| Cargo | 从实际启动目录读取配置、TOML `include` 和输出目录环境变量。识别 workspace 显式成员及根内路径依赖。成员单独打开时，请打开其 workspace 根；Cargo 会拒绝的非成员也不列为可运行任务。支持 Rust `channel` / `path` 固定、profile、features 和 target。声明的编译器与所选工具不同时拒绝启动；产物由 Cargo 报告。 |
+| CMake | 先 configure，再从 File API 选择目标。工具或 configure 参数变化时使用独立构建目录；报告的配置输入（含外部文件）变化后重新配置。按配置对目标及依赖链的已知产物排队；外部产物不在面板展示。支持 `--config Release --parallel 4`；留空时使用 CMake 默认值。 |
+| Tauri | 绑定可确认的 Rust 应用和前端目录，包括唯一的同目录前端及非 `src-tauri` 布局。使用所选 Rust 工具及项目 JS CLI 或已选 `cargo-tauri`；绑定冲突或项目 CLI 缺失时不换用其他 CLI。默认 Debug，可选 `--release`、features 和 target，保持 `--no-bundle`。 |
 | Gradle | 用 Wrapper 或已安装 Gradle 枚举原生任务，包括自定义组。探测与运行须使用同一工具及相同顺序的全局选项，例如 `--offline --parallel`。截断时用 `--workbench-task-filter=:模块:` 补查；任务执行专属选项不参与探测匹配。启动前确认任务实际行为。 |
-| Xcode | 从 workspace 或独立工程查询 scheme；有多个本地 Xcode 时可选安装。`-configuration` 留空使用 scheme 默认，仅构建无签名 iOS 模拟器产物。 |
+| Xcode | 从 workspace 或独立工程查询 scheme；有多个本地 Xcode 时可选安装。`-configuration` 留空使用 scheme 默认。检查、探测和构建均忽略继承的 `XCODE_XCCONFIG_FILE`，避免它覆盖无签名 iOS 模拟器构建参数。 |
 
 选项栏支持引号和反斜杠，例如 `--label "two words"`。预览显示参数、准备步骤和工具环境调整。切换目标会清空临时选项和手填产物路径，可以主动复制 Gradle 探测参数。
 
-同一 daemon 的工作区指向同一个实际 Gradle 项目目录时，可以共享已确认的任务。只有可追踪的声明（简单的字面模块声明和内建插件）与可确认的已安装 Gradle/JDK 组合才写入共享缓存。Wrapper、自定义 catalog、`apply`、动态项目配置、无法确认的初始化脚本和 JVM 设置等仍可探测，但结果仅在发起工作区的当前会话用一次。
+同一 daemon 的工作区指向同一个实际 Gradle 项目目录时，可以共享已确认的任务。只有可追踪的声明（简单的字面模块声明和内建插件）与可确认的已安装 Gradle/JDK 组合才写入共享缓存。Wrapper、Groovy 与 Kotlin 入口并存、自定义 catalog、`apply`、动态项目配置、无法确认的初始化脚本和 JVM 设置等仍可探测，但结果仅在发起工作区的当前会话用一次。
 
 共享缓存位于 `PASEO_HOME/zeonest/build-workbench/gradle-tasks/`，保存任务名及上下文摘要；另一工作区要自行输入匹配的选项，或使用自己的保存配置。原始 `-P`/`-D`、选项复制、日志和运行历史只对发起工作区可见。共享结果在重启工作台或淘汰历史后仍可复用；声明、工具或环境变化后重新探测。失败与停止不会替换有效结果；旧格式缓存不再读取。
 
@@ -42,6 +42,7 @@
 - 终审复验使用隔离目录：pnpm `12.21.0` 原生命令和工作台对缺失 `packages`、brace、排除规则的成员判断一致；原生安装后脚本使用所选 Node `v26.13.1`。Cargo `1.100.0` 使用固定路径工具链编译隐式成员，原生报告根配置指定的 `outer-output/debug/native-product`，未使用成员目录的配置。
 - Gradle `9.5.1` 离线枚举自定义 `renderAssets`；`conditionalRender` 只在 `-Pchannel=prod` 的上下文可运行。CMake `4.5.1` + Ninja Multi-Config 在留空时生成 `Release/portable`，显式 Debug 生成 `Debug/portable`；被包含的 `.cmake` 文件变动后必须重新配置，切换 Unix Makefiles 使用不同目录。
 - 本轮另用真实 CMake `4.5.1` 在两个隔离 checkout 读取相对和绝对外部 include，以默认 Release 和显式 Debug 生成外部产物，修改外部文件后旧目标失效。真实 Cargo `1.100.0` 的 `metadata` 和离线构建使用 `include` 指定的共享目标及中间目录。两种共享输出的排队以 fixture 验证；外部产物均未对面板开放。pnpm `12.21.0` 复验原生安装和脚本使用绑定的 Node。Tauri 应用引用与 Xcode scheme 以替身测试，未运行真实 Tauri/Xcode 构建。
+- 隔离目录复验：npm `11.20.0` 的 `workspace=beta` 会把 alpha 构建改为 beta，工作台拒绝该覆盖；移除后 npm 和 pnpm `12.21.0` 均从根安装并构建 alpha，独立包也可运行。Cargo `1.100.0` 的 `metadata` 确认两个成员共用父 workspace 和 `target/`；打开父目录后成功构建，观察到 `target/debug/alpha`。CMake `4.5.1` + Ninja Multi-Config 在两个 checkout 分别使用默认和显式 Release 构建；通过两层依赖共享 `libcore.a` 的运行进入同一队列，依次成功。mise `node={version="22"}` 拒绝本机 Node `26.13.1`；Xcode 替身验证继承的配置文件不会传入检查、探测或构建。
 - 未在原样本仓库安装依赖或修改配置。
 
 ### paseo-zeonest

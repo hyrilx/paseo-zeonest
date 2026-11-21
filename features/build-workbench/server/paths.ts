@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, opendirSync, readSync, realpathSync } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const digest = (text: string) => createHash("sha256").update(text).digest("hex");
 export const missing = (e: unknown) => (e as NodeJS.ErrnoException).code === "ENOENT";
@@ -36,6 +36,20 @@ export function resolveWithin(root: string, rel: string) {
 }
 
 export const at = (project: string, name: string) => project === "." ? name : project + "/" + name;
+
+export function* parentDirectories(directory: string) {
+  for (let dir = dirname(directory); dir !== directory; dir = dirname(directory)) {
+    yield dir;
+    directory = dir;
+  }
+}
+
+// Ancestor manifests can change native project ownership. Read only these small
+// declarations to decide scope; never use an outside directory for execution.
+export function readDeclaration(directory: string, file: string) {
+  try { return readBounded(realpathSync(join(directory, file)), 512 * 1024); }
+  catch (error) { if (!missing(error)) throw error; }
+}
 
 export function readBounded(path: string, max: number) {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);

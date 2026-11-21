@@ -2,15 +2,16 @@ import { lstatSync, opendirSync, realpathSync, statSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { satisfies, valid, validRange } from "semver";
+import { parse as yaml } from "yaml";
 import type { Candidate, Configuration } from "../shared/contracts";
 import { at, digest, inside, missing, readBounded, readText, resolveWithin } from "./paths";
-import { autoInstallRisk, directories, executable, executables, installedExecutables } from "./mise";
+import { autoInstallRisk, directories, executable, executables, installedExecutables, matchesInstalledAlias } from "./mise";
 import { cargoOptions, cmakeOptions, gradleOptions, tauriOptions, xcodeOptions } from "./options";
 import { launch } from "./process";
 import type { Bindings, Invocation, OwnedProcess } from "./process";
 import { cargoContext } from "./rust-projects";
 import { cmakeBuildDir } from "./cmake";
-import { tauriConfig, type ProjectTarget } from "./projects";
+import { object, tauriConfig, type ProjectTarget } from "./projects";
 
 export type Tool = { candidate: Candidate; signature: string; executable: string; env: NodeJS.ProcessEnv; bindings?: Bindings; overrides?: string[]; tauriCargoCli?: string; gradlePersistent?: boolean };
 export type Checks = Map<string, string>;
@@ -30,7 +31,7 @@ export function requirement(t: ProjectTarget) {
 }
 
 function jsRequirement(t: ProjectTarget, manager: string) {
-  return `Node ${[t.requirements.miseNode, t.requirements.node].filter(Boolean).join(" 且 ") || "（项目未指定版本）"} · ${manager} ${[t.requirements.manager, t.requirements.managerEngine].filter(Boolean).join(" 且 ") || "（项目未指定版本）"}`;
+  return `Node ${[t.requirements.miseNode, t.requirements.node].filter(Boolean).join(" 且 ") || "（项目未指定版本）"} · ${manager} ${[t.requirements.miseManager, t.requirements.manager, t.requirements.managerEngine].filter(Boolean).join(" 且 ") || "（项目未指定版本）"}`;
 }
 
 function makeTool(t: ProjectTarget, checked: Checks, paths: string[], executable: string, env: NodeJS.ProcessEnv, label: string, bindings?: Bindings, overrides?: string[], gradleContext?: unknown): Tool {
@@ -146,7 +147,11 @@ function gradleDistribution(launcher: string) {
 
 function nativeTools(t: ProjectTarget, env: NodeJS.ProcessEnv, checked: Checks, root: string): Tool[] {
   if (t.xcode) {
-    return xcodeExecutables(env).map((xcode) => makeTool(t, checked, [xcode], xcode, { ...env, DEVELOPER_DIR: xcodeDeveloperDir(xcode) }, `Xcode · ${xcode}`, undefined, [`DEVELOPER_DIR=${xcodeDeveloperDir(xcode)}`]));
+    return xcodeExecutables(env).map((xcode) => {
+      const developer = xcodeDeveloperDir(xcode);
+      return makeTool(t, checked, [xcode], xcode, { ...env, DEVELOPER_DIR: developer, XCODE_XCCONFIG_FILE: undefined }, `Xcode · ${xcode}`, undefined,
+        [`DEVELOPER_DIR=${developer}`, ...(env.XCODE_XCCONFIG_FILE === undefined ? [] : ["不继承 XCODE_XCCONFIG_FILE，防止覆盖无签名和输出设置"])]);
+    });
   }
   if (!t.gradle) return [];
   const wrapper = t.gradle.wrapper ? resolveWithin(root, t.gradle.wrapper) : undefined;
@@ -231,26 +236,47 @@ function helperBinding(name: string, env: NodeJS.ProcessEnv): Bindings {
   return helper ? { [name]: helper } : {};
 }
 
-const runtimeSetting = (name: string) => /^(?:usenodeversion|nodeversionforrun|nodeoptionsforrun)$/u.test(name.toLowerCase().replace(/[-_]/gu, ""));
-function assertRuntimeConfig(cwd: string, env: NodeJS.ProcessEnv, manager: string) {
+const configKey = (name: string) => name.toLowerCase().replace(/\[\]$/u, "").replace(/[-_]/gu, "");
+const runtimeSetting = (name: string) => /^(?:usenodeversion|nodeversionforrun|nodeoptionsforrun)$/u.test(configKey(name));
+function assertJsConfig(root: string, t: ProjectTarget, tool: Tool, phase: "install" | "script") {
+  const { env } = tool;
+  const cwd = resolveWithin(root, phase === "install" ? t.install?.cwd ?? t.cwd : t.cwd);
+  const manager = t.tauri?.manager ?? t.adapter;
   const config = new Map(Object.entries(env).map(([name, value]) => [name.toLowerCase(), value]));
-  if ([...config].some(([name, value]) => value && ((name.startsWith("npm_config_") && runtimeSetting(name.slice(11))) ||
-      (name.startsWith("pnpm_") && runtimeSetting(name.slice(5)))))) throw new Error("宿主配置可能替换脚本 Node，无法验证所选运行时");
-  const nodeHome = dirname(dirname(manager));
-  const configFiles = [config.get("npm_config_userconfig") ?? join(env.HOME ?? homedir(), ".npmrc"),
+  const scopeSetting = (name: string) => (manager === "npm" ? /^(?:workspace|workspaces|includeworkspaceroot|prefix|global|location)$/u :
+    /^(?:workspace|workspacedir|workspaceprefix|ignoreworkspace|dir|filter|filterprod|recursive|recursiveinstall|lockfiledir|lockfileonly|global|prefix)$/u).test(configKey(name));
+  const check = (name: string, source: string) => {
+    if (runtimeSetting(name)) throw new Error(`${source} 可能替换脚本 Node，无法验证所选运行时`);
+    if (scopeSetting(name)) throw new Error(`${source} 的 ${name} 可改变 ${manager} 执行范围；请在工作台选择目标，移除此覆盖后重试`);
+  };
+  for (const [name, value] of config) if (value !== undefined) {
+    if (name.startsWith("npm_config_")) check(name.slice(11), "宿主环境");
+    if (manager === "pnpm" && name.startsWith("pnpm_")) check(name.slice(5), "宿主环境");
+  }
+  const nodeHome = dirname(dirname(tool.executable));
+  const userHome = env.HOME ?? homedir();
+  const configFiles = new Set([config.get("npm_config_userconfig") ?? join(userHome, ".npmrc"),
     config.get("npm_config_globalconfig") ?? join(nodeHome, "etc/npmrc"),
-    join(env.XDG_CONFIG_HOME ?? join(env.HOME ?? homedir(), ".config"), "pnpm/rc")];
+    ...(manager === "pnpm" ? [join(env.XDG_CONFIG_HOME ?? join(userHome, ".config"), "pnpm/rc")] : []),
+    join(cwd, ".npmrc"), join(resolveWithin(root, t.install?.cwd ?? t.cwd), ".npmrc")]);
   for (const file of configFiles) {
-    try {
-      const text = readBounded(realpathSync(resolve(cwd, file)), 512 * 1024);
-      if (text.split(/\r?\n/u).some((line) => runtimeSetting(line.split("=", 1)[0]!.trim()))) throw new Error("可能替换脚本 Node");
-    } catch (error) { if (!missing(error)) throw new Error(`无法验证包管理器运行时配置：${file}`, { cause: error }); }
+    let text: string;
+    try { text = readBounded(realpathSync(resolve(cwd, file)), 512 * 1024); }
+    catch (error) { if (missing(error)) continue; throw new Error(`无法验证包管理器配置：${file}`, { cause: error }); }
+    for (const line of text.split(/\r?\n/u)) {
+      const name = /^\s*([\w-]+(?:\[\])?)\s*=/u.exec(line)?.[1];
+      if (name) check(name, file);
+    }
+  }
+  if (manager === "pnpm") {
+    const text = readText(root, at(t.install?.cwd ?? t.cwd, "pnpm-workspace.yaml"));
+    if (text !== undefined) for (const name of Object.keys(object(yaml(text, { maxAliasCount: 0 })))) check(name, "pnpm-workspace.yaml");
   }
 }
 
 function jsTools(t: ProjectTarget, env: NodeJS.ProcessEnv, name: "npm" | "pnpm") {
   return installedExecutables("node", env, t.requirements.miseNode).flatMap((node) =>
-    installedExecutables(name, env, t.requirements.manager).map((manager) => ({ node, manager,
+    installedExecutables(name, env, t.requirements.miseManager ?? t.requirements.manager).map((manager) => ({ node, manager,
       bindings: { node, [name]: manager },
       overrides: name === "pnpm" ? ["pnpm 使用已选安装，不切换包管理器版本"] : [],
       env: { ...env, ...(name === "pnpm" ? { npm_config_manage_package_manager_versions: "false", npm_config_package_manager_strict_version: "true" } : {}) },
@@ -262,9 +288,9 @@ export function matchesVersion(found: string, range: string | undefined): boolea
   return !!value && (!range || satisfies(value, range, { includePrerelease: true }));
 }
 
-function matchesMiseVersion(found: string, range: string | undefined) {
-  // Labels such as lts or latest are manager selection hints, not semver expressions.
-  return !range || validRange(range) === null || matchesVersion(found, range);
+function matchesMiseVersion(found: string, pin: string | undefined, name: string, binary: string, env: NodeJS.ProcessEnv) {
+  if (!pin) return true;
+  return validRange(pin) === null ? matchesInstalledAlias(name, pin, binary, env) : matchesVersion(found, pin);
 }
 
 function rustContext(root: string, cwd: string, owner: string, tool: Tool) {
@@ -304,7 +330,7 @@ export function buildArguments(root: string, t: ProjectTarget, opts: Configurati
   if (t.tauri) {
     const selected = tauriOptions(root, t.cwd, opts);
     const cwd = resolveWithin(root, t.cwd);
-    if (t.tauri.manager) assertRuntimeConfig(cwd, tool.env, tool.executable);
+    if (t.tauri.manager) assertJsConfig(root, t, tool, "script");
     const bindings = { TAURI_APP_PATH: resolveWithin(root, t.project), TAURI_FRONTEND_PATH: resolveWithin(root, t.tauri.frontend) };
     for (const [name, path] of Object.entries(bindings)) {
       const value = tool.env[name];
@@ -337,7 +363,7 @@ export function buildArguments(root: string, t: ProjectTarget, opts: Configurati
     return { args: ["build", ...(t.cargo.name ? ["--package", t.cargo.name] : ["--workspace"]), ...(report ? ["--message-format=json-render-diagnostics"] : []), ...opts],
       outputs: [], cargo: rustContext(root, t.cwd, t.cargo.workspace, tool), cargoReport: report };
   }
-  assertRuntimeConfig(resolveWithin(root, t.cwd), tool.env, tool.executable);
+  assertJsConfig(root, t, tool, "script");
   // The package script owns its arguments. npm needs a separator; pnpm forwards everything after the script name.
   return { args: ["run", t.name, ...(opts.length && t.adapter === "npm" ? ["--"] : []), ...opts], outputs: t.outputs };
 }
@@ -348,7 +374,7 @@ export function preparation(root: string, t: ProjectTarget, tool: Tool): { steps
   if (!install || (manager !== "npm" && manager !== "pnpm")) return { steps: [] };
   if (!install.required.length && !install.workspace) return { steps: [], notice: "未声明需安装的依赖" };
   // A package manifest, lock or PnP loader may survive an incomplete install. Let the native manager decide what to reuse.
-  assertRuntimeConfig(resolveWithin(root, install.cwd), tool.env, tool.executable);
+  assertJsConfig(root, t, tool, "install");
   const args = ["install"];
   return { notice: "安装就绪状态无法从文件确认；由包管理器按项目配置复用或准备依赖。",
     steps: [{ cwd: install.cwd, invocation: { executable: tool.executable, args, cwd: resolveWithin(root, install.cwd), env: tool.env, bindings: tool.bindings } }] };
@@ -380,13 +406,16 @@ export async function verifyTool(t: ProjectTarget, tool: Tool, owned: Set<OwnedP
     const java = tool.candidate.paths[0];
     if (!java) throw new Error("缺少 Java");
     const output = await checkedCommand({ cwd: tmpdir(), env: { ...tool.env, JAVA_TOOL_OPTIONS: undefined }, executable: java, args: ["-version"] }, owned, accept, true);
+    const jv = /(?:openjdk|java) version "([^"+]+)(?:\+[^"\n]*)?"/u.exec(output)?.[1] ?? "";
+    const pin = t.requirements.miseJava;
+    if (pin && !matchesMiseVersion(/^\d+$/u.test(jv) ? jv + ".0.0" : jv, pin, "java", java, tool.env)) throw new Error(`启动 Java 无法满足 mise 声明 ${pin}；请选择匹配的已安装 JDK`);
     return `启动 Java：${output.split("\n")[0]}（Gradle/JVM 由项目确定）`;
   }
   if (t.cmake) {
     const cmake = tool.executable;
     const cv = (await checkedCommand({ cwd: tmpdir(), env: tool.env, executable: cmake, args: ["--version"] }, owned, accept)).split("\n")[0] ?? "";
     const found = /^cmake version (\d+\.\d+\.\d+)/u.exec(cv)?.[1];
-    if (!found || !matchesVersion(found, t.cmake.preset ? ">=3.19" : ">=3.14") || !matchesMiseVersion(found, t.requirements.miseCmake)) {
+    if (!found || !matchesVersion(found, t.cmake.preset ? ">=3.19" : ">=3.14") || !matchesMiseVersion(found, t.requirements.miseCmake, "cmake", cmake, tool.env)) {
       throw new Error("CMake 版本不支持所选配置，或与 mise 声明不符");
     }
     return cv;
@@ -414,7 +443,10 @@ async function verifyJs(t: ProjectTarget, tool: Tool, owned: Set<OwnedProcess>, 
   const [node, manager] = tool.candidate.paths;
   if (!node || !manager || [node, manager].some(autoInstallRisk)) throw new Error("请选择已安装的 Node 和包管理器。");
   const common = { cwd: tmpdir(), env: tool.env, bindings: tool.bindings, args: ["--version"] };
-  for (const dir of new Set([t.cwd, t.install?.cwd ?? t.cwd])) if (root) assertRuntimeConfig(resolveWithin(root, dir), tool.env, manager);
+  if (root) {
+    assertJsConfig(root, t, tool, "script");
+    if (t.install && t.install.cwd !== t.cwd) assertJsConfig(root, t, tool, "install");
+  }
   const nv = await checkedCommand({ ...common, executable: node }, owned, accept);
   let mv: string;
   if (managerName === "npm") {
@@ -429,11 +461,13 @@ async function verifyJs(t: ProjectTarget, tool: Tool, owned: Set<OwnedProcess>, 
   } else {
     mv = await checkedCommand({ ...common, executable: manager }, owned, accept);
   }
-  if (!matchesVersion(nv, t.requirements.node) || !matchesMiseVersion(nv, t.requirements.miseNode) || !matchesVersion(mv, t.requirements.manager) || !matchesVersion(mv, t.requirements.managerEngine)) {
+  const matches = (req: ProjectTarget["requirements"]) => matchesVersion(nv, req.node) && matchesMiseVersion(nv, req.miseNode, "node", node, tool.env) &&
+    matchesVersion(mv, req.manager) && matchesMiseVersion(mv, req.miseManager, managerName, manager, tool.env) && matchesVersion(mv, req.managerEngine);
+  if (!matches(t.requirements)) {
     throw new Error(`版本不符合要求或声明无法验证：Node ${nv.slice(0, 60)} · ${managerName} ${mv.slice(0, 60)}；需要 ${requirement(t)}`);
   }
   const install = t.requirements.install;
-  if (install && (!matchesVersion(nv, install.node) || !matchesMiseVersion(nv, install.miseNode) || !matchesVersion(mv, install.manager) || !matchesVersion(mv, install.managerEngine))) {
+  if (install && !matches(install)) {
     throw new Error(`版本不满足依赖安装根 ${t.install?.cwd} 的 Node 或 ${managerName} 声明`);
   }
   return `Node ${nv} · ${managerName} ${mv}${managerName === "pnpm" ? "（候选版本；脚本使用绑定的 Node）" : ""}`;
