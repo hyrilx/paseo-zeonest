@@ -51,7 +51,10 @@ function gradleInputs(root: string, project: string, settings: string) {
     try { if (/\bapply\s*(?:\(\s*from\s*=|from\s*:)/u.test(readText(root, file) ?? "")) volatile = true; }
     catch { volatile = true; }
   }
-  return { files: results.files, volatile };
+  // The same project can be discovered as a workspace root or as a nested project.
+  const directory = resolveWithin(root, project);
+  const files = [...new Map(results.files.map(([file, stamp]) => [relative(directory, resolveWithin(root, file)), stamp]))];
+  return { files: files.sort(([a], [b]) => a.localeCompare(b)), volatile };
 }
 
 export function discoverGradle(root: string, dirs: string[], notices: string[], targets: ProjectTarget[]) {

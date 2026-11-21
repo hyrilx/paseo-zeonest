@@ -21,6 +21,8 @@
 
 选项栏支持引号和反斜杠，例如 `--label "two words"`。预览显示参数、准备步骤和工具环境调整。切换目标会清空临时选项和手填产物路径，可以主动复制 Gradle 探测参数。
 
+同一宿主上，两个工作区指向同一个实际 Gradle 项目目录时，刷新就能看到已成功探测的任务。缓存位于 `PASEO_HOME/zeonest/build-workbench/gradle-tasks/`，重启工作台或淘汰运行记录后仍可复用；运行记录、日志和配置仍按工作区隔离。项目声明、Wrapper 或 JDK 等工具上下文变化后需要重新探测；不同 `-P`/`-D` 等项目选项各自确认。失败和停止不会替换有效结果。无法完整追踪的构建逻辑仍须在当前工作区会话探测，每份结果最多启动一次。升级前的运行记录不会迁入此缓存。
+
 产物优先使用 Cargo 或 CMake 原生报告。Gradle、Tauri 和 Xcode 未取得原生路径时可手填要观察的目录；`dist/` 等仅作线索。外部 Cargo 共享输出仍参与冲突排队，不能在面板浏览。项目名、示例模块、构建钩子和 SDK 版本不作为适配条件。
 
 静态扫描有深度和目标数量上限，达到上限时显示提示。还未覆盖所有原生入口和声明：例如 CMake build preset、自定义目标、非 iOS Xcode SDK，以及会另选运行时的 pnpm 或 `devEngines` 配置。执行链有歧义时报告原因；工作台不会拿另一套工具继续。
@@ -34,6 +36,7 @@
 - 用隔离的真实 Gradle 工程枚举并运行 `:assembleDemoRelease -Pchannel=staging --max-workers 2`，确认任务收到 `staging` 并成功退出；该 fixture 不是 Android APK 构建。用新目录重跑了 CMake preset，Cargo 也通过复验。
 - Fixture 覆盖 npm 失败、pnpm 被停止后的部分安装：再次运行和重启后重试都先准备，不把锁文件、包版本或 PnP 当作就绪证明。另覆盖多套 Xcode、scheme 变更、Tauri 的实际 Node/Cargo 子进程解析、mise 补充 `protoc` 时不覆盖 `cc`，以及跨工作区共享 Cargo 输出排队。
 - Gradle fixture 的 `tasks --all` 输出超过 256 KiB，且包含 600 多个候选。日志滚动后，刷新列表仍可选择并预览尾部的 `:app:assembleDebug` 和 `:desktop-app:createDistributable`。达到单次 256 项和工作区 512 项上限时，面板显示裁剪提示；退出失败、无法解析或取消均保留先前有效的结果。
+- Gradle 缓存 fixture 覆盖同目录跨 workspace ID 共享、独立 checkout 隔离、重启、历史淘汰、日志和配置隔离，以及项目声明、Wrapper、JDK 和用户 Gradle 配置变化后的失效。另验证定向补查可共享，无法完整追踪的结果只在原工作区会话使用一次。用真实 Wrapper `9.5.1` 和 Temurin `17.0.21` 在隔离目录离线探测 `-Pchannel=prod` 的条件任务：另一个 workspace ID 刷新和重建工作台服务后均能看到任务；另一 checkout 不可见，修改构建声明即失效。
 - 终审复验使用隔离目录：pnpm `12.21.0` 原生命令和工作台对缺失 `packages`、brace、排除规则的成员判断一致；原生安装后脚本使用所选 Node `v26.13.1`。Cargo `1.100.0` 使用固定路径工具链编译隐式成员，原生报告根配置指定的 `outer-output/debug/native-product`，未使用成员目录的配置。
 - Gradle `9.5.1` 离线枚举自定义 `renderAssets`；`conditionalRender` 只在 `-Pchannel=prod` 的上下文可运行。CMake `4.5.1` + Ninja Multi-Config 在留空时生成 `Release/portable`，显式 Debug 生成 `Debug/portable`；被包含的 `.cmake` 文件变动后必须重新配置，切换 Unix Makefiles 使用不同目录。
 - 未在原样本仓库安装依赖或修改配置。

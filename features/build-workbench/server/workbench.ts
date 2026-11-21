@@ -6,6 +6,7 @@ import { adapter, artifact, live, log, retryable, run, saved, target, targetId, 
 import type { Command, Configuration, Log, Run, Saved, TargetKey } from "../shared/contracts";
 import { changes, observe } from "./artifacts";
 import { finishCmake, prepareCmake } from "./cmake";
+import { GradleCache, type GradleScope, type NativeResult } from "./gradle-cache";
 import { gradleProbe, gradleTaskPriority, nativeTarget, parseXcodeProbe } from "./native-projects";
 import { digest, inside, missing, readBounded, resolveWithin, workspaceRoot } from "./paths";
 import { discoverProjects, type ProjectTarget } from "./projects";
@@ -26,9 +27,9 @@ const document = z.object({ sequence: z.number(), configurations: z.array(saved)
 type State = z.infer<typeof document>;
 type Entry = z.infer<typeof entrySchema>;
 export type Workspace = { id: string; root: string };
-type NativeProbe = { adapter: "gradle" | "xcode"; stamp: string; context: string; tool: string; filter?: string; options: string[] };
+type NativeProbe = { adapter: "gradle" | "xcode"; stamp: string; context: string; tool: string; filter?: string; options: string[]; gradleScope?: GradleScope };
 type Plan = { command: Command; fingerprint: string; steps: Invocation[]; outputs: string[]; hints: string[]; locks: string[]; configure?: { base: string; dir: string; stamp: string; tool: string };
-  nativeProbe?: NativeProbe; consume?: Entry; cargoReport?: { source?: string; dir: string } };
+  nativeProbe?: NativeProbe; consume?: NativeResult["consume"]; cargoReport?: { source?: string; dir: string } };
 type Job = { workspace: Workspace; entry: Entry; plan: Plan; process?: OwnedProcess; flush?: ReturnType<typeof setTimeout>; stopTimer?: ReturnType<typeof setTimeout>; before?: ReturnType<typeof observe>; reported?: Set<string>; reportLimited?: boolean };
 
 function cargoMessages(job: Job) {
@@ -75,11 +76,14 @@ export class Workbench {
   readonly #probes = new Set<OwnedProcess>();
   readonly #jobs: Job[] = [];
   readonly #states = new Map<string, State>();
+  readonly #gradle: GradleCache;
   #active = true;
   #verificationRoot?: string;
   #closing?: Promise<void>;
 
-  constructor(private readonly data: string, private readonly environment: NodeJS.ProcessEnv = process.env) {}
+  constructor(private readonly data: string, private readonly environment: NodeJS.ProcessEnv = process.env) {
+    this.#gradle = new GradleCache(join(data, "gradle-tasks"));
+  }
 
   accept = () => { if (!this.#active) throw new Error("构建工作台未启用或已停止"); };
 
@@ -121,18 +125,31 @@ export class Workbench {
     catch { job.entry.run.result = [job.entry.run.result, "无法保存本次运行记录"].filter(Boolean).join("；"); }
   }
 
-  #nativeEntries(w: Workspace, t: ProjectTarget) {
-    const key = targetId({ ...t, name: t.gradle ? "tasks --all" : "list schemes" });
+  #gradleScope(w: Workspace, t: ProjectTarget): GradleScope {
+    const scoped = resolveWithin(w.root, t.cwd);
+    const directory = workspaceRoot(scoped);
+    if (directory !== scoped) throw new Error("Gradle 项目目录已变化，请刷新");
+    return { directory, stamp: t.stamp, volatileOwner: t.gradle?.volatile ? JSON.stringify([w.id, w.root]) : undefined };
+  }
+
+  #nativeResults(w: Workspace, t: ProjectTarget): NativeResult[] {
     const validTool = new Set(toolchains(t, this.environment, new Map(), w.root).map((tool) => tool.signature));
+    if (t.gradle) return this.#gradle.read(this.#gradleScope(w, t), validTool);
+    const key = targetId({ ...t, name: "list schemes" });
     const scopes = new Set<string>();
-    return this.#state(w.id).history.filter((entry) => {
-      if (entry.probeStamp !== t.stamp || entry.probeRoot !== w.root || !entry.probeContext || !entry.probeTool || !validTool.has(entry.probeTool) ||
-          entry.run.status !== "success" || targetId(entry.run.configuration.target) !== key) return false;
-      const scope = JSON.stringify([entry.probeContext, entry.probeFilter]);
-      if (scopes.has(scope)) return false;
+    const results: NativeResult[] = [];
+    for (const entry of this.#state(w.id).history) {
+      const context = entry.probeContext;
+      if (entry.probeStamp !== t.stamp || entry.probeRoot !== w.root || !context || !entry.probeTool || !validTool.has(entry.probeTool) ||
+          entry.run.status !== "success" || targetId(entry.run.configuration.target) !== key) continue;
+      const scope = JSON.stringify([context, entry.probeFilter]);
+      if (scopes.has(scope)) continue;
       scopes.add(scope);
-      return !(t.gradle?.volatile || t.xcode?.volatile) || (!entry.consumed && entry.probeSession === this.#session);
-    });
+      if (t.xcode?.volatile && (entry.consumed || entry.probeSession !== this.#session)) continue;
+      results.push({ context, filter: entry.probeFilter, options: entry.probeOptions, names: entry.run.confirmedTargets ?? [], limited: entry.run.confirmedTargetsLimited,
+        consume: t.xcode?.volatile ? { id: entry.run.id, take: () => { entry.consumed = true; } } : undefined });
+    }
+    return results;
   }
 
   #discovery(w: Workspace) {
@@ -141,16 +158,16 @@ export class Workbench {
     for (const t of result.targets) {
       ranked.push({ target: t, priority: t.operation ? 8 : 0 });
       if (!t.operation || !(t.gradle || t.xcode)) continue;
-      const probes = this.#nativeEntries(w, t);
+      const probes = this.#nativeResults(w, t);
       const seen = new Set<string>();
-      if (probes.some((p) => p.run.confirmedTargetsLimited)) result.notices.unshift(t.gradle
+      if (probes.some((p) => p.limited)) result.notices.unshift(t.gradle
         ? `${t.source}：探测结果有截断；可用 --workbench-task-filter=:模块: 或任务名片段缩小范围。`
         : `${t.source}：scheme 探测结果有截断。`);
-      for (const probe of probes) for (const name of probe.run.confirmedTargets ?? []) {
+      for (const probe of probes) for (const name of probe.names) {
         if (seen.has(name)) continue;
         seen.add(name);
         const item = nativeTarget(t, name);
-        if (item) ranked.push({ target: { ...item, probeOptions: probe.probeOptions }, priority: probe === probes[0] && probe.probeFilter ? 7 : item.gradle ? 1 + gradleTaskPriority(name) : 4 });
+        if (item) ranked.push({ target: { ...item, probeOptions: probe.options }, priority: probe === probes[0] && probe.filter ? 7 : item.gradle ? 1 + gradleTaskPriority(name) : 4 });
       }
     }
     if (ranked.length > WORKSPACE_TARGET_LIMIT) {
@@ -235,20 +252,21 @@ export class Workbench {
     if (hints.length) notes.push(`产物线索（未经构建工具确认）：${hints.join("、")}`);
     if (!outputs.length && !build.cargoReport && !t.operation) notes.push("未取得原生产物路径；可手填要观察的工作区路径。");
     const context = nativeContext(tool.signature, build.nativeOptions ?? []);
-    let consume: Entry | undefined;
+    let consume: NativeResult["consume"];
     if ((t.gradle || t.xcode) && !t.operation) {
-      const probe = this.#nativeEntries(w, t).find((p) => p.probeContext === context && p.run.confirmedTargets?.includes(t.name));
+      const probe = this.#nativeResults(w, t).find((p) => p.context === context && p.names.includes(t.name));
       if (!probe) throw new Error("当前工具或配置选项下未确认此目标；请先用同一工具和项目配置探测");
-      if (t.gradle?.volatile || t.xcode?.volatile) consume = probe;
+      consume = probe.consume;
       if (t.gradle) notes.push("Gradle 任务名与分组不能保证行为；确认这是本地构建或检查，不会发布、签名或操作设备。");
     }
     if (build.taskFilter) notes.push(`仅收录匹配 ${build.taskFilter} 的任务`);
     const command: Command = { cwd: t.cwd, source: t.source, argv: [tool.executable, ...args], tool: tool.candidate,
       ...(prep.steps.length ? { preparation: prep.steps.map(({ cwd, invocation }) => ({ cwd, argv: [invocation.executable, ...invocation.args] })) } : {}), ...(notes.length ? { notes } : {}) };
     const locks = [...new Set([w.root, build.cargo?.targetDir, build.cargo?.buildDir].filter((p): p is string => !!p))];
-    const fingerprint = digest(JSON.stringify([w.root, targetId(t), t.stamp, tool.signature, command, outputs, build.cargo, consume?.run.id]));
+    const fingerprint = digest(JSON.stringify([w.root, targetId(t), t.stamp, tool.signature, command, outputs, build.cargo, consume?.id]));
     const configure = build.configureDir && t.cmake ? { base: t.cmake.dir, dir: build.configureDir, stamp: t.cmake.stamp, tool: tool.signature } : undefined;
-    const nativeProbe = t.operation && (t.adapter === "gradle" || t.adapter === "xcode") ? { adapter: t.adapter, stamp: t.stamp, context, tool: tool.signature, filter: build.taskFilter, options: build.nativeOptions ?? [] } : undefined;
+    const nativeProbe = t.operation && (t.adapter === "gradle" || t.adapter === "xcode") ? { adapter: t.adapter, stamp: t.stamp, context, tool: tool.signature,
+      filter: build.taskFilter, options: build.nativeOptions ?? [], gradleScope: t.gradle ? this.#gradleScope(w, t) : undefined } : undefined;
     const main = { executable: tool.executable, args, cwd, env: tool.env, bindings: tool.bindings, reapAfterExit: !!t.gradle,
       bindingDirectory: t.cmake ? join(this.data, "cmake-bin", digest(JSON.stringify(tool.bindings ?? {}))) : undefined };
     const cargoReport = build.cargoReport && build.cargo ? { source: t.cargo?.name ? resolveWithin(w.root, t.source) : undefined, dir: build.cargo.targetDir } : undefined;
@@ -332,7 +350,7 @@ export class Workbench {
       try {
         const current = this.#plan(job.workspace, job.entry.run.configuration);
         if (job.plan.fingerprint !== current.fingerprint) throw new Error("排队期间声明或工具发生变化，请检查并重试");
-        if (current.consume) current.consume.consumed = true;
+        current.consume?.take();
         if (job.plan.configure) prepareCmake(job.workspace.root, job.plan.configure.base, job.plan.configure.dir);
         job.before = observe(job.workspace.root, job.plan.outputs);
         Object.assign(job.entry.run, { status: "running", startedAt: Date.now() });
@@ -386,7 +404,7 @@ export class Workbench {
         catch (error) { status = "failed"; result = (error as Error).message; }
       }
       if (status === "success" && job.plan.nativeProbe) {
-        const { stamp, context, tool, filter, options } = job.plan.nativeProbe;
+        const { stamp, context, tool, filter, options, gradleScope } = job.plan.nativeProbe;
         try {
           if (xcodeOutput === undefined) throw new Error("探测输出超过读取上限");
           const reported = gradle ? gradle.finish() : parseXcodeProbe(xcodeOutput);
@@ -394,9 +412,18 @@ export class Workbench {
           const probe = discoverProjects(job.workspace.root).targets.find((t) => targetId(t) === targetId(key) && t.stamp === stamp && t.operation);
           if (!probe) throw new Error("探测期间项目声明已变化，请重新探测");
           const confirmed = reported.names.filter((name) => nativeTarget(probe, name));
-          job.entry.probeStamp = stamp;
-          job.entry.probeRoot = job.workspace.root;
-          Object.assign(job.entry, { probeContext: context, probeTool: tool, probeFilter: filter, probeOptions: options, probeSession: this.#session });
+          if (gradleScope) {
+            const current = this.#gradleScope(job.workspace, probe);
+            const tools = toolchains(probe, this.environment, new Map(), job.workspace.root);
+            if (current.directory !== gradleScope.directory || current.volatileOwner !== gradleScope.volatileOwner || !tools.some((candidate) => candidate.signature === tool)) {
+              throw new Error("探测期间 Gradle 目录、声明或工具发生变化，请重新探测");
+            }
+            this.#gradle.publish(current, { context, tool, filter, options, names: confirmed, limited: reported.limited });
+          } else {
+            job.entry.probeStamp = stamp;
+            job.entry.probeRoot = job.workspace.root;
+            Object.assign(job.entry, { probeContext: context, probeTool: tool, probeFilter: filter, probeOptions: options, probeSession: this.#session });
+          }
           job.entry.run.confirmedTargets = confirmed;
           if (reported.limited) job.entry.run.confirmedTargetsLimited = true;
           result += reported.limited ? `；保留 ${confirmed.length} 个可选目标，部分条目未收录` : `；发现 ${confirmed.length} 个可选目标，刷新后可查看`;

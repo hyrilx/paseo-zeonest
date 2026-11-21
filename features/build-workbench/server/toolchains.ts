@@ -1,5 +1,5 @@
-import { realpathSync, statSync } from "node:fs";
-import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { opendirSync, realpathSync, statSync } from "node:fs";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { satisfies, valid, validRange } from "semver";
 import type { Candidate, Configuration } from "../shared/contracts";
@@ -33,10 +33,10 @@ function jsRequirement(t: ProjectTarget, manager: string) {
   return `Node ${[t.requirements.miseNode, t.requirements.node].filter(Boolean).join(" 且 ") || "（项目未指定版本）"} · ${manager} ${[t.requirements.manager, t.requirements.managerEngine].filter(Boolean).join(" 且 ") || "（项目未指定版本）"}`;
 }
 
-function makeTool(t: ProjectTarget, checked: Checks, paths: string[], executable: string, env: NodeJS.ProcessEnv, label: string, bindings?: Bindings, overrides?: string[]): Tool {
+function makeTool(t: ProjectTarget, checked: Checks, paths: string[], executable: string, env: NodeJS.ProcessEnv, label: string, bindings?: Bindings, overrides?: string[], gradleContext?: unknown): Tool {
   const id = digest(JSON.stringify(paths)).slice(0, 32);
   const cmakeSelection = t.cmake && [env.CMAKE_GENERATOR, env.CMAKE_GENERATOR_PLATFORM, env.CMAKE_GENERATOR_TOOLSET, env.CMAKE_GENERATOR_INSTANCE, env.CMAKE_TOOLCHAIN_FILE, env.CC, env.CXX];
-  const signature = digest(JSON.stringify([t.requirements, t.gradle, t.xcode, cmakeSelection, env.PATH, env.JAVA_HOME, env.ANDROID_HOME, env.DEVELOPER_DIR, env.GRADLE_USER_HOME, env.JAVA_TOOL_OPTIONS, env.PROTOC,
+  const signature = digest(JSON.stringify([t.requirements, gradleContext, t.xcode, cmakeSelection, env.PATH, env.JAVA_HOME, env.ANDROID_HOME, env.DEVELOPER_DIR, env.GRADLE_USER_HOME, env.JAVA_TOOL_OPTIONS, env.PROTOC,
     ...[...new Set([...paths, ...Object.values(bindings ?? {})])].map(identity)]));
   return { candidate: { id, paths, label, requirement: requirement(t), version: checked.get(signature) }, executable, env, signature, bindings, overrides };
 }
@@ -89,6 +89,27 @@ export function toolIssues(t: ProjectTarget, env: NodeJS.ProcessEnv) {
   return issues;
 }
 
+function optionalIdentity(path: string) {
+  try { return identity(path); }
+  catch (error) { return (error as NodeJS.ErrnoException).code ?? "unavailable"; }
+}
+
+function gradleEnvironment(env: NodeJS.ProcessEnv, cwd: string) {
+  const home = resolve(cwd, env.GRADLE_USER_HOME || join(env.HOME || homedir(), ".gradle"));
+  const initDir = join(home, "init.d");
+  const init: string[] = [];
+  try {
+    const dir = opendirSync(initDir);
+    try {
+      for (let item, count = 0; (item = dir.readSync()) && count++ < 128;) {
+        if (/\.gradle(?:\.kts)?$/u.test(item.name)) init.push(optionalIdentity(join(initDir, item.name)));
+      }
+    } finally { dir.closeSync(); }
+  } catch (error) { init.push((error as NodeJS.ErrnoException).code ?? "unavailable"); }
+  const variables = Object.entries(env).filter(([name]) => /^(?:HOME$|ANDROID_SDK_ROOT$|JAVA_OPTS$|JDK_JAVA_OPTIONS$|_JAVA_OPTIONS$|GRADLE_|ORG_GRADLE_PROJECT_)/u.test(name)).sort(([a], [b]) => a.localeCompare(b));
+  return [home, variables, optionalIdentity(initDir), ...init.sort(), ...["gradle.properties", "init.gradle", "init.gradle.kts"].map((file) => optionalIdentity(join(home, file)))];
+}
+
 function nativeTools(t: ProjectTarget, env: NodeJS.ProcessEnv, checked: Checks, root: string): Tool[] {
   if (t.xcode) {
     return xcodeExecutables(env).map((xcode) => makeTool(t, checked, [xcode], xcode, { ...env, DEVELOPER_DIR: xcodeDeveloperDir(xcode) }, `Xcode · ${xcode}`, undefined, [`DEVELOPER_DIR=${xcodeDeveloperDir(xcode)}`]));
@@ -101,12 +122,14 @@ function nativeTools(t: ProjectTarget, env: NodeJS.ProcessEnv, checked: Checks, 
   const systemJdks = process.platform === "darwin" ? directories("/Library/Java/JavaVirtualMachines").map((dir) => join(dir, "Contents/Home/bin/java")) : [];
   const javaExecutables = [...new Set([...preferred, ...installedExecutables("java", env, t.requirements.miseJava), ...systemJdks])]
     .filter((path) => executable(path) && (process.platform !== "darwin" || realpathSync(path) !== "/usr/bin/java") && !autoInstallRisk(path));
+  const context = gradleEnvironment(env, resolveWithin(root, t.cwd));
   return javaExecutables.flatMap((java) => gradles.map((gradle) => {
     const javaHome = dirname(dirname(realpathSync(java)));
     // Gradle's native daemon can detach; keep launcher and forked JVM integration disabled.
     const runEnv = { ...env, JAVA_HOME: javaHome, JAVA_TOOL_OPTIONS: [env.JAVA_TOOL_OPTIONS, "-Dorg.gradle.native=false"].filter(Boolean).join(" ") };
+    const gradleContext = [context, !!wrapper, optionalIdentity(join(javaHome, "release"))];
     return makeTool(t, checked, [java, gradle, ...(jar ? [jar] : [])], gradle, runEnv,
-      `${wrapper ? "Gradle Wrapper" : gradle} · ${javaHome}`, { java }, [`JAVA_HOME=${javaHome}`, "JAVA_TOOL_OPTIONS 追加 -Dorg.gradle.native=false，让 Gradle 单次运行留在可停止的进程组中"]);
+      `${wrapper ? "Gradle Wrapper" : gradle} · ${javaHome}`, { java }, [`JAVA_HOME=${javaHome}`, "JAVA_TOOL_OPTIONS 追加 -Dorg.gradle.native=false，让 Gradle 单次运行留在可停止的进程组中"], gradleContext);
   })).slice(0, 32);
 }
 

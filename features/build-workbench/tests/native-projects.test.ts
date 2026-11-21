@@ -82,7 +82,7 @@ if (args.includes('tasks')) {
   assert.equal(existsSync(workspaceFile("probe-ran")), false, "verification must not execute the Wrapper");
   assert.deepEqual((await run(w, workspace, c)).run.confirmedTargets, [":build", build.name, ":renderer:createDistributable", ":renderer:shadowJar", ":renderer:renderAssets", ":renderer:testDemoReleaseUnitTest"]);
   assert.ok(w.discover(workspace).targets.find((item) => item.name === build.name)?.confirmed);
-  assert.ok(!w.discover({ ...workspace, id: "other" }).targets.find((item) => item.name === build.name));
+  assert.ok(w.discover({ ...workspace, id: "other" }).targets.find((item) => item.name === build.name)?.confirmed);
   const variant = ":renderer:assembleDemoRelease";
   const property = "-PsampleFeature=two words";
   const buildConfig = { ...configuration(w, workspace, build), options: ["--max-workers", "2", property], artifacts: ["sources/renderer/produced"] };
@@ -199,7 +199,10 @@ else if (mode === 'large') {
   await reopened.verify(workspace, filtered);
   const restricted = await run(reopened, workspace, filtered);
   assert.deepEqual(restricted.run.confirmedTargets, [":module599:bundleDebugResources"]);
-  assert.ok(reopened.discover(workspace).targets.some(({ name }) => name === ":module599:bundleDebugResources"));
+  const shared = reopened.discover({ ...workspace, id: "filtered-reader" });
+  assert.ok(shared.targets.some(({ name }) => name === ":module599:bundleDebugResources"));
+  assert.ok(shared.targets.some(({ name }) => name === ":app:assembleDebug"));
+  assert.ok(shared.notices.some((notice) => notice.includes("探测结果有截断")));
   for (const name of names) {
     const target = refreshed.targets.find((target) => target.name === name && target.confirmed);
     assert.ok(target);
