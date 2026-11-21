@@ -23,7 +23,7 @@ test("catalog reads every directory page and overlays newer saves and drafts on 
       assert.equal(name, noteSummaries.name);
       batches.push(sessionIds);
       return sessionIds.includes("a")
-        ? { notes: [{ sessionId: "a", snippet: "旧设计", updatedAt: 10 }, { sessionId: "b", snippet: "发布条目", updatedAt: 15 }], unreadable: ["c"] }
+        ? { notes: [{ sessionId: "a", snippet: "旧设计", createdAt: 5, updatedAt: 10 }, { sessionId: "b", snippet: "发布条目", createdAt: 8, updatedAt: 15 }], unreadable: ["c"] }
         : { notes: [], unreadable: [] };
     },
   } as unknown as Client;
@@ -33,11 +33,45 @@ test("catalog reads every directory page and overlays newer saves and drafts on 
   assert.deepEqual(catalogRows(catalog, activity).map(({ id, archived, unreadable }) => [id, archived, unreadable]),
     [["b", true, false], ["a", false, false], ["c", false, true]]);
   const rows = catalogRows(catalog, { version: 1, saved: new Map([
-    ["a", { version: 1, note: { sessionId: "a", snippet: "刚保存", updatedAt: 30 } }], ["b", { version: 1, note: null }],
+    ["a", { version: 1, note: { sessionId: "a", snippet: "刚保存", createdAt: 5, updatedAt: 30 } }], ["b", { version: 1, note: null }],
   ]), drafts: new Map([["unused-0", "# 未保存"]]) });
-  assert.deepEqual(rows.map(({ id, snippet, draft }) => [id, snippet, draft]),
-    [["unused-0", "未保存", true], ["a", "刚保存", false], ["c", "", false]]);
-  assert.equal(rows[1]?.location, "checkout");
+  assert.deepEqual(rows.find(({ id }) => id === "a"), {
+    id: "a", title: "设计", location: "checkout", archived: false, sessionCreatedAt: undefined, sessionUpdatedAt: undefined,
+    snippet: "刚保存", noteCreatedAt: 5, noteUpdatedAt: 30, draft: false, unreadable: false,
+  });
+  assert.equal(rows[0]?.id, "a");
+  assert.equal(rows.some(({ id }) => id === "b"), false);
+  assert.equal(rows.find(({ id }) => id === "unused-0")?.snippet, "未保存");
+});
+
+test("all five sort keys support both directions and keep unknown dates last", async () => {
+  const sources = [
+    { id: "a", title: "会话 2", createdAt: "2026-11-18", updatedAt: "2026-11-20" },
+    { id: "b", title: "会话 10", createdAt: "2026-11-19", updatedAt: "2026-11-19" },
+    { id: "c", title: "会话 1", createdAt: "2026-11-17", updatedAt: "2026-11-21" },
+    { id: "d", title: "会话 20", createdAt: "invalid" },
+  ];
+  const client = {
+    paseo: { agents: { list: async () => ({ entries: sources.map((agent) => ({ agent })), pageInfo: { hasMore: false } }) } },
+    rpc: async () => ({ notes: [
+      { sessionId: "a", snippet: "A", createdAt: 10, updatedAt: 40 },
+      { sessionId: "b", snippet: "B", createdAt: 20, updatedAt: 20 },
+      { sessionId: "c", snippet: "C", createdAt: 30, updatedAt: 30 },
+    ], unreadable: ["d"] }),
+  } as unknown as Client;
+  const catalog = await loadCatalog(client, 0, new AbortController().signal);
+  const order = (key: NonNullable<Parameters<typeof catalogRows>[2]>["key"], direction: "asc" | "desc") =>
+    catalogRows(catalog, activity, { key, direction }).map(({ id }) => id).join("");
+  assert.equal(order("name", "asc"), "cabd");
+  assert.equal(order("name", "desc"), "dbac");
+  assert.equal(order("noteCreatedAt", "asc"), "abcd");
+  assert.equal(order("noteCreatedAt", "desc"), "cbad");
+  assert.equal(order("noteUpdatedAt", "asc"), "bcad");
+  assert.equal(order("noteUpdatedAt", "desc"), "acbd");
+  assert.equal(order("sessionCreatedAt", "asc"), "cabd");
+  assert.equal(order("sessionCreatedAt", "desc"), "bacd");
+  assert.equal(order("sessionUpdatedAt", "asc"), "bacd");
+  assert.equal(order("sessionUpdatedAt", "desc"), "cabd");
 });
 
 test("an abandoned catalog ignores a late summary and an invalid cursor is rejected", async () => {

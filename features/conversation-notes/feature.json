@@ -2,7 +2,7 @@
   "id": "conversation-notes",
   "name": "会话笔记",
   "description": "在对话旁随手记录，在侧边栏集中查看全局笔记和会话笔记。",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "tags": [
     "效率",
     "笔记"

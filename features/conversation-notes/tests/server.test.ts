@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -92,12 +92,35 @@ test("global note uses its own record and revision; the catalog summarizes exist
   assert.deepEqual(result.unreadable, ["broken"]);
   assert.equal(result.notes.length, 1);
   const summary = result.notes.find((item) => item.sessionId === "global");
-  assert.ok(summary && summary.updatedAt > 0);
+  assert.ok(summary && sessionNote.timestamps);
+  assert.equal(summary.createdAt, sessionNote.timestamps.updatedAt);
+  assert.equal(summary.createdAt, summary.updatedAt);
   assert.doesNotMatch(summary.snippet, /仅宿主全局内容|\[x\]/);
   assert.equal(summary.snippet.length, MAX_SNIPPET_LENGTH);
   await store.save(input("global", "", sessionNote.note.revision), guard);
   assert.deepEqual(await store.summaries(["global"], guard), { notes: [], unreadable: [] });
   assert.deepEqual(await store.readGlobal(guard), global.note);
+});
+
+test("legacy notes keep their last saved date as a creation baseline across edits", async (t) => {
+  const directory = await home(t);
+  const store = new NoteStore(directory);
+  const revision = randomUUID();
+  const path = join(directory, createHash("sha256").update("legacy").digest("hex") + ".json");
+  const legacyDate = new Date("2026-01-01T00:00:00Z");
+  await writeFile(path, JSON.stringify({ revision, markdown: "原有笔记" }));
+  await utimes(path, legacyDate, legacyDate);
+  const list = async () => (await new NoteStore(directory).summaries(["legacy"], guard)).notes[0];
+  assert.deepEqual(await store.read("legacy", guard), { revision, markdown: "原有笔记" });
+  assert.deepEqual(await list(), { sessionId: "legacy", snippet: "原有笔记", createdAt: +legacyDate, updatedAt: +legacyDate });
+  const saved = await store.save(input("legacy", "补充笔记", revision), guard);
+  assert.equal(saved.status, "saved");
+  assert.equal(saved.timestamps?.createdAt, +legacyDate);
+  assert.ok(saved.timestamps && saved.timestamps.updatedAt > +legacyDate);
+  assert.deepEqual(await list(), { sessionId: "legacy", snippet: "补充笔记", ...saved.timestamps });
+  await utimes(path, legacyDate, legacyDate);
+  assert.deepEqual(await list(), { sessionId: "legacy", snippet: "补充笔记", ...saved.timestamps });
+  assert.deepEqual(await store.save(input("legacy", "补充笔记", revision), guard), saved);
 });
 
 test("host preferences register independently of note activation and have safe defaults", () => {

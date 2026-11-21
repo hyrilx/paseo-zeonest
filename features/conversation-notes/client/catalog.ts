@@ -8,6 +8,8 @@ export interface NoteSource {
   title: string;
   location: string;
   archived: boolean;
+  sessionCreatedAt: number | undefined;
+  sessionUpdatedAt: number | undefined;
 }
 interface Catalog {
   sources: Map<string, NoteSource>;
@@ -20,7 +22,28 @@ export interface NoteActivity {
   drafts: ReadonlyMap<string, string>;
   saved: ReadonlyMap<string, { version: number; note: NoteSummary | null }>;
 }
-export type CatalogRow = NoteSource & { snippet: string; updatedAt: number; draft: boolean; unreadable: boolean };
+export type CatalogRow = NoteSource & {
+  snippet: string;
+  noteCreatedAt: number | undefined;
+  noteUpdatedAt: number | undefined;
+  draft: boolean;
+  unreadable: boolean;
+};
+
+export const sortOptions = [
+  { key: "name", label: "名称" },
+  { key: "noteCreatedAt", label: "笔记创建时间" },
+  { key: "noteUpdatedAt", label: "笔记更新时间" },
+  { key: "sessionCreatedAt", label: "对话创建时间" },
+  { key: "sessionUpdatedAt", label: "对话更新时间" },
+] as const;
+export type NoteSort = { key: typeof sortOptions[number]["key"]; direction: "asc" | "desc" };
+export const defaultSort: NoteSort = { key: "noteUpdatedAt", direction: "desc" };
+
+function parseDate(value: string | undefined) {
+  const timestamp = value ? Date.parse(value) : NaN;
+  return Number.isFinite(timestamp) ? timestamp : undefined;
+}
 
 export async function loadCatalog(client: Client, since: number, signal: AbortSignal): Promise<Catalog> {
   const sources = new Map<string, NoteSource>();
@@ -42,6 +65,8 @@ export async function loadCatalog(client: Client, since: number, signal: AbortSi
         location: project ? [project.projectName, project.workspaceName].filter(Boolean).join(" / ")
           : agent.cwd?.split(/[\\/]/).filter(Boolean).at(-1) ?? "",
         archived: !!agent.archivedAt,
+        sessionCreatedAt: parseDate(agent.createdAt),
+        sessionUpdatedAt: parseDate(agent.updatedAt),
       });
     }
     if (!pageInfo.hasMore) break;
@@ -63,7 +88,7 @@ export async function loadCatalog(client: Client, since: number, signal: AbortSi
   return { sources, notes, unreadable, since };
 }
 
-export function catalogRows(catalog: Catalog, activity: NoteActivity): CatalogRow[] {
+export function catalogRows(catalog: Catalog, activity: NoteActivity, sort: NoteSort = defaultSort, anchor?: CatalogRow): CatalogRow[] {
   const rows: CatalogRow[] = [];
   for (const source of catalog.sources.values()) {
     const saved = activity.saved.get(source.id);
@@ -73,7 +98,24 @@ export function catalogRows(catalog: Catalog, activity: NoteActivity): CatalogRo
     const unreadable = !recent && catalog.unreadable.has(source.id);
     if (!note && draft === undefined && !unreadable) continue;
     rows.push({ ...source, snippet: draft === undefined ? note?.snippet ?? "" : noteSnippet(draft),
-      updatedAt: note?.updatedAt ?? 0, draft: draft !== undefined, unreadable });
+      noteCreatedAt: note?.createdAt, noteUpdatedAt: note?.updatedAt, draft: draft !== undefined, unreadable });
   }
-  return rows.sort((left, right) => +right.draft - +left.draft || right.updatedAt - left.updatedAt || left.title.localeCompare(right.title));
+  // Clearing the body must not unmount the open editor. Its own autosave also must not move it mid-edit.
+  if (anchor && !rows.some(({ id }) => id === anchor.id)) rows.push({ ...anchor, snippet: "", draft: false, unreadable: false });
+  const { key, direction } = sort;
+  const sign = direction === "asc" ? 1 : -1;
+  const compareName = (left: CatalogRow, right: CatalogRow) => left.title.localeCompare(right.title, "zh-CN", { numeric: true });
+  return rows.sort((aRow, bRow) => {
+    const left = aRow.id === anchor?.id ? anchor : aRow;
+    const right = bRow.id === anchor?.id ? anchor : bRow;
+    let order: number;
+    if (key === "name") order = sign * compareName(left, right);
+    else {
+      const a = left[key], b = right[key];
+      if (a === undefined && b !== undefined) return 1;
+      if (b === undefined && a !== undefined) return -1;
+      order = a === undefined || b === undefined ? 0 : sign * (a - b);
+    }
+    return order || compareName(left, right) || left.id.localeCompare(right.id);
+  });
 }

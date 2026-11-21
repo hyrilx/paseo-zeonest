@@ -23,7 +23,7 @@ const nativeHost = { name: "native-host", setup(builder: import("esbuild").Plugi
       export const TextInput = React.forwardRef((props, ref) => React.createElement('TextInput', { ...props, ref }));
       export const Icon = make('Icon'), Markdown = make('Markdown'), ScrollView = make('ScrollView'), SidebarRow = make('SidebarRow');
       export const Keyboard = { dismiss() {} };
-      export const FlatList = ({ data, renderItem, keyExtractor, ListHeaderComponent, ListEmptyComponent }) => React.createElement('FlatList', {},
+      export const FlatList = ({ data, renderItem, keyExtractor, ListHeaderComponent, ListEmptyComponent, ...props }) => React.createElement('FlatList', props,
         ListHeaderComponent, ...data.map(item => React.createElement(React.Fragment, {key: keyExtractor(item)}, renderItem({item}))),
         data.length ? null : ListEmptyComponent);
       export const Modal = Object.assign(({ open, children, ...props }) => open ? React.createElement('Modal', props, children) : null, { Content: make('ModalContent') });
@@ -241,7 +241,7 @@ test("sidebar opens the host notes hub and shares session drafts with the compos
       if (name === settingsRead.name) return { status: "ready", values: {} };
       if (name === noteSummaries.name) {
         if (failCatalog) throw new Error("offline");
-        return { notes: [{ sessionId: "a", snippet: "编辑文档", updatedAt: 20 }, { sessionId: "b", snippet: "保留结论", updatedAt: 10 }], unreadable: [] };
+        return { notes: [{ sessionId: "a", snippet: "编辑文档", createdAt: 4, updatedAt: 20 }, { sessionId: "b", snippet: "保留结论", createdAt: 5, updatedAt: 10 }], unreadable: [] };
       }
       if (name === readGlobalNote.name) return global;
       if (name === readNote.name) { rpcReads.push(input.sessionId); return { revision: null, markdown: "编辑文档" }; }
@@ -253,7 +253,7 @@ test("sidebar opens the host notes hub and shares session drafts with the compos
       }
       assert.equal(name, saveNote.name);
       saved.push({ id: input.sessionId, text: input.markdown });
-      return { status: "saved", note: { revision, markdown: input.markdown } };
+      return { status: "saved", note: { revision, markdown: input.markdown }, timestamps: { createdAt: 4, updatedAt: 30 } };
     },
   } as unknown as Client;
   const stop = startNotes(client);
@@ -272,12 +272,26 @@ test("sidebar opens the host notes hub and shares session drafts with the compos
     assert.equal(globalInput().props.value, "# 全局笔记正文", "global note works if the catalog fails");
     failCatalog = false;
     await act(async () => { button("重试").props.onPress(); });
-    assert.ok(button("查看笔记：归档会话"));
+    const list = () => page.root.findByType("FlatList" as never);
+    const rowOrder = () => list().findAll((node) => node.type === ("Pressable" as never) && node.props.accessibilityLabel?.startsWith("笔记："))
+      .map((node) => node.props.accessibilityLabel);
+    assert.deepEqual(list().props.stickyHeaderIndices, [1]);
+    assert.ok(queryInput().parent, "the compact page renders the search field in the sticky controls row");
+    assert.deepEqual(rowOrder(), ["笔记：设计讨论", "笔记：归档会话"]);
+    await act(async () => { button("排序：笔记更新时间，降序").props.onPress(); });
+    const sortOption = (label: string) => page.root.find((node) => node.type === ("Pressable" as never)
+      && node.props.accessibilityRole === "radio" && node.props.accessibilityLabel === label);
+    assert.equal(page.root.findByType("Modal" as never).props.title, "会话笔记排序");
+    await act(async () => { sortOption("升序").props.onPress(); });
+    await act(async () => { button("完成排序").props.onPress(); });
+    assert.deepEqual(rowOrder(), ["笔记：归档会话", "笔记：设计讨论"]);
     assert.deepEqual(rpcReads, [], "the hub does not read individual note bodies before selection");
     await act(async () => { globalInput().props.onChangeText("新全局正文"); queryInput().props.onChangeText("项目"); });
-    assert.throws(() => button("查看笔记：归档会话"));
-    await act(async () => { button("查看笔记：设计讨论").props.onPress(); });
-    assert.equal(queryInput().props.value, "项目", "drilling in preserves the search field");
+    assert.throws(() => button("笔记：归档会话"));
+    await act(async () => { button("笔记：设计讨论").props.onPress(); });
+    assert.equal(button("笔记：设计讨论").props["aria-expanded"], true);
+    assert.equal(queryInput().props.value, "项目", "expanding preserves the search field");
+    assert.equal(globalInput().props.value, "新全局正文", "the global editor remains mounted while a conversation expands");
     assert.deepEqual(rpcReads, ["a"]);
     await act(async () => { button("打开会话").props.onPress(); });
     assert.deepEqual(routes.at(-1), { agentId: "a", serverId: "h" });
@@ -288,7 +302,9 @@ test("sidebar opens the host notes hub and shares session drafts with the compos
     await act(async () => { detail().props.onChangeText("共享草稿"); });
     assert.equal(composer!.root.findByType("TextInput" as never).props.value, "共享草稿");
     assert.deepEqual(rpcReads, ["a"], "opening the second surface does not race a new load");
-    await act(async () => { button("返回笔记列表").props.onPress(); composer!.unmount(); composer = undefined; });
+    await act(async () => { button("笔记：设计讨论").props.onPress(); composer!.unmount(); composer = undefined; });
+    assert.equal(button("笔记：设计讨论").props["aria-expanded"], false);
+    assert.equal(detail(), undefined);
     assert.equal(queryInput().props.value, "项目");
     assert.match(JSON.stringify(page.toJSON()), /共享草稿/);
   } finally { await act(async () => { nav?.unmount(); page?.unmount(); composer?.unmount(); }); }

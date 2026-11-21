@@ -14,7 +14,9 @@ export const readNote = defineRpc({
   output: noteSchema,
 });
 const noteUpdate = z.object({ expectedRevision: revision, markdown });
-const saveResult = z.object({ status: z.enum(["saved", "conflict"]), note: noteSchema });
+const timestamp = z.number().finite();
+export const noteTimestamps = z.object({ createdAt: timestamp, updatedAt: timestamp });
+const saveResult = z.object({ status: z.enum(["saved", "conflict"]), note: noteSchema, timestamps: noteTimestamps.optional() });
 export const saveNote = defineRpc({
   name: "zeonest.conversation-notes.save",
   input: noteUpdate.extend({ sessionId }),
@@ -31,7 +33,7 @@ export const saveGlobalNote = defineRpc({
   output: saveResult,
 });
 export const MAX_SNIPPET_LENGTH = 160;
-const summary = z.object({ sessionId, snippet: z.string().max(MAX_SNIPPET_LENGTH), updatedAt: z.number().finite() });
+const summary = noteTimestamps.extend({ sessionId, snippet: z.string().max(MAX_SNIPPET_LENGTH) });
 export const noteSummaries = defineRpc({
   name: "zeonest.conversation-notes.summaries",
   input: z.object({ sessionIds: z.array(sessionId).max(PRESENCE_BATCH_SIZE) }),

@@ -25,11 +25,14 @@ export function createNoteLibrary(client: Pick<PluginClientContext, "paseo" | "r
       const result = await client.rpc(saveNote, input);
       if (result.status === "saved") {
         const { sessionId } = input, { markdown } = result.note;
-        const version = activity.version + 1;
-        const saved = new Map(activity.saved);
-        const note = markdown.trim() ? { sessionId, snippet: noteSnippet(markdown), updatedAt: Date.now() } : null;
-        saved.set(sessionId, { version, note });
-        publish({ ...activity, version, saved });
+        const hasContent = Boolean(markdown.trim());
+        if (!hasContent || result.timestamps) {
+          const version = activity.version + 1;
+          const saved = new Map(activity.saved);
+          const note = hasContent && result.timestamps ? { sessionId, snippet: noteSnippet(markdown), ...result.timestamps } : null;
+          saved.set(sessionId, { version, note });
+          publish({ ...activity, version, saved });
+        }
       }
       return result;
     },

@@ -4,12 +4,13 @@ import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import process from "node:process";
-import { MAX_NOTE_LENGTH, noteSchema, type Note, type NoteSummary, type NoteUpdate, type SaveInput, type SaveResult } from "../shared/contracts";
+import { MAX_NOTE_LENGTH, noteSchema, noteTimestamps, type Note, type NoteSummary, type NoteUpdate, type SaveInput, type SaveResult } from "../shared/contracts";
 import { noteSnippet } from "../shared/snippet";
 
 const MAX_RECORD_BYTES = MAX_NOTE_LENGTH * 6 + 256; // JSON escape sequences take up to six bytes per code unit.
 const empty: Note = { revision: null, markdown: "" };
-interface RecordOnDisk { note: Note; updatedAt: number }
+const recordSchema = noteSchema.extend(noteTimestamps.partial().shape);
+interface RecordOnDisk { note: Note; timestamps: NonNullable<SaveResult["timestamps"]> }
 // One Paseo daemon owns its home. Keep the queue across feature deactivation in this module.
 const writes = new Map<string, Promise<unknown>>();
 type Guard = () => void;
@@ -50,9 +51,10 @@ export class NoteStore {
       file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
       const stat = await file.stat();
       if (!stat.isFile() || stat.size > MAX_RECORD_BYTES) throw new Error("会话笔记记录无效");
-      const note = noteSchema.parse(JSON.parse(await file.readFile("utf8")));
+      const { createdAt, updatedAt, ...note } = recordSchema.parse(JSON.parse(await file.readFile("utf8")));
       if (note.revision === null) throw new Error("会话笔记缺少版本");
-      return { note, updatedAt: stat.mtimeMs };
+      // Previous versions kept neither date. Use the last recorded write until the next save stamps it.
+      return { note, timestamps: { createdAt: createdAt ?? stat.mtimeMs, updatedAt: updatedAt ?? stat.mtimeMs } };
     } catch (error) {
       if (missing(error)) return null;
       throw error;
@@ -61,21 +63,21 @@ export class NoteStore {
     }
   }
 
-  private async readNote(path: string, guard: Guard): Promise<Note> {
+  private async record(path: string, guard: Guard): Promise<RecordOnDisk | null> {
     guard();
     const exists = await this.verifyDirectory();
     guard();
     const result = exists ? await this.readRecord(path) : null;
     guard();
-    return result?.note ?? empty;
+    return result;
   }
 
-  read(sessionId: string, guard: Guard): Promise<Note> {
-    return this.readNote(this.path(sessionId), guard);
+  async read(sessionId: string, guard: Guard): Promise<Note> {
+    return (await this.record(this.path(sessionId), guard))?.note ?? empty;
   }
 
-  readGlobal(guard: Guard): Promise<Note> {
-    return this.readNote(join(this.directory, "global.json"), guard);
+  async readGlobal(guard: Guard): Promise<Note> {
+    return (await this.record(join(this.directory, "global.json"), guard))?.note ?? empty;
   }
 
   async summaries(sessionIds: readonly string[], guard: Guard) {
@@ -92,8 +94,8 @@ export class NoteStore {
       for (const entry of entries) {
         if (entry.error) unreadable.push(entry.sessionId);
         else if (entry.record?.note.markdown.trim()) {
-          const { note, updatedAt } = entry.record;
-          notes.push({ sessionId: entry.sessionId, snippet: noteSnippet(note.markdown), updatedAt });
+          const { note, timestamps } = entry.record;
+          notes.push({ sessionId: entry.sessionId, snippet: noteSnippet(note.markdown), ...timestamps });
         }
       }
     }
@@ -121,10 +123,13 @@ export class NoteStore {
   private saveNote(path: string, input: NoteUpdate, guard: Guard): Promise<SaveResult> {
     guard();
     const job = (writes.get(path) ?? Promise.resolve()).catch(() => {}).then(async (): Promise<SaveResult> => {
-      const current = await this.readNote(path, guard);
-      if (current.markdown === input.markdown) return { status: "saved", note: current };
+      const record = await this.record(path, guard);
+      const current = record?.note ?? empty;
+      if (current.markdown === input.markdown) return { status: "saved", note: current, timestamps: record?.timestamps };
       if (current.revision !== input.expectedRevision) return { status: "conflict", note: current };
       const note = noteSchema.parse({ revision: randomUUID(), markdown: input.markdown });
+      const updatedAt = Math.max(Date.now(), record?.timestamps.updatedAt ?? 0);
+      const timestamps = { createdAt: record?.timestamps.createdAt ?? updatedAt, updatedAt };
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
       if (!await this.verifyDirectory()) throw new Error("会话笔记目录不存在");
       guard();
@@ -132,7 +137,7 @@ export class NoteStore {
       const file = await open(temporary, "wx", 0o600);
       try {
         try {
-          await file.writeFile(JSON.stringify(note));
+          await file.writeFile(JSON.stringify({ ...note, ...timestamps }));
           await file.sync();
         } finally {
           await file.close();
@@ -143,7 +148,7 @@ export class NoteStore {
         await unlink(temporary).catch(() => {});
       }
       guard();
-      return { status: "saved", note };
+      return { status: "saved", note, timestamps };
     });
     writes.set(path, job);
     const release = () => { if (writes.get(path) === job) writes.delete(path); };
