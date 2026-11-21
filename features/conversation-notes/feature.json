@@ -2,7 +2,7 @@
   "id": "conversation-notes",
   "name": "会话笔记",
   "description": "在聊天输入框旁记录本会话的结论、待办和链接。",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "tags": [
     "效率",
     "笔记"

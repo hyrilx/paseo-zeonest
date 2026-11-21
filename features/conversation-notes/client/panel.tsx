@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Platform, Pressable, StyleSheet, Text, View, type TextInput as NativeTextInput } from "react-native";
 import type { PluginButtonContentProps } from "@getpaseo/plugin/client";
-import { copyText, Icon, Markdown, TextInput } from "@getpaseo/plugin/client/ui";
+import { copyText, Icon, Markdown, Modal, TextInput } from "@getpaseo/plugin/client/ui";
 import { MAX_NOTE_LENGTH } from "../shared/contracts";
 import { formatMarkdown, toggleTaskMarker, type Format, type Selection, type TaskMarker } from "./markdown";
 import type { SessionNote } from "./note";
@@ -19,6 +19,7 @@ const shortcuts: { format: Format; icon: string; label: string }[] = [
 const styles = StyleSheet.create({
   panel: { maxWidth: "100%", gap: 6 },
   header: { flexDirection: "row", alignItems: "center", gap: 8 },
+  headerActions: { flexDirection: "row", alignItems: "center", gap: 2 },
   row: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 2 },
   button: { alignItems: "center", justifyContent: "center", minHeight: 30, paddingHorizontal: 8, borderRadius: 5 },
   label: { fontSize: 13, lineHeight: 18 },
@@ -60,6 +61,7 @@ export function NotesPanel({ note, theme, layout, close }: PluginButtonContentPr
   const { status, markdown, conflict } = useSyncExternalStore(note.subscribe, note.get, note.get);
   const { colors } = theme;
   const [mode, setMode] = useState<"edit" | "preview">("edit");
+  const [statusOpen, setStatusOpen] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState("");
   const [requested, setRequested] = useState<{ selection: Selection; focus: boolean }>();
   const input = useRef<NativeTextInput>(null);
@@ -104,21 +106,25 @@ export function NotesPanel({ note, theme, layout, close }: PluginButtonContentPr
   }
 
   const blocked = status === "loading" || status === "load-error";
-  const statusText = {
-    loading: "读取中…", "load-error": "读取失败", ready: "", pending: "待保存", saving: "保存中…",
-    "save-error": "保存失败，草稿已保留", "too-long": `上限 ${MAX_NOTE_LENGTH.toLocaleString("zh-CN")} 字符，草稿未保存`,
-    conflict: "宿主有新版本，草稿已保留",
-  }[status];
-  const statusColor = status === "load-error" || status === "save-error" ? colors.statusDanger
-    : status === "conflict" || status === "too-long" ? colors.statusWarning : colors.foregroundMuted;
+  const statuses: Record<typeof status, readonly [icon: string, text: string, color: string]> = {
+    loading: ["LoaderCircle", "读取中…", colors.foregroundMuted],
+    "load-error": ["CircleAlert", "读取失败", colors.statusDanger],
+    ready: ["Check", "没有待保存的更改", colors.foregroundMuted],
+    pending: ["Clock", "待保存", colors.foregroundMuted],
+    saving: ["LoaderCircle", "保存中…", colors.foregroundMuted],
+    "save-error": ["CircleAlert", "保存失败，草稿已保留", colors.statusDanger],
+    "too-long": ["TriangleAlert", `上限 ${MAX_NOTE_LENGTH.toLocaleString("zh-CN")} 字符，草稿未保存`, colors.statusWarning],
+    conflict: ["TriangleAlert", "宿主有新版本，草稿已保留", colors.statusWarning],
+  };
+  const [statusIcon, statusText, statusColor] = statuses[status];
   let recovery: ReactNode;
   if (conflict && status !== "saving") {
-    recovery = <View style={styles.row}>
+    recovery = <>
       {action("复制草稿", () => { void copy(markdown, "草稿"); })}
       {action("复制宿主版", () => { void copy(conflict.markdown, "宿主版"); })}
       {action("放弃草稿，读取宿主版", note.keepServer)}
       {markdown.length <= MAX_NOTE_LENGTH && action(status === "save-error" ? "重试替换宿主版" : "用草稿替换宿主版", () => { void note.useDraft(); })}
-    </View>;
+    </>;
   } else if (status === "save-error" || status === "too-long") {
     recovery = <>
       {status === "save-error" && action("重试保存", () => { void note.flush(); })}
@@ -137,9 +143,18 @@ export function NotesPanel({ note, theme, layout, close }: PluginButtonContentPr
         </Pressable>)}
       </View>}
       <View style={{ flex: 1 }} />
-      {layout.compact ? null : iconButton("关闭笔记", "X", close)}
+      <View style={styles.headerActions}>
+        <Pressable testID="conversation-notes-status" accessibilityRole="button"
+          accessibilityLabel={`笔记状态：${statusText}`} accessibilityHint="查看状态详情和可用操作"
+          onPress={() => { setCopyFeedback(""); setStatusOpen(true); }}
+          style={({ pressed }) => [styles.button, { width: layout.compact ? 39 : 32, minHeight: layout.compact ? 36 : 30,
+            paddingHorizontal: 0, backgroundColor: pressed ? colors.surface2 : undefined }]}>
+          <Icon name={statusIcon} size={16} color={statusColor} />
+        </Pressable>
+        {layout.compact ? null : iconButton("关闭笔记", "X", close)}
+      </View>
     </View>
-    {!blocked && <View style={[styles.body, { borderColor: colors.border }]}>
+    {!blocked && <View testID="conversation-notes-body" style={[styles.body, { borderColor: colors.border }]}>
       {mode === "edit" ? <>
         <View accessibilityRole="toolbar" accessibilityLabel="Markdown 格式" style={[styles.toolbar, { borderBottomColor: colors.border }]}>
           {shortcuts.map(({ format: kind, icon, label }) => iconButton(label, icon, () => format(kind), kind))}
@@ -156,11 +171,12 @@ export function NotesPanel({ note, theme, layout, close }: PluginButtonContentPr
         }} /> : <Text style={[styles.hint, { color: colors.foregroundMuted }]}>还没有笔记</Text>}
       </View>}
     </View>}
-    {statusText || copyFeedback ? <View style={styles.row}>
-      {statusText ? <Text accessibilityLiveRegion="polite" style={[styles.hint, { color: statusColor }]}>{statusText}</Text> : null}
-      {!conflict && recovery}
-      {copyFeedback ? <Text accessibilityLiveRegion="polite" style={[styles.hint, { color: colors.foregroundMuted }]}>{copyFeedback}</Text> : null}
-    </View> : null}
-    {conflict && recovery}
+    <Modal title="笔记状态" open={statusOpen} onOpenChange={setStatusOpen}>
+      <Modal.Content>
+        <Text accessibilityLiveRegion="polite" style={[styles.label, { color: statusColor }]}>{statusText}</Text>
+        {recovery && <View style={styles.row}>{recovery}</View>}
+        {copyFeedback ? <Text accessibilityLiveRegion="polite" style={[styles.hint, { color: colors.foregroundMuted }]}>{copyFeedback}</Text> : null}
+      </Modal.Content>
+    </Modal>
   </View>;
 }

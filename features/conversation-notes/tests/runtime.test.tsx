@@ -20,6 +20,7 @@ const compiled = await build({
       export const Text = make('Text'), View = make('View'), Pressable = make('Pressable');
       export const TextInput = React.forwardRef((props, ref) => React.createElement('TextInput', { ...props, ref }));
       export const Icon = make('Icon'), Markdown = make('Markdown');
+      export const Modal = Object.assign(({ open, children, ...props }) => open ? React.createElement('Modal', props, children) : null, { Content: make('ModalContent') });
       export const Platform = { select: options => options.default }, StyleSheet = { create: styles => styles };
       export const copyText = async () => {};
     ` }));
@@ -92,7 +93,20 @@ test("native pills follow the session directory and keep a failed draft in its o
   await act(async () => { root.update(createElement(A, props)); });
   assert.deepEqual(reads, ["a"]);
   const textbox = () => root.root.findByType("TextInput" as never);
+  const editorRows = () => {
+    const panel = root.toJSON();
+    assert.ok(panel && !Array.isArray(panel));
+    return panel.children ?? [];
+  };
+  const statusButton = () => root.root.find((node) => node.type === ("Pressable" as never) && node.props.testID === "conversation-notes-status");
+  const statusLabel = () => statusButton().props.accessibilityLabel;
+  assert.match(statusLabel(), /没有待保存的更改/);
+  const input = textbox();
+  assert.equal(editorRows().length, 2);
   await act(async () => { textbox().props.onChangeText("A 的草稿"); });
+  assert.match(statusLabel(), /待保存$/);
+  assert.equal(editorRows().length, 2, "pending status adds no row");
+  assert.equal(textbox(), input, "pending status leaves the editor mounted");
   await act(async () => { root.update(createElement(B, { ...props, agentId: "b" })); });
   assert.equal(textbox().props.value, "");
   assert.deepEqual(reads, ["a", "b"]);
@@ -100,11 +114,19 @@ test("native pills follow the session directory and keep a failed draft in its o
   assert.equal(writes[0]?.sessionId, "a");
   await act(async () => { root.update(createElement(A, props)); });
   assert.equal(textbox().props.value, "A 的草稿");
-  assert.match(JSON.stringify(root.toJSON()), /保存失败，草稿已保留/);
-  fail = false;
+  assert.match(statusLabel(), /保存失败，草稿已保留/);
+  assert.equal(editorRows().length, 2, "failed saves also leave no footer");
   const press = (matches: (props: Record<string, unknown>) => boolean) =>
     root.root.findAll((node) => node.type === ("Pressable" as never) && matches(node.props))[0]!.props.onPress();
+  await act(async () => { statusButton().props.onPress(); });
+  const dialog = () => root.root.findByType("Modal" as never);
+  assert.equal(dialog().props.title, "笔记状态");
+  fail = false;
   await act(async () => { press((button) => button.accessibilityLabel === "重试保存"); });
+  assert.match(statusLabel(), /没有待保存的更改/);
+  await act(async () => { dialog().props.onOpenChange(false); });
+  assert.equal(textbox().props.value, "A 的草稿");
+  assert.equal(editorRows().length, 2);
   assert.deepEqual(writes.map(({ sessionId, markdown }) => [sessionId, markdown]), [["a", "A 的草稿"], ["a", "A 的草稿"]]);
   assert.equal(registered.get("a")?.button.label, "笔记 ·");
   assert.equal(content("a"), A, "presence updates the registration without remounting its content");
