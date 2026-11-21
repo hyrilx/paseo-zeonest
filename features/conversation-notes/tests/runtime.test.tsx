@@ -22,7 +22,7 @@ const nativeHost = { name: "native-host", setup(builder: import("esbuild").Plugi
       export const Text = make('Text'), View = make('View'), Pressable = make('Pressable');
       export const TextInput = React.forwardRef((props, ref) => React.createElement('TextInput', { ...props, ref }));
       export const Icon = make('Icon'), Markdown = make('Markdown'), ScrollView = make('ScrollView'), SidebarRow = make('SidebarRow');
-      export const Keyboard = { dismiss() {} };
+      export const Keyboard = { dismiss() {} }, BackHandler = { addEventListener: () => ({ remove() {} }) };
       export const FlatList = ({ data, renderItem, keyExtractor, ListHeaderComponent, ListEmptyComponent, ...props }) => React.createElement('FlatList', props,
         ListHeaderComponent, ...data.map(item => React.createElement(React.Fragment, {key: keyExtractor(item)}, renderItem({item}))),
         data.length ? null : ListEmptyComponent);
@@ -264,7 +264,16 @@ test("sidebar opens the host notes hub and shares session drafts with the compos
     await act(async () => { nav.root.findByType("SidebarRow" as never).props.onPress(); });
     assert.deepEqual(routes.at(0), { screenId: screen.id });
     const navigation = { openAgent: (input: unknown) => routes.push(input), openWorkspace() {} };
-    await act(async () => { page = create(createElement(screen.Component, { ...props, params: {}, navigation })); });
+    await act(async () => { page = create(createElement(screen.Component, { ...props, params: {}, navigation }), {
+      createNodeMock: ({ props: nodeProps }) => ({
+        focus() {},
+        measureInWindow: (callback: (x: number, y: number, w: number, h: number) => void) => {
+          const { testID } = nodeProps as { testID?: string };
+          if (testID === "conversation-notes-hub") callback(10, 50, 390, 780);
+          if (testID === "conversation-notes-sort-trigger") callback(214, 430, 112, 36);
+        },
+      }),
+    }); });
     const inputs = () => page.root.findAllByType("TextInput" as never);
     const globalInput = () => inputs().find((node) => node.props.placeholder === "写全局笔记…")!;
     const queryInput = () => inputs().find((node) => node.props.accessibilityLabel === "搜索会话笔记")!;
@@ -278,12 +287,27 @@ test("sidebar opens the host notes hub and shares session drafts with the compos
     assert.deepEqual(list().props.stickyHeaderIndices, [1]);
     assert.ok(queryInput().parent, "the compact page renders the search field in the sticky controls row");
     assert.deepEqual(rowOrder(), ["笔记：设计讨论", "笔记：归档会话"]);
-    await act(async () => { button("排序：笔记更新时间，降序").props.onPress(); });
-    const sortOption = (label: string) => page.root.find((node) => node.type === ("Pressable" as never)
-      && node.props.accessibilityRole === "radio" && node.props.accessibilityLabel === label);
-    assert.equal(page.root.findByType("Modal" as never).props.title, "会话笔记排序");
-    await act(async () => { sortOption("升序").props.onPress(); });
-    await act(async () => { button("完成排序").props.onPress(); });
+    const menu = () => page.root.findAll((node) => node.type === ("View" as never) && node.props.testID === "conversation-notes-sort-menu").at(0);
+    await act(async () => { button("当前降序，切换为升序").props.onPress(); });
+    assert.equal(menu(), undefined, "the direction icon applies immediately without opening the menu");
+    assert.deepEqual(rowOrder(), ["笔记：归档会话", "笔记：设计讨论"]);
+    const field = () => button("排序字段：笔记更新时间");
+    await act(async () => { field().props.onPress(); });
+    assert.equal(field().props["aria-expanded"], true);
+    assert.deepEqual(menu()?.props.style[1], { left: 148, top: 420, width: 168, height: 190 });
+    const radios = () => menu()?.findAll((node) => node.type === ("Pressable" as never) && node.props.accessibilityRole === "radio") ?? [];
+    assert.deepEqual(radios().map((node) => node.props.accessibilityLabel), ["名称", "笔记创建时间", "笔记更新时间", "对话创建时间", "对话更新时间"]);
+    assert.equal(radios()[2]?.props["aria-checked"], true);
+    await act(async () => { button("关闭排序选项").props.onPress(); });
+    assert.equal(field().props["aria-expanded"], false);
+    assert.deepEqual(rowOrder(), ["笔记：归档会话", "笔记：设计讨论"]);
+    await act(async () => { field().props.onPress(); });
+    await act(async () => { radios()[1]?.props.onPress(); });
+    assert.equal(menu(), undefined, "selecting a field closes the dropdown");
+    assert.ok(button("排序字段：笔记创建时间"));
+    assert.ok(button("当前升序，切换为降序"));
+    assert.deepEqual(rowOrder(), ["笔记：设计讨论", "笔记：归档会话"]);
+    await act(async () => { button("当前升序，切换为降序").props.onPress(); });
     assert.deepEqual(rowOrder(), ["笔记：归档会话", "笔记：设计讨论"]);
     assert.deepEqual(rpcReads, [], "the hub does not read individual note bodies before selection");
     await act(async () => { globalInput().props.onChangeText("新全局正文"); queryInput().props.onChangeText("项目"); });

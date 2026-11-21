@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Keyboard, Pressable, StyleSheet, Text, View, type FlatList as NativeFlatList } from "react-native";
+import { BackHandler, Keyboard, Pressable, StyleSheet, Text, View, type FlatList as NativeFlatList } from "react-native";
 import type { PluginClientContext, PluginScreenProps, PluginSidebarItemProps } from "@getpaseo/plugin/client";
-import { FlatList, Icon, Modal, SidebarRow, TextInput } from "@getpaseo/plugin/client/ui";
+import { FlatList, Icon, ScrollView, SidebarRow, TextInput } from "@getpaseo/plugin/client/ui";
 import { catalogRows, defaultSort, sortOptions, type CatalogRow, type NoteSort } from "./catalog";
 import type { NoteLibrary } from "./library";
 import { NotesPanel } from "./panel";
@@ -9,6 +9,10 @@ import { NotesPanel } from "./panel";
 const screenId = "conversation-notes-hub";
 type Colors = PluginScreenProps["theme"]["colors"];
 type ListRow = { kind: "controls" } | { kind: "empty" } | { kind: "note"; note: CatalogRow };
+const sortRowHeight = 36;
+const sortMenuInset = 4;
+const sortMenuHeight = sortRowHeight * sortOptions.length + sortMenuInset * 2 + 2;
+type SortMenuPosition = { left: number; top: number; width: number; height: number };
 const styles = StyleSheet.create({
   fill: { flex: 1, minWidth: 0, minHeight: 0 },
   page: { flex: 1, minHeight: 0 },
@@ -32,7 +36,13 @@ const styles = StyleSheet.create({
   editor: { paddingHorizontal: 8, paddingTop: 6, paddingBottom: 8, gap: 4 },
   source: { alignSelf: "flex-start" },
   message: { paddingHorizontal: 8, paddingVertical: 10 },
-  sortPick: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", minHeight: 36, borderRadius: 6, paddingHorizontal: 8 },
+  sortTrigger: { paddingHorizontal: 7 },
+  overlay: { ...StyleSheet.absoluteFillObject, zIndex: 10 },
+  sortMenu: { position: "absolute", borderWidth: 1, borderRadius: 8, elevation: 4,
+    shadowColor: "#000", shadowOpacity: 0.16, shadowRadius: 10, shadowOffset: { width: 0, height: 4 } },
+  sortItems: { padding: sortMenuInset },
+  sortPick: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 6,
+    height: sortRowHeight, borderRadius: 5, paddingHorizontal: 8 },
 });
 
 function Action({ label, icon, press, colors, text, disabled = false }: {
@@ -54,41 +64,35 @@ function Sidebar({ openScreen, currentScreen }: PluginSidebarItemProps) {
   return <SidebarRow label="笔记" icon="NotebookPen" active={currentScreen?.screenId === screenId} onPress={() => openScreen({ screenId })} />;
 }
 
-function SortOptions({ open, close, sort, change, colors }: {
-  open: boolean; close(): void; sort: NoteSort; change(value: NoteSort): void; colors: Colors;
+function SortMenu({ position, close, selectedKey, select, colors }: {
+  position: SortMenuPosition; close(): void; selectedKey: NoteSort["key"]; select(key: NoteSort["key"]): void; colors: Colors;
 }) {
-  return <Modal title="会话笔记排序" open={open} onOpenChange={(next) => { if (!next) close(); }}>
-    <Modal.Content contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 16, gap: 6 }}>
-      <View accessibilityRole="radiogroup" accessibilityLabel="排序字段">
-        {sortOptions.map(({ key, label }) => {
-          const selected = key === sort.key;
-          return <Pressable key={key} accessibilityRole="radio" accessibilityLabel={label} accessibilityState={{ checked: selected }}
-            aria-checked={selected} onPress={() => change(key === sort.key ? sort : { key, direction: key === "name" ? "asc" : "desc" })}
-            style={({ pressed }) => [styles.sortPick, { backgroundColor: pressed || selected ? colors.surface2 : undefined }]}>
-            <Text style={[styles.bodyText, { color: colors.foreground }]}>{label}</Text>
-            {selected && <Icon name="Check" size={15} color={colors.accent} />}
-          </Pressable>;
-        })}
-      </View>
-      <View accessibilityRole="radiogroup" accessibilityLabel="排序方向" style={styles.section}>
-        {(["asc", "desc"] as const).map((direction) => {
-          const label = direction === "asc" ? "升序" : "降序";
-          const selected = sort.direction === direction;
-          return <Pressable key={direction} accessibilityRole="radio" accessibilityLabel={label} accessibilityState={{ checked: selected }}
-            aria-checked={selected} onPress={() => change({ ...sort, direction })}
-            style={({ pressed }) => [styles.sortPick, styles.fill, { gap: 6, borderWidth: 1, borderColor: colors.border,
-              backgroundColor: pressed || selected ? colors.surface2 : undefined }]}>
-            <Text style={[styles.bodyText, { color: colors.foreground }]}>{label}</Text>
-            {selected && <Icon name="Check" size={15} color={colors.accent} />}
-          </Pressable>;
-        })}
-      </View>
-      <Pressable accessibilityRole="button" accessibilityLabel="完成排序" onPress={close}
-        style={({ pressed }) => [styles.sortPick, { alignSelf: "flex-end", backgroundColor: pressed ? colors.surface2 : undefined }]}>
-        <Text style={[styles.bodyText, { color: colors.accent }]}>完成</Text>
-      </Pressable>
-    </Modal.Content>
-  </Modal>;
+  const selectedOption = useRef<View>(null);
+  useEffect(() => { selectedOption.current?.focus(); }, []);
+  useEffect(() => {
+    const back = BackHandler.addEventListener("hardwareBackPress", () => { close(); return true; });
+    return () => back.remove();
+  }, [close]);
+  return <View style={styles.overlay} accessibilityViewIsModal onAccessibilityEscape={close}>
+    <Pressable accessibilityRole="button" accessibilityLabel="关闭排序选项" onPress={close} style={StyleSheet.absoluteFillObject} />
+    <View testID="conversation-notes-sort-menu"
+      style={[styles.sortMenu, position, { backgroundColor: colors.surface1, borderColor: colors.border }]}>
+      <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.sortItems}>
+        <View accessibilityRole="radiogroup" accessibilityLabel="排序字段">
+          {sortOptions.map(({ key, label }) => {
+            const selected = key === selectedKey;
+            return <Pressable key={key} ref={selected ? selectedOption : undefined}
+              accessibilityRole="radio" accessibilityLabel={label} accessibilityState={{ checked: selected }}
+              aria-checked={selected} onPress={() => select(key)}
+              style={({ pressed }) => [styles.sortPick, { backgroundColor: pressed || selected ? colors.surface2 : undefined }]}>
+              <Text style={[styles.bodyText, { color: colors.foreground }]}>{label}</Text>
+              {selected && <Icon name="Check" size={15} color={colors.accent} />}
+            </Pressable>;
+          })}
+        </View>
+      </ScrollView>
+    </View>
+  </View>;
 }
 
 function SourceEditor({ item, library, theme, layout, navigation, host }: PluginScreenProps & { library: NoteLibrary; item: CatalogRow }) {
@@ -109,7 +113,9 @@ function Hub({ library, ...props }: PluginScreenProps & { library: NoteLibrary }
   const [catalog, setCatalog] = useState<Awaited<ReturnType<NoteLibrary["loadCatalog"]>>>();
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState(defaultSort);
-  const [sortOpen, setSortOpen] = useState(false);
+  const [sortMenu, setSortMenu] = useState<SortMenuPosition>();
+  const pageRef = useRef<View>(null);
+  const sortTriggerRef = useRef<View>(null);
   const [refresh, setRefresh] = useState(0);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -158,6 +164,31 @@ function Hub({ library, ...props }: PluginScreenProps & { library: NoteLibrary }
   ], [layout.compact, rows, failed]);
   const label = loading ? "正在读取会话笔记…" : filter ? "没有匹配的笔记" : "还没有会话笔记";
   const sortLabel = sortOptions.find(({ key }) => key === sort.key)?.label;
+  const ascending = sort.direction === "asc";
+  function openSortMenu() {
+    const page = pageRef.current, trigger = sortTriggerRef.current;
+    if (!page || !trigger) return;
+    // Measure in window coordinates so this also works when the compact toolbar is pinned by FlatList.
+    page.measureInWindow((pageX, pageY, pageWidth, pageHeight) => {
+      trigger.measureInWindow((x, y, triggerWidth, triggerHeight) => {
+        if (page !== pageRef.current || trigger !== sortTriggerRef.current) return;
+        const inset = 8, gap = 4;
+        const width = Math.min(168, pageWidth - inset * 2);
+        const below = y - pageY + triggerHeight + gap;
+        const above = y - pageY - gap;
+        const spaceBelow = pageHeight - below - inset;
+        const openDown = spaceBelow >= sortMenuHeight || spaceBelow >= above - inset;
+        const height = Math.min(sortMenuHeight, openDown ? spaceBelow : above - inset);
+        if (width <= 0 || height <= 0) return;
+        const left = Math.max(inset, Math.min(x - pageX + triggerWidth - width, pageWidth - width - inset));
+        setSortMenu({ left, top: openDown ? below : above - height, width, height });
+      });
+    });
+  }
+  function closeSortMenu() {
+    setSortMenu(undefined);
+    sortTriggerRef.current?.focus();
+  }
   const reload = () => setRefresh((value) => value + 1);
   const global = <NotesPanel theme={theme} layout={layout} title="全局笔记" bodyHeight={layout.compact ? 290 : undefined}
     placeholder="写全局笔记…" note={library.globalNote} loadPreferences={library.loadPreferences} />;
@@ -166,8 +197,15 @@ function Hub({ library, ...props }: PluginScreenProps & { library: NoteLibrary }
       <Text accessibilityRole="header" style={[styles.title, { color: colors.foreground }]}>会话笔记</Text>
       {!!catalog && <Text style={[styles.caption, { color: colors.foregroundMuted }]}>{rows.length}</Text>}
       <View style={styles.fill} />
-      <Action label={`排序：${sortLabel}，${sort.direction === "asc" ? "升序" : "降序"}`} text={sortLabel} icon={sort.direction === "asc" ? "ArrowUp" : "ArrowDown"}
-        colors={colors} press={() => { Keyboard.dismiss(); setSortOpen(true); }} />
+      <Pressable ref={sortTriggerRef} testID="conversation-notes-sort-trigger"
+        accessibilityRole="button" accessibilityLabel={`排序字段：${sortLabel}`} accessibilityState={{ expanded: !!sortMenu }}
+        aria-expanded={!!sortMenu} onPress={openSortMenu}
+        style={({ pressed }) => [styles.action, styles.sortTrigger, { backgroundColor: pressed || sortMenu ? colors.surface2 : undefined }]}>
+        <Text style={[styles.caption, { color: colors.foreground }]}>{sortLabel}</Text>
+        <Icon name="ChevronDown" size={13} color={colors.foregroundMuted} />
+      </Pressable>
+      <Action label={ascending ? "当前升序，切换为降序" : "当前降序，切换为升序"} icon={ascending ? "ArrowUp" : "ArrowDown"}
+        colors={colors} press={() => changeSort({ key: sort.key, direction: ascending ? "desc" : "asc" })} />
       <Action label="刷新会话笔记" icon={loading ? "LoaderCircle" : "RefreshCw"} colors={colors} press={reload} disabled={loading} />
     </View>
     <View style={[styles.search, { borderColor: colors.border, backgroundColor: colors.surface1 }]}>
@@ -210,7 +248,8 @@ function Hub({ library, ...props }: PluginScreenProps & { library: NoteLibrary }
     </View>;
   }
 
-  return <View testID="conversation-notes-hub" style={[styles.page, !layout.compact && styles.columns]}>
+  return <View ref={pageRef} collapsable={false} testID="conversation-notes-hub" onLayout={() => setSortMenu(undefined)}
+    style={[styles.page, !layout.compact && styles.columns]}>
     {!layout.compact && <View testID="conversation-notes-global-column" style={styles.left}>{global}</View>}
     <View style={layout.compact ? styles.fill : [styles.right, { borderLeftColor: colors.border }]}>
       {!layout.compact && controls}
@@ -224,7 +263,8 @@ function Hub({ library, ...props }: PluginScreenProps & { library: NoteLibrary }
         stickyHeaderIndices={layout.compact ? [1] : undefined} data={list}
         keyExtractor={(row) => row.kind === "note" ? `note:${row.note.id}` : row.kind} renderItem={({ item }) => renderRow(item)} />
     </View>
-    <SortOptions open={sortOpen} sort={sort} change={changeSort} close={() => setSortOpen(false)} colors={colors} />
+    {sortMenu && <SortMenu position={sortMenu} selectedKey={sort.key} colors={colors} close={closeSortMenu}
+      select={(key) => { closeSortMenu(); changeSort({ ...sort, key }); }} />}
   </View>;
 }
 
