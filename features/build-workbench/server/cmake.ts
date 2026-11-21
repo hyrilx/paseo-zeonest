@@ -1,5 +1,5 @@
 import { mkdirSync, opendirSync, writeFileSync, rmSync } from "node:fs";
-import { isAbsolute, join, relative } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import type { ProjectTarget } from "./projects";
 import { misePin } from "./mise";
 import { at, digest, inside, projectDirs, readText, resolveWithin } from "./paths";
@@ -7,6 +7,7 @@ import { at, digest, inside, projectDirs, readText, resolveWithin } from "./path
 const dirFor = (project: string, preset?: string) => `.zeonest-build/cmake/${digest(preset ? JSON.stringify([project, preset]) : project).slice(0, 20)}`;
 const replyFor = (dir: string) => `${dir}/.cmake/api/v1/reply`;
 const markerFor = (dir: string) => `${dir}/zeonest-configure.json`;
+export const cmakeBuildDir = (base: string, tool: string, options: string[]) => `${base}/${digest(JSON.stringify([tool, options])).slice(0, 20)}`;
 const basename = (s: unknown): s is string => typeof s === "string" && /^[\w.-]+\.json$/u.test(s);
 
 export function discoverCmake(root: string, notices: string[], targets: ProjectTarget[]) {
@@ -39,12 +40,21 @@ export function discoverCmake(root: string, notices: string[], targets: ProjectT
         try {
           const saved = readText(root, markerFor(dir), 4096);
           if (!saved) continue;
-          const marker = JSON.parse(saved) as { stamp?: string; tool?: string };
-          if (marker.stamp !== stamp || !marker.tool) { notices.push(`${source}：入口声明已变化，请重新配置。`); continue; }
-          const cache = readText(root, `${dir}/CMakeCache.txt`);
+          const marker = JSON.parse(saved) as { stamp?: string; tool?: string; context?: string; result?: string };
+          if (marker.stamp !== stamp || !marker.tool || !marker.context || !/^[a-f0-9]{20}$/u.test(marker.context)) {
+            notices.push(`${source}：入口或配置记录已变化，请重新配置。`); continue;
+          }
+          const built = at(dir, marker.context);
+          const cache = readText(root, `${built}/CMakeCache.txt`);
           if (!cache || !cache.split(/\r?\n/u).includes(`CMAKE_HOME_DIRECTORY:INTERNAL=${resolveWithin(root, project)}`)) continue;
-          for (const item of fileApiTargets(root, dir)) {
-            targets.push({ ...base, name: label(item.name), cmake: { dir, stamp, preset, target: item.name, configuration: item.configuration, tool: marker.tool }, outputs: item.outputs });
+          const model = fileApiResult(root, built, project);
+          if (marker.result !== digest(JSON.stringify([cache, model]))) { notices.push(`${source}：CMake 配置输入或生成结果已变化，请重新配置。`); continue; }
+          const defaults = /^CMAKE_DEFAULT_BUILD_TYPE:[^=\n]+=(.+)\r?$/mu.exec(cache)?.[1]?.trim();
+          const kind = /^CMAKE_GENERATOR:[^=\n]+=(.+)\r?$/mu.exec(cache)?.[1]?.trim();
+          const first = /^CMAKE_CONFIGURATION_TYPES:[^=\n]+=([^;\r\n]+)/mu.exec(cache)?.[1];
+          const selected = model.configurations.length === 1 ? model.configurations[0] : kind === "Ninja Multi-Config" ? defaults || first : undefined;
+          for (const item of model.targets) {
+            targets.push({ ...base, name: label(item.name), cmake: { dir: built, stamp, preset, target: item.name, configurations: item.outputs, tool: marker.tool }, outputs: selected === undefined ? [] : item.outputs[selected] ?? [] });
           }
         } catch (error) { notices.push(`${source}：${(error as Error).message}`); }
       }
@@ -83,7 +93,7 @@ function configurePresets(root: string, project: string, notices: string[]) {
   return { inputs: [...inputs], names: [...names].slice(0, 16) };
 }
 
-function fileApiTargets(root: string, dir: string) {
+function fileApiResult(root: string, dir: string, project: string) {
   const reply = replyFor(dir);
   const handle = opendirSync(resolveWithin(root, reply));
   const indexes: string[] = [];
@@ -98,39 +108,60 @@ function fileApiTargets(root: string, dir: string) {
     try { return JSON.parse(readText(root, `${reply}/${name}`) ?? "null") as T | null; }
     catch (error) { throw new Error(`CMake File API JSON 无法读取：${name}`, { cause: error }); }
   };
-  const index = parse<{ reply?: { "codemodel-v2"?: { jsonFile?: unknown } } }>(newest);
+  const index = parse<{ reply?: Record<string, { jsonFile?: unknown }> }>(newest);
   const model = index?.reply?.["codemodel-v2"]?.jsonFile;
   if (!basename(model)) throw new Error("未找到 CMake codemodel-v2");
+  const files = index?.reply?.["cmakeFiles-v1"]?.jsonFile;
+  if (!basename(files)) throw new Error("未找到 CMake cmakeFiles-v1");
+  const records = parse<{ inputs?: { path?: unknown; isGenerated?: boolean; isCMake?: boolean }[] }>(files)?.inputs;
+  if (!Array.isArray(records) || records.length > 4096) throw new Error("CMake 配置输入超出读取范围");
+  const source = resolveWithin(root, project);
+  const inputs = records.flatMap((record) => {
+    if (record?.isGenerated || record?.isCMake || typeof record?.path !== "string") return [];
+    const abs = resolve(source, record.path);
+    if (!inside(root, abs)) return [];
+    const rel = relative(root, abs);
+    const text = readText(root, rel);
+    return [[rel, text === undefined ? null : digest(text)]];
+  });
   type Entry = { name?: unknown; jsonFile?: unknown };
   const document = parse<{ configurations?: { name?: string; targets?: Entry[] }[] }>(model);
   const configurations = document?.configurations;
-  const config = Array.isArray(configurations)
-    ? configurations.find((c) => c?.name === "Debug") ?? configurations[0] : undefined;
-  if (!config || !Array.isArray(config.targets)) throw new Error("File API 未返回构建配置");
-  const configuration = typeof config.name === "string" && /^[\w][\w.+-]{0,63}$/u.test(config.name) ? config.name : undefined;
-  return config.targets.slice(0, 96).flatMap((item) => {
-    if (typeof item?.name !== "string" || !/^[\w][\w.+-]{0,127}$/u.test(item.name) || !basename(item.jsonFile)) return [];
-    const detail = parse<{ type?: string; artifacts?: { path?: string }[] }>(item.jsonFile);
-    if (!detail || !["EXECUTABLE", "STATIC_LIBRARY", "SHARED_LIBRARY", "MODULE_LIBRARY"].includes(detail.type ?? "")) return [];
-    const outputs = (Array.isArray(detail.artifacts) ? detail.artifacts : []).slice(0, 8).flatMap((item) => {
-      const path = item?.path;
-      if (typeof path !== "string") return [];
-      const rel = isAbsolute(path) ? relative(root, path) : at(dir, path);
-      try { return inside(resolveWithin(root, dir), resolveWithin(root, rel)) ? [rel] : []; }
-      catch { return []; }
-    });
-    return [{ name: item.name, configuration, outputs }];
-  });
+  if (!Array.isArray(configurations) || !configurations.length) throw new Error("File API 未返回构建配置");
+  const targets = new Map<string, Record<string, string[]>>();
+  for (const config of configurations.slice(0, 32)) {
+    if (!config || typeof config.name !== "string" || !/^([\w][\w.+-]{0,63})?$/u.test(config.name) || !Array.isArray(config.targets)) continue;
+    for (const item of config.targets.slice(0, 96)) {
+      if (typeof item?.name !== "string" || !/^[\w][\w.+-]{0,127}$/u.test(item.name) || !basename(item.jsonFile)) continue;
+      const detail = parse<{ type?: string; artifacts?: { path?: string }[] }>(item.jsonFile);
+      if (!detail || !["EXECUTABLE", "STATIC_LIBRARY", "SHARED_LIBRARY", "MODULE_LIBRARY"].includes(detail.type ?? "")) continue;
+      const outputs = (Array.isArray(detail.artifacts) ? detail.artifacts : []).slice(0, 8).flatMap((item) => {
+        const path = item?.path;
+        if (typeof path !== "string") return [];
+        const rel = isAbsolute(path) ? relative(root, path) : at(dir, path);
+        try { resolveWithin(root, rel); return [rel]; }
+        catch { return []; }
+      });
+      const existing = targets.get(item.name) ?? Object.create(null) as Record<string, string[]>;
+      existing[config.name] = outputs;
+      targets.set(item.name, existing);
+    }
+  }
+  return { configurations: configurations.slice(0, 32).map((c) => c?.name), inputs, targets: [...targets].map(([name, outputs]) => ({ name, outputs })) };
 }
 
-export function prepareCmake(root: string, dir: string) {
+export function prepareCmake(root: string, base: string, dir: string) {
   const query = `${dir}/.cmake/api/v1/query`;
   mkdirSync(resolveWithin(root, query), { recursive: true });
-  rmSync(resolveWithin(root, markerFor(dir)), { force: true });
+  rmSync(resolveWithin(root, markerFor(base)), { force: true });
   writeFileSync(resolveWithin(root, `${query}/codemodel-v2`), "");
+  writeFileSync(resolveWithin(root, `${query}/cmakeFiles-v1`), "");
 }
 
-export function finishCmake(root: string, dir: string, stamp: string, tool: string) {
-  fileApiTargets(root, dir);
-  writeFileSync(resolveWithin(root, markerFor(dir)), JSON.stringify({ stamp, tool }));
+export function finishCmake(root: string, project: string, base: string, dir: string, stamp: string, tool: string) {
+  const model = fileApiResult(root, dir, project);
+  const cache = readText(root, `${dir}/CMakeCache.txt`);
+  if (!cache) throw new Error("未找到 CMakeCache.txt");
+  const context = dir.slice(base.length + 1);
+  writeFileSync(resolveWithin(root, markerFor(base)), JSON.stringify({ stamp, tool, context, result: digest(JSON.stringify([cache, model])) }));
 }

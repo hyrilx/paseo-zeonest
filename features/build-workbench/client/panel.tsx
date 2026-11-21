@@ -73,7 +73,9 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
   const configuration: Configuration | undefined = selected && tool && parsed.argv ? { target: selected, tool,
     options: parsed.argv, artifacts: artifacts.split("\n").map((s) => s.trim()).filter(Boolean) } : undefined;
   const suggestion = selected?.operation && selected.adapter === "cmake" ? ['-DCMAKE_BUILD_TYPE=Release', '-G "Unix Makefiles"']
-    : selected?.operation && selected.adapter === "xcode" ? ["-verbose"] : selected ? examples[selected.adapter] : [];
+    : selected?.operation && selected.adapter === "xcode" ? ["-verbose"]
+      : selected?.operation && selected.adapter === "gradle" ? ["--offline", "--workbench-task-filter=:模块:", "--workbench-task-filter=assembleDebug"] : selected ? examples[selected.adapter] : [];
+  const needsConfirmation = selected?.adapter === "gradle" && !selected.operation;
   const configurationKey = configuration && JSON.stringify(configuration);
 
   useEffect(() => {
@@ -136,9 +138,13 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
     }
     setConfirmation(undefined); setRunId(result.run.id); showDetail(true); updateRuns((x) => x + 1);
   }
+  function resetDraft() {
+    chooseTool(""); setAvailable(undefined); setOptions(""); setArtifacts("");
+    setName(""); setNamed(""); setConfirmation(undefined); setPlanError("");
+  }
   function retryRun(id: string) {
     perform(async () => {
-      const result = await retry({ workspaceId, id });
+      const result = await retry({ workspaceId, id, previewOnly: runs.find((item) => item.id === id)?.configuration.target.adapter === "gradle" });
       if (result.kind === "changed") { setConfirmation({ key: "", plan: result, id }); return; }
       setConfirmation(undefined); setRunId(result.run.id); showDetail(true); updateRuns((x) => x + 1);
     });
@@ -170,12 +176,13 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
           if (c) { setProject(projectLabel(c.target)); setSearch(""); select(rpc.targetId(c.target)); chooseTool(c.tool); setOptions(formatArguments(c.options)); setArtifacts(c.artifacts.join("\n")); setName(c.name); setAvailable(undefined); refreshVersions((v) => v + 1); }
           else setName("");
         }} />
-        <SettingsSelect label="子项目" value={project} options={[{ label: "全部", value: "" }, ...projects.map((p) => ({ label: p, value: p }))]} onValueChange={(value) => { setProject(value); select(""); setAvailable(undefined); chooseTool(""); }} />
+        <SettingsSelect label="子项目" value={project} options={[{ label: "全部", value: "" }, ...projects.map((p) => ({ label: p, value: p }))]} onValueChange={(value) => { setProject(value); select(""); resetDraft(); }} />
         <Field colors={colors} label="搜索目标" value={search} set={setSearch} />
         <SettingsSelect label="目标" value={selection} options={[{ label: selection && !selected ? "原目标已失效，请重新选择" : "选择目标", value: "" },
-          ...targets.map((t) => ({ label: `${projectLabel(t)} › ${t.name}${t.operation ? "（探测）" : t.blocked ? "（不可运行）" : t.confirmed ? "（已探测）" : ""}`, value: rpc.targetId(t) }))]} onValueChange={(value) => { select(value); chooseTool(""); setAvailable(undefined); setPlanError(""); }} />
+          ...targets.map((t) => ({ label: `${projectLabel(t)} › ${t.name}${t.operation ? "（探测）" : t.blocked ? "（不可运行）" : t.confirmed ? "（已探测）" : ""}`, value: rpc.targetId(t) }))]} onValueChange={(value) => { select(value); resetDraft(); }} />
         {selected ? <>
           <Field colors={colors} label="构建选项" placeholder="留空使用项目默认值" value={options} set={setOptions} />
+          {selected.probeOptions?.length ? <Button colors={colors} label="复制探测时的项目选项" onPress={() => setOptions(formatArguments(selected.probeOptions!))} /> : null}
           <SettingsSelect label="常用选项" hint="选中示例会替换上方选项，可再编辑。含空格的值请加引号。"
             value={suggestion.includes(options) ? options : ""} options={[{ label: "选择示例", value: "" }, ...suggestion.map((value) => ({ label: value, value }))]}
             onValueChange={(value) => { if (value) setOptions(value); }} />
@@ -184,7 +191,11 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
       </SettingsCard>
       <View style={styles.actions}>
         <Button colors={colors} label="刷新目标" onPress={() => { setFailure(""); refresh((x) => x + 1); }} />
-        <Button colors={colors} label={selected?.operation ? "执行探测" : "运行"} primary disabled={!action || !plan?.command.tool.version || !!confirm} onPress={() => { if (plan) perform(() => submit(plan)); }} />
+        <Button colors={colors} label={selected?.operation ? "执行探测" : "运行"} primary disabled={!action || !plan?.command.tool.version || !!confirm} onPress={() => {
+          if (!plan) return;
+          if (needsConfirmation) setConfirmation({ key: configurationKey ?? "", plan });
+          else perform(() => submit(plan));
+        }} />
       </View>
       {selected?.operation ? <Note colors={colors}>探测会执行项目配置，并可能下载工具声明的项目依赖。完成后可刷新目标。</Note> : null}
       {selected?.blocked ? <Note colors={colors} warning>{selected.blocked}</Note> : null}
@@ -220,7 +231,7 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
         await verify({ workspaceId, configuration }); refreshVersions((v) => v + 1);
       })} />
     </SettingsSection> : null}
-    {confirm ? <SettingsSection title="命令或工具链已变化">
+    {confirm ? <SettingsSection title={needsConfirmation || (confirm.id && current?.configuration.target.adapter === "gradle") ? "确认 Gradle 任务" : "命令或工具链已变化"}>
       {confirm.id && current ? <><Note colors={colors}>原运行</Note><CommandPreview colors={colors} plan={current.command} /></> : null}
       <Note colors={colors}>请核对新的命令、工作目录和工具版本后再运行。</Note>
       <CommandPreview colors={colors} plan={confirm.plan.command} />
@@ -304,9 +315,9 @@ function RunDetail({ colors, workspaceId, id, update, busy, retry, stop }: {
         {rows.length ? rows.map((row) => <Text key={row.cursor} style={{ color: row.stream === "stderr" ? colors.statusWarning : colors.foreground }}>{row.text}</Text>) : "等待输出"}
       </Text>
     </View> : <View style={styles.list}>
-      <Note colors={colors}>仅比较运行前后的文件状态，不代表文件一定由本次构建产生。</Note>
+      <Note colors={colors}>观察路径比较运行前后的状态；工具报告的文件另有标记。文件存在不代表由本次运行产生。</Note>
       {snapshot?.artifactsLimited ? <Note colors={colors}>已达到扫描上限，仅显示部分结果。</Note> : null}
-      {snapshot?.artifacts.length ? snapshot.artifacts.map((a) => <Text key={a.path} selectable style={{ color: colors.foreground }}>{assetLabels[a.state]} · {a.path}</Text>)
+      {snapshot?.artifacts.length ? snapshot.artifacts.map((a) => <Text key={a.path} selectable style={{ color: colors.foreground }}>{a.origin === "hint" ? "线索" : a.origin === "native" ? "工具报告" : assetLabels[a.state]} · {a.path}</Text>)
         : <Note colors={colors}>{run && rpc.live(run.status) ? "运行结束后查看产物" : "没有可展示的产物记录"}</Note>}
     </View>}
   </View>;
@@ -321,6 +332,7 @@ function CommandPreview({ plan, colors }: { plan: Command; colors: Colors }) {
     {plan.preparation?.length ? <Note colors={colors}>准备成功后执行</Note> : null}
     <Text selectable style={[styles.code, { color: colors.foreground }]}>{commandText(plan)}</Text>
     <Note colors={colors}>目录：{plan.cwd} · 来源：{plan.source}{"\n"}{plan.tool.version ?? "版本未验证"}{"\n"}{plan.tool.paths.join("\n")}</Note>
+    {plan.notes?.map((note) => <Note key={note} colors={colors}>{note}</Note>)}
   </View>;
 }
 function Note({ colors, children, warning }: { colors: Colors; children: ReactNode; warning?: boolean }) {

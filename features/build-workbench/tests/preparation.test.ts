@@ -59,7 +59,7 @@ else if (args[0] === 'ci' || args[0] === 'install') {
     const preview = workbench.preview(workspace, config);
     assert.equal(preview.command.preparation?.[0]?.cwd, "projects/group");
     assert.equal(existsSync(join(workspace.root, "projects/group/node_modules")), false);
-    assert.deepEqual(preview.command.preparation?.[0]?.argv.slice(1), config.target.adapter === "npm" ? ["ci", "--include=dev"] : ["install", "--prod=false", "--frozen-lockfile"]);
+    assert.deepEqual(preview.command.preparation?.[0]?.argv.slice(1), config.target.adapter === "npm" ? ["install"] : ["install"]);
     const started = workbench.start(workspace, config, preview.fingerprint);
     assert.equal(started.kind, "started");
     return () => workbench.detail(workspace, started.run.id, 0);
@@ -79,7 +79,7 @@ else if (args[0] === 'ci' || args[0] === 'install') {
     const done = await settled(await start(success));
     assert.equal(done.value.run.status, "success");
     assert.match(done.log, /INSTALL-START[\s\S]*INSTALL-DONE[\s\S]*BUILD-DONE/u);
-    assert.equal(workbench.preview(success.workspace, success.config).command.preparation, undefined);
+    assert.ok(workbench.preview(success.workspace, success.config).command.preparation);
   }
   const failure = setup("failure", "fail");
   const fail = await settled(await start(failure));
@@ -103,7 +103,7 @@ else if (args[0] === 'ci' || args[0] === 'install') {
   for (const [{ workspace, config }, id, marker] of [
     [failure, fail.value.run.id, "fail"], [stall, halted.value.run.id, "stall"],
   ] as const) {
-    assert.equal(reopened.preview(workspace, config).command.preparation, undefined, "normal preview sees a partial but valid-looking install");
+    assert.ok(reopened.preview(workspace, config).command.preparation, "ordinary Run also rechecks the partial install");
     const changed = reopened.retry(workspace, id);
     assert.equal(changed.kind, "changed");
     assert.ok(changed.command.preparation?.length);
@@ -113,7 +113,7 @@ else if (args[0] === 'ci' || args[0] === 'install') {
     assert.equal(afterVerify.kind, "changed");
     assert.ok(afterVerify.command.preparation?.length);
     assert.equal(reopened.list(workspace).length, 1, "retry preview does not create a run");
-    const retry = reopened.retry(workspace, id, afterVerify.fingerprint);
+    const retry = marker === "fail" ? reopened.start(workspace, config, reopened.preview(workspace, config).fingerprint) : reopened.retry(workspace, id, afterVerify.fingerprint);
     assert.equal(retry.kind, "started");
     assert.notEqual(retry.run.id, id);
     const result = await settled(() => reopened.detail(workspace, retry.run.id, 0));
@@ -123,10 +123,10 @@ else if (args[0] === 'ci' || args[0] === 'install') {
   await reopened.verify(buildFailure.workspace, buildFailure.config);
   const onlyBuild = reopened.retry(buildFailure.workspace, build.value.run.id, undefined, true);
   assert.equal(onlyBuild.kind, "changed");
-  assert.equal(onlyBuild.command.preparation, undefined, "successful prep is not repeated solely because the build failed");
+  assert.ok(onlyBuild.command.preparation, "the native manager checks readiness incrementally each time");
 });
 
-test("npm/pnpm preparation checks versions, lock freshness, and generated PnP layout", { skip: process.platform === "win32" }, (t) => {
+test("npm/pnpm never infer complete installs from lock, package versions, or generated PnP loaders", { skip: process.platform === "win32" }, (t) => {
   const root = workspaceRoot(mkdtempSync(join(tmpdir(), "zeonest-layout-test-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   function file(name: string, content: string, executable = false) {
@@ -154,8 +154,8 @@ test("npm/pnpm preparation checks versions, lock freshness, and generated PnP la
   }
   assert.equal(needsPreparation("npm"), true);
   writeFileSync(pkg, '{"version":"1.2.0"}');
-  assert.equal(needsPreparation("npm"), false);
-  assert.equal(needsPreparation("pnpm"), false);
+  assert.equal(needsPreparation("npm"), true);
+  assert.equal(needsPreparation("pnpm"), true);
   const future = new Date(Date.now() + 5_000);
   utimesSync(lock, future, future);
   assert.equal(needsPreparation("pnpm"), true);

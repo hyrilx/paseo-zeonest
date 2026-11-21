@@ -48,14 +48,13 @@ test("stack options compile to native arguments without changing the chosen oper
   const mode = buildArguments(root, pick("pnpm"), ["--label", "two words", ""], tool);
   assert.deepEqual(mode.args, ["run", "build", "--label", "two words", ""]);
   const cargo = buildArguments(root, pick("cargo"), ["--profile", "fast", "--features=ui,fast", "--target", "targets/custom.json", "--target=x86_64-unknown-linux-gnu"], tool);
-  assert.deepEqual(cargo.args, ["build", "--package", "fixture", "--profile", "fast", "--features=ui,fast", "--target", "targets/custom.json", "--target=x86_64-unknown-linux-gnu"]);
-  assert.ok(cargo.outputs.includes("target/custom/fast/fixture"));
-  assert.ok(cargo.outputs.includes("target/x86_64-unknown-linux-gnu/fast/fixture"));
+  assert.deepEqual(cargo.args, ["build", "--package", "fixture", "--message-format=json-render-diagnostics", "--profile", "fast", "--features=ui,fast", "--target", "targets/custom.json", "--target=x86_64-unknown-linux-gnu"]);
+  assert.deepEqual(cargo.outputs, []);
   assert.throws(() => buildArguments(root, pick("cargo"), ["--target", "../outside.json"], tool), /有效的参数值/u);
   assert.throws(() => buildArguments(root, pick("cargo"), ["--manifest-path", "another/Cargo.toml"], tool), /不支持选项/u);
   const tauri = buildArguments(root, pick("tauri"), ["--release", "--features", "desktop", "--config", "tauri.extra.json", "--", "--locked"], tool);
   assert.deepEqual(tauri.args, ["exec", "tauri", "build", "--no-bundle", "--features", "desktop", "--config", "tauri.extra.json", "--", "--locked"]);
-  assert.deepEqual(tauri.outputs, ["dist", "src-tauri/target/release/desktop"]);
+  assert.deepEqual(tauri.outputs, ["dist"]);
   assert.throws(() => buildArguments(root, pick("tauri"), ["--bundles", "dmg"], tool), /不支持选项/u);
   const cmake = pick("cmake");
   assert.ok(!buildArguments(root, cmake, [], tool).args.includes("-G"));
@@ -63,10 +62,12 @@ test("stack options compile to native arguments without changing the chosen oper
   assert.deepEqual(c.args.slice(0, 4), ["-G", "Unix Makefiles", "-D", "CMAKE_BUILD_TYPE=Release"]);
   assert.throws(() => buildArguments(root, cmake, ["-B", "other"], tool), /不支持选项/u);
   assert.ok(cmake.cmake);
-  const compiled = { ...cmake, operation: undefined, cmake: { ...cmake.cmake, configuration: "Debug", tool: tool.signature, target: "fixture" } };
+  const compiled = { ...cmake, operation: undefined, cmake: { ...cmake.cmake, configurations: { Debug: ["debug/exe"], Release: ["release/exe"] }, tool: tool.signature, target: "fixture" } };
   const build = buildArguments(root, compiled, ["--parallel", "--config", "Release"], tool);
   assert.deepEqual(build.args.slice(-5), ["--target", "fixture", "--parallel", "--config", "Release"]);
   assert.ok(!build.args.includes("Debug"));
+  assert.deepEqual(build.outputs, ["release/exe"]);
+  assert.ok(!buildArguments(root, compiled, [], tool).args.includes("--config"));
 });
 
 test("optional protoc and Ninja are not run by tool verification; Tauri tries all installed Rust candidates", { skip: process.platform === "win32" }, async (t) => {

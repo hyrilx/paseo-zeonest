@@ -54,9 +54,18 @@ export function cargoOptions(root: string, cwd: string, args: string[]) {
 }
 
 export function gradleOptions(args: string[], probe: boolean) {
+  let filter: string | undefined;
+  const forwarded = args.filter((arg) => {
+    if (!arg.startsWith("--workbench-task-filter=")) return true;
+    if (!probe || filter !== undefined) throw new Error("任务范围筛选只可在 Gradle 探测时指定一次");
+    filter = arg.slice("--workbench-task-filter=".length);
+    if (!/^[:\w.-]{1,192}$/u.test(filter)) throw new Error("任务范围使用项目或任务名称片段，例如 :renderer: 或 assembleDemo");
+    return false;
+  });
   const reserved = /^(?:org\.gradle\.(?:daemon|native)(?:\.|$)|org\.gradle\.java\.home$)/u;
   const flagsByPhase: Record<string, Rule> = probe ? {} : { "--tests": value, "--args": value, "--rerun": true };
-  parse(args, {
+  const context: string[] = [];
+  const applied = parse(forwarded, {
     ...flags("--offline", "--refresh-dependencies", "--parallel", "--no-parallel", "--build-cache", "--no-build-cache",
       "--configuration-cache", "--no-configuration-cache", "--configure-on-demand", "--continue", "--rerun-tasks",
       "--stacktrace", "--full-stacktrace", "--info", "--debug", "--warn", "--quiet", "-s", "-i", "-q"),
@@ -64,8 +73,11 @@ export function gradleOptions(args: string[], probe: boolean) {
     "--exclude-task": (s) => /^:?[\w][\w.:-]*$/u.test(s), "-x": (s) => /^:?[\w][\w.:-]*$/u.test(s), ...flagsByPhase,
   }, (arg) => {
     const name = /^-[PD]([\w][\w.-]*)(?:=.*)?$/u.exec(arg)?.[1];
-    return !!name && !reserved.test(name);
+    if (!name || reserved.test(name)) return false;
+    context.push(arg);
+    return true;
   });
+  return { forwarded, filter, context: [...context, ...[...applied.keys()].filter((arg) => /^(?:--offline|--refresh-dependencies|--configure-on-demand|--(?:no-)?configuration-cache)$/u.test(arg))] };
 }
 
 export function cmakeOptions(args: string[], probe: boolean) {

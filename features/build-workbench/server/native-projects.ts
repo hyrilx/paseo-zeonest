@@ -1,11 +1,58 @@
-import { accessSync, constants, statSync } from "node:fs";
+import { accessSync, constants, opendirSync, statSync } from "node:fs";
+import { relative, resolve } from "node:path";
 import { PROBE_TARGET_LIMIT } from "../shared/contracts";
 import type { ProjectTarget } from "./projects";
 import { misePin } from "./mise";
-import { at, digest, projectDirs, readText, resolveWithin } from "./paths";
+import { at, digest, inside, projectDirs, readText, resolveWithin } from "./paths";
 
-export type Gradle = { wrapper?: string; jar?: string };
-export type Xcode = { kind: "workspace" | "project"; derived: string };
+export type Gradle = { wrapper?: string; jar?: string; volatile?: boolean };
+export type Xcode = { kind: "workspace" | "project"; derived: string; volatile?: boolean };
+
+function scanInputs(root: string, project: string, extension: RegExp, hidden = false) {
+  const files: [string, string][] = [];
+  let limited = false;
+  let seen = 0;
+  function scan(dir: string, depth: number) {
+    if (depth > 18 || seen >= 10000 || files.length >= 768) { limited = true; return; }
+    const handle = opendirSync(resolveWithin(root, dir));
+    try {
+      for (let entry; (entry = handle.readSync()) !== null;) {
+        if (++seen > 10000 || files.length >= 768) { limited = true; break; }
+        if (/^(?:\.git|\.pi|\.gradle|\.zeonest-build|build|node_modules|Pods|target|dist)$/u.test(entry.name)) continue;
+        const path = at(dir, entry.name);
+        if (entry.isDirectory() && (hidden || !entry.name.startsWith("."))) scan(path, depth + 1);
+        else if (entry.isFile() && extension.test(path)) {
+          const text = readText(root, path);
+          if (text !== undefined) files.push([path, digest(text)]);
+        } else if (entry.isSymbolicLink() && extension.test(path)) limited = true;
+      }
+    } finally { handle.closeSync(); }
+  }
+  try { scan(project, 0); }
+  catch { limited = true; }
+  return { files: files.sort(([a], [b]) => a.localeCompare(b)), limited };
+}
+
+function gradleInputs(root: string, project: string, settings: string) {
+  // Collect build files, catalogs, and convention-plugin sources under this root.
+  const results = scanInputs(root, project, /(?:\.gradle(?:\.kts)?|\.properties|\.versions\.toml|(?:^|\/)(?:buildSrc|build-logic)\/.*\.(?:kt|groovy|java))$/u);
+  let volatile = results.limited;
+  const includes = [...settings.matchAll(/\bincludeBuild\s*(?:\(\s*)?["']([^"']+)["']/gu)];
+  if (includes.length !== (settings.match(/\bincludeBuild\b/gu)?.length ?? 0) || includes.length > 32) volatile = true;
+  for (const [, path] of includes.slice(0, 32)) {
+    const abs = resolve(root, project, path!);
+    if (!inside(root, abs)) { volatile = true; continue; }
+    const found = scanInputs(root, relative(root, abs) || ".", /\.(?:gradle|kts|kt|groovy|java|toml|properties)$/u);
+    volatile ||= found.limited;
+    results.files.push(...found.files);
+  }
+  for (const [file] of results.files) {
+    if (!/\.gradle(?:\.kts)?$/u.test(file)) continue;
+    try { if (/\bapply\s*(?:\(\s*from\s*=|from\s*:)/u.test(readText(root, file) ?? "")) volatile = true; }
+    catch { volatile = true; }
+  }
+  return { files: results.files, volatile };
+}
 
 export function discoverGradle(root: string, dirs: string[], notices: string[], targets: ProjectTarget[]) {
   for (const project of dirs) {
@@ -26,15 +73,11 @@ export function discoverGradle(root: string, dirs: string[], notices: string[], 
         if (!properties || !statSync(resolveWithin(root, jar)).isFile()) throw new Error("Gradle Wrapper 缺少配置或 JAR");
         gradle = { wrapper, jar };
       }
-      const extra = ["gradle.properties", "gradle/gradle-daemon-jvm.properties", "gradle/libs.versions.toml"].map((name) => readText(root, at(project, name)));
-      const buildFiles = dirs.filter((dir) => project === "." || dir.startsWith(project + "/")).slice(0, 128)
-        .flatMap((dir) => ["build.gradle.kts", "build.gradle"].flatMap((name) => {
-          const path = at(dir, name);
-          try { const value = readText(root, path); return value === undefined ? [] : [[path, digest(value)]]; }
-          catch { return []; }
-        }));
+      const input = gradleInputs(root, project, inputs[0] ?? inputs[1] ?? "");
+      if (input.volatile) notices.push(`${source}：无法完整追踪构建逻辑；每次执行目标前需要新探测。`);
+      gradle.volatile = input.volatile;
       const miseJava = misePin(project, "java", (path) => readText(root, path));
-      const stamp = digest(JSON.stringify([inputs, properties, extra, buildFiles, miseJava]));
+      const stamp = digest(JSON.stringify([inputs, properties, input.files, miseJava]));
       targets.push({ adapter: "gradle", project, source, cwd: project, requirements: { miseJava }, stamp, gradle, name: "tasks --all", operation: "probe", outputs: [] });
     } catch (error) { notices.push(`${project}：${(error as Error).message}`); }
   }
@@ -52,9 +95,13 @@ export function discoverXcode(root: string, notices: string[], targets: ProjectT
         try { return [[path, readText(root, at(parent, `${path}/project.pbxproj`), 2 * 1024 * 1024)]]; }
         catch { return []; }
       }) : [];
+      const schemeDirs = [project, ...referenced.map(([path]) => at(parent, path!))];
+      const scans = schemeDirs.map((dir) => scanInputs(root, dir, /(?:\.xcscheme|Package\.resolved|\.xcconfig)$/u, true));
+      const volatile = scans.some(({ limited }) => limited) || (kind === "workspace" && (contents.match(/\.xcodeproj["']/gu)?.length ?? 0) !== referenced.length);
+      const declarations = scans.flatMap((scan) => scan.files);
       const derived = `.zeonest-build/xcode/${digest(project).slice(0, 20)}`;
-      targets.push({ adapter: "xcode", project, source, cwd: parent, requirements: {}, stamp: digest(JSON.stringify([contents, referenced])),
-        xcode: { kind, derived }, name: "list schemes", operation: "probe", outputs: [] });
+      targets.push({ adapter: "xcode", project, source, cwd: parent, requirements: {}, stamp: digest(JSON.stringify([contents, referenced, declarations])),
+        xcode: { kind, derived, volatile }, name: "list schemes", operation: "probe", outputs: [] });
     } catch (error) { notices.push(`${source}：${(error as Error).message}`); }
   }
 }
@@ -64,9 +111,8 @@ const gradleTask = (name: string) => {
   if (!/^:?(?:[\w-][\w.-]*:)*[\w-][\w.-]*$/u.test(name) || task.startsWith("-") || name.length > 192 || name.split(":").some((part) => part === "." || part === "..")) return false;
   const words = task.replace(/([A-Z])([A-Z][a-z])/gu, "$1 $2").replace(/([a-z0-9])([A-Z])/gu, "$1 $2").toLowerCase().split(/[ ._-]+/u);
   // Release can be a variant of a local build or unit test; it isn't a publishing verb.
-  return !words.some((word) => /^(?:publish\w*|deploy\w*|upload\w*|sign|signing|connected\w*|devices?|install\w*|uninstall\w*|archive|run|clean)$/u.test(word)) && !/^(?:init|wrapper|release)$/iu.test(task);
+  return !words.some((word) => /^(?:push\w*|publish\w*|deploy\w*|upload\w*|sign|signing|connected\w*|devices?|install\w*|uninstall\w*|archive|run|clean|release)$/u.test(word) && !(word === "release" && words[0] !== "release")) && !/^(?:init|wrapper)$/iu.test(task);
 };
-const localTask = (task: string) => /^(?:build|assemble|bundle|compile|check|test|lint)(?:$|[A-Z0-9_.-])|^(?:jar|war|distZip|distTar)$|(?:Jar|War|Distributable|Test|Check|Lint)$/u.test(task);
 const schemeName = (name: string) => name.length <= 128 && !!name.trim() && !/^\s*-/u.test(name) && !/[\u0000-\u001f\u007f]/u.test(name);
 
 export function gradleTaskPriority(name: string) {
@@ -86,21 +132,19 @@ export function gradleTaskPriority(name: string) {
 export type ProbeTargets = { names: string[]; limited: boolean };
 const GRADLE_LINE_LIMIT = 16 * 1024;
 
-export function gradleProbe() {
+export function gradleProbe(filter?: string) {
   let line = "";
   let skippingLine = false;
   let limited = false;
   let sawListing = false;
   let group: string | undefined;
   let inTasks = false;
-  let buildGroup = false;
   const retained = new Map<string, number>();
 
   function acceptLine(text: string) {
     if (group && /^-{3,}\s*$/u.test(text)) {
       inTasks = true;
       sawListing = true;
-      buildGroup = /\b(?:build|verification|distribution)s?\b/iu.test(group);
       group = undefined;
       return;
     }
@@ -108,8 +152,9 @@ export function gradleProbe() {
     if (group || /^(?:Rules\s*$|To see |BUILD (?:SUCCESSFUL|FAILED)\b)/u.test(text)) inTasks = false;
     if (!inTasks) return;
     const name = /^(:?[\w.:-]+)(?:\s+-\s+.*)?\s*$/u.exec(text)?.[1];
-    if (!name || !gradleTask(name) || !(buildGroup || localTask(name.split(":").at(-1) ?? ""))) return;
+    if (!name || !gradleTask(name)) return;
     const path = name.startsWith(":") ? name : ":" + name;
+    if (filter && !path.toLowerCase().includes(filter.toLowerCase())) return;
     if (retained.has(path)) return;
     const priority = gradleTaskPriority(path);
     if (retained.size === PROBE_TARGET_LIMIT) {
@@ -167,9 +212,7 @@ export function parseXcodeProbe(output: string): ProbeTargets {
 
 export function nativeTarget(probe: ProjectTarget, name: string): ProjectTarget | undefined {
   if (!probe.operation) return;
-  if (probe.xcode && schemeName(name)) return { ...probe, name, operation: undefined, confirmed: true, outputs: [`${probe.xcode.derived}/Build/Products/Debug-iphonesimulator`] };
+  if (probe.xcode && schemeName(name)) return { ...probe, name, operation: undefined, confirmed: true, outputs: [] };
   if (!probe.gradle || !gradleTask(name)) return;
-  const module = name.split(":").slice(1, -1);
-  const outputs = module.every((part) => part !== "." && part !== "..") ? [at(probe.project, [...module, "build"].join("/"))] : [];
-  return { ...probe, name, operation: undefined, confirmed: true, outputs };
+  return { ...probe, name, operation: undefined, confirmed: true, outputs: [] };
 }

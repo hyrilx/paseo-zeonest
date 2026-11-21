@@ -4,7 +4,7 @@ import { z } from "zod";
 export const adapter = z.enum(["npm", "pnpm", "cargo", "cmake", "tauri", "gradle", "xcode"]);
 const path = z.string().min(1).max(1024);
 const targetKey = z.object({ adapter, project: path, name: z.string().min(1).max(256) });
-export const target = targetKey.extend({ source: path, outputs: z.array(path).max(16), operation: z.literal("probe").optional(), confirmed: z.boolean().optional(), blocked: z.string().optional() });
+export const target = targetKey.extend({ source: path, outputs: z.array(path).max(16), operation: z.literal("probe").optional(), confirmed: z.boolean().optional(), probeOptions: z.array(z.string()).optional(), blocked: z.string().optional() });
 const token = z.string().max(4096).refine((s) => !/[\x00-\x1f\x7f]/u.test(s));
 const toolId = z.string().max(64);
 export const candidate = z.object({ id: toolId, label: z.string(), paths: z.array(path), requirement: z.string(), version: z.string().optional() });
@@ -15,14 +15,14 @@ export const saved = config.extend({ name: z.string().trim().min(1).max(64) });
 export const PROBE_TARGET_LIMIT = 256;
 export const WORKSPACE_TARGET_LIMIT = 512;
 const commandStep = z.object({ cwd: path, argv: z.array(z.string()) });
-export const command = commandStep.extend({ tool: candidate, source: path, preparation: z.array(commandStep).max(4).optional() });
+export const command = commandStep.extend({ tool: candidate, source: path, preparation: z.array(commandStep).max(4).optional(), notes: z.array(z.string()).optional() });
 export const status = z.enum(["queued", "running", "stopping", "success", "failed", "stopped", "interrupted"]);
 export const run = z.object({
   id: z.uuid(), sequence: z.number().int(), status, configuration: config, command, fingerprint: z.string(),
   confirmedTargets: z.array(z.string()).max(PROBE_TARGET_LIMIT).optional(), confirmedTargetsLimited: z.boolean().optional(),
   createdAt: z.number(), startedAt: z.number().optional(), endedAt: z.number().optional(), result: z.string().optional(),
 });
-export const artifact = z.object({ path, state: z.enum(["new", "changed", "existing", "missing", "removed", "unavailable"]) });
+export const artifact = z.object({ path, state: z.enum(["new", "changed", "existing", "missing", "removed", "unavailable"]), origin: z.enum(["hint", "native"]).optional() });
 export const log = z.object({ cursor: z.number().int().nonnegative(), stream: z.enum(["stdout", "stderr"]), text: z.string() });
 export const scope = z.object({ workspaceId: z.string().min(1).max(256) });
 export const planInput = scope.extend({ configuration: config });

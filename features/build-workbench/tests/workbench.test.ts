@@ -55,7 +55,7 @@ test("pnpm and Cargo declarations stay separate and preserve project pins", (t) 
   const web = targets.find((entry) => entry.project === "apps/web");
   assert.deepEqual([web?.adapter, web?.requirements.miseNode, web?.requirements.manager, web?.outputs], ["pnpm", "24.14.0", "11.3.0", ["apps/web/dist"]]);
   const cargo = targets.find((entry) => entry.name === "api");
-  assert.deepEqual([cargo?.adapter, cargo?.cwd, cargo?.cargo?.targetDir], ["cargo", ".", "target"]);
+  assert.deepEqual([cargo?.adapter, cargo?.cwd, cargo?.cargo?.workspace], ["cargo", ".", "."]);
   assert.ok(targets.some((entry) => entry.adapter === "pnpm" && entry.project === "."));
 });
 
@@ -73,7 +73,7 @@ test("Cargo leaves build.rs to Cargo and Tauri does not require a particular JS 
   assert.equal(cargo?.blocked, undefined);
   assert.ok(!cargo?.outputs.includes("core/src/protos"));
   const tauri = targets.find((entry) => entry.adapter === "tauri");
-  assert.deepEqual(tauri?.outputs, ["desktop/assets", "desktop/src-tauri/target/debug/desktop"]);
+  assert.deepEqual(tauri?.outputs, ["desktop/assets"]);
   assert.equal(tauri?.tauri?.manager, "npm");
   assert.deepEqual(tauri?.install?.required, [{ from: "desktop", name: "@tauri-apps/cli", version: "^2" }]);
   assert.ok(targets.some((entry) => entry.adapter === "npm" && entry.name === "tauri:check"));
