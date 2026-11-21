@@ -1,8 +1,8 @@
-import { MAX_NOTE_LENGTH, type Note, type SaveInput, type SaveResult } from "../shared/contracts";
+import { MAX_NOTE_LENGTH, type Note, type NoteUpdate, type SaveInput, type SaveResult } from "../shared/contracts";
 
-interface Transport {
-  read(sessionId: string): Promise<Note>;
-  save(input: SaveInput): Promise<SaveResult>;
+interface NoteTransport {
+  read(): Promise<Note>;
+  save(input: NoteUpdate): Promise<SaveResult>;
 }
 type Status = "loading" | "load-error" | "ready" | "pending" | "saving" | "save-error" | "too-long" | "conflict";
 interface Snapshot {
@@ -13,7 +13,14 @@ interface Snapshot {
   conflict: Note | null;
 }
 
-export function createSessionNote(sessionId: string, transport: Transport, delay = 600) {
+export function createSessionNote(sessionId: string, transport: {
+  read(sessionId: string): Promise<Note>;
+  save(input: SaveInput): Promise<SaveResult>;
+}, delay?: number) {
+  return createNote({ read: () => transport.read(sessionId), save: (input) => transport.save({ ...input, sessionId }) }, delay);
+}
+
+export function createNote(transport: NoteTransport, delay = 600) {
   const listeners = new Set<() => void>();
   let snapshot: Snapshot = { status: "loading", markdown: "", hasContent: false, hasDraft: false, conflict: null };
   let base: Note | undefined;
@@ -41,7 +48,7 @@ export function createSessionNote(sessionId: string, transport: Transport, delay
     const generation = ++loadGeneration;
     publish({ status: "loading" });
     try {
-      const note = await transport.read(sessionId);
+      const note = await transport.read();
       if (!disposed && mounts && generation === loadGeneration) receive(note);
     } catch {
       if (!disposed && mounts && generation === loadGeneration) publish({ status: "load-error" });
@@ -83,7 +90,7 @@ export function createSessionNote(sessionId: string, transport: Transport, delay
     const expectedRevision = (expected ?? base).revision;
     const job = Promise.resolve().then(async () => {
       let result: SaveResult;
-      try { result = await transport.save({ sessionId, expectedRevision, markdown }); }
+      try { result = await transport.save({ expectedRevision, markdown }); }
       catch {
         saving = undefined;
         // The host may have committed before the connection failed.
@@ -115,6 +122,7 @@ export function createSessionNote(sessionId: string, transport: Transport, delay
   }
   return {
     get: () => snapshot,
+    isOpen: () => mounts > 0,
     subscribe(listener: () => void) {
       listeners.add(listener);
       return () => { listeners.delete(listener); };

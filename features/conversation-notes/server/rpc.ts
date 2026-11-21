@@ -1,5 +1,5 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { notePresence, readNote, saveNote } from "../shared/contracts";
+import { notePresence, noteSummaries, readGlobalNote, readNote, saveGlobalNote, saveNote } from "../shared/contracts";
 import { activeStore } from "./index";
 
 export default function contribute(server: PluginServerContext) {
@@ -25,6 +25,21 @@ export default function contribute(server: PluginServerContext) {
   server.handle(notePresence, async ({ sessionIds }) => {
     const { store, guard } = access();
     return { present: await store.presence(sessionIds, guard) };
+  });
+  server.handle(readGlobalNote, async () => {
+    const { store, guard } = access();
+    try { return await store.readGlobal(guard); }
+    catch { guard(); throw new Error("宿主无法读取全局笔记"); }
+  });
+  server.handle(saveGlobalNote, async (input) => {
+    const { store, guard } = access();
+    try { return await store.saveGlobal(input, guard); }
+    catch { guard(); throw new Error("宿主无法保存全局笔记"); }
+  });
+  server.handle(noteSummaries, async ({ sessionIds }) => {
+    const { store, guard } = access();
+    try { return await store.summaries(sessionIds, guard); }
+    catch { guard(); throw new Error("宿主无法读取笔记列表"); }
   });
   return () => { stopped = true; };
 }

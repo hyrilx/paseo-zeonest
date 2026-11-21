@@ -1,8 +1,8 @@
 {
   "id": "conversation-notes",
   "name": "会话笔记",
-  "description": "在聊天输入框旁记录本会话的结论、待办和链接。",
-  "version": "0.1.3",
+  "description": "在对话旁随手记录，在侧边栏集中查看全局笔记和会话笔记。",
+  "version": "0.2.0",
   "tags": [
     "效率",
     "笔记"

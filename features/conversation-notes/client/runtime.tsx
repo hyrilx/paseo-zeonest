@@ -1,35 +1,21 @@
-import { settingsRpc } from "@getpaseo/plugin";
 import type { PluginButtonContentProps, PluginClientContext } from "@getpaseo/plugin/client";
-import { notePresence, PRESENCE_BATCH_SIZE, readNote, saveNote, type SaveInput } from "../shared/contracts";
-import { defaultPreferences, preferences, preferencesSchema } from "../shared/settings";
-import { createSessionNote, type SessionNote } from "./note";
+import { notePresence, PRESENCE_BATCH_SIZE } from "../shared/contracts";
+import { registerHub } from "./hub";
+import { createNoteLibrary } from "./library";
+import type { SessionNote } from "./note";
 import { NotesPanel } from "./panel";
 
-type Client = Pick<PluginClientContext, "paseo" | "addComposerPill" | "rpc">;
+type Client = Pick<PluginClientContext, "paseo" | "addComposerPill" | "rpc" | "addScreen" | "addSidebarHeaderItem">;
 type Registration = ReturnType<Client["addComposerPill"]>;
 type Directory = Awaited<ReturnType<Client["paseo"]["agents"]["list"]>>;
 type Session = Directory["entries"][number]["agent"];
 interface Pill { workspaceId: string; registration: Registration; unsubscribe(): void }
-const readPreferences = settingsRpc(preferences.id).read;
-
 export function startNotes(client: Client) {
-  const notes = new Map<string, SessionNote>();
+  const library = createNoteLibrary(client);
+  const removeHub = registerHub(client, library);
   const pills = new Map<string, Pill>();
   const pendingPresence = new Map<string, SessionNote>();
   const releases = new Set<Promise<void>>();
-  const transport = {
-    read: (sessionId: string) => client.rpc(readNote, { sessionId }),
-    save: (input: SaveInput) => client.rpc(saveNote, input),
-  };
-  async function loadPreferences() {
-    try {
-      const result = await client.rpc(readPreferences, {});
-      if (result.status === "ready") return preferencesSchema.parse(result.values);
-    } catch {
-      // Notes must remain usable if the independent host configuration cannot be read.
-    }
-    return defaultPreferences;
-  }
   let attempt: AbortController | undefined;
   let subscription: Directory["subscription"];
   let unobserve: (() => void) | undefined;
@@ -52,7 +38,7 @@ export function startNotes(client: Client) {
           if (stopped) return;
           const present = new Set(reply.present);
           for (const [key, requested] of batch) {
-            if (notes.get(key) === requested) requested.setPresence(present.has(key));
+            if (library.find(key) === requested) requested.setPresence(present.has(key));
           }
         } catch {
           // Presence is optional; opening the pill still reads and reports errors.
@@ -68,11 +54,7 @@ export function startNotes(client: Client) {
       pill.unsubscribe();
       pill.registration.remove();
     }
-    const note = notes.get(id);
-    if (!keepNote && note && !note.get().hasDraft) {
-      note.dispose();
-      notes.delete(id);
-    }
+    if (!keepNote) library.forgetIdle(id);
   }
 
   function add(agent: Session) {
@@ -81,16 +63,11 @@ export function startNotes(client: Client) {
     const existing = pills.get(id);
     if (existing?.workspaceId === workspaceId) return;
     if (existing) forget(id, true);
-    let source = notes.get(id);
-    if (!source) {
-      source = createSessionNote(id, transport);
-      notes.set(id, source);
-      probePresence(id, source);
-    }
-    const note = source;
+    const note = library.get(id);
+    probePresence(id, note);
     const Content = (props: PluginButtonContentProps) =>
       props.context === "agent" && props.agentId === id && props.workspaceId === workspaceId
-        ? <NotesPanel {...props} note={note} loadPreferences={loadPreferences} /> : null;
+        ? <NotesPanel {...props} note={note} loadPreferences={library.loadPreferences} /> : null;
     function presentation() {
       const state = note.get();
       if (state.status === "conflict" || (state.conflict && state.status !== "saving")) return { label: "笔记 · 有冲突", title: "会话笔记有版本冲突" };
@@ -165,8 +142,8 @@ export function startNotes(client: Client) {
     clearTimeout(retry);
     disconnect();
     for (const id of pills.keys()) forget(id);
-    for (const note of notes.values()) note.dispose();
-    notes.clear();
+    removeHub();
+    library.dispose();
     pendingPresence.clear();
     await Promise.all(releases);
   };

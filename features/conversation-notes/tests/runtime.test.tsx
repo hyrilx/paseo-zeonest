@@ -7,7 +7,7 @@ import { build } from "esbuild";
 import { act, createElement } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import type { startNotes as start } from "../client/runtime";
-import { notePresence, readNote, saveNote } from "../shared/contracts";
+import { notePresence, noteSummaries, readGlobalNote, readNote, saveGlobalNote, saveNote } from "../shared/contracts";
 import { defaultPreferences, preferences, preferencesSchema, type Preferences } from "../shared/settings";
 import { deferred } from "./deferred";
 
@@ -21,7 +21,11 @@ const nativeHost = { name: "native-host", setup(builder: import("esbuild").Plugi
         SettingsSwitch = make('SettingsSwitch'), SettingsAction = make('SettingsAction');
       export const Text = make('Text'), View = make('View'), Pressable = make('Pressable');
       export const TextInput = React.forwardRef((props, ref) => React.createElement('TextInput', { ...props, ref }));
-      export const Icon = make('Icon'), Markdown = make('Markdown'), ScrollView = make('ScrollView');
+      export const Icon = make('Icon'), Markdown = make('Markdown'), ScrollView = make('ScrollView'), SidebarRow = make('SidebarRow');
+      export const Keyboard = { dismiss() {} };
+      export const FlatList = ({ data, renderItem, keyExtractor, ListHeaderComponent, ListEmptyComponent }) => React.createElement('FlatList', {},
+        ListHeaderComponent, ...data.map(item => React.createElement(React.Fragment, {key: keyExtractor(item)}, renderItem({item}))),
+        data.length ? null : ListEmptyComponent);
       export const Modal = Object.assign(({ open, children, ...props }) => open ? React.createElement('Modal', props, children) : null, { Content: make('ModalContent') });
       export const Platform = { select: options => options.default }, StyleSheet = { create: styles => styles };
       export const copyText = async () => {};
@@ -85,6 +89,8 @@ test("native pills follow the session directory and keep a failed draft in its o
       if (fail) throw new Error("offline");
       return { status: "saved", note: { revision: "f91021c2-c29f-43cb-a13f-96c220280b4f", markdown: input.markdown } };
     },
+    addScreen: () => () => {},
+    addSidebarHeaderItem: () => () => {},
     addComposerPill: (pill: Pill) => {
       registered.set(pill.agentId, pill);
       return { update: (patch: Partial<Pill["button"]>) => { Object.assign(pill.button, patch); }, remove: () => registered.delete(pill.agentId) };
@@ -200,6 +206,96 @@ test("native pills follow the session directory and keep a failed draft in its o
   await act(async () => {});
   assert.equal(registered.size, 0);
   assert.equal(released, 1); assert.equal(stopListening, 1);
+});
+
+test("sidebar opens the host notes hub and shares session drafts with the composer", async (t) => {
+  type Client = PluginClientContext;
+  const sources = [
+    { agent: { id: "a", title: "设计讨论", workspaceId: "w", archivedAt: null }, project: { projectName: "项目", workspaceName: "工作区" } },
+    { agent: { id: "b", title: "归档会话", workspaceId: "w", archivedAt: "2026-11-20" } },
+  ];
+  const saved: { id: string; text: string }[] = [];
+  const rpcReads: string[] = [];
+  const routes: unknown[] = [];
+  let global = { revision: null as string | null, markdown: "# 全局笔记正文" };
+  let failCatalog = true;
+  let screen!: Parameters<Client["addScreen"]>[0];
+  let sidebar!: Parameters<Client["addSidebarHeaderItem"]>[0];
+  let pill!: Parameters<Client["addComposerPill"]>[0];
+  let removed = 0;
+  const client = {
+    addScreen(value: typeof screen) { screen = value; return () => { removed++; }; },
+    addSidebarHeaderItem(value: typeof sidebar) { sidebar = value; return () => { removed++; }; },
+    addComposerPill(value: typeof pill) { pill = value; return { remove() {}, update() {} }; },
+    paseo: { agents: { async list(query: { scope?: string; filter?: unknown }) {
+      if (!query.scope) {
+        assert.deepEqual(query.filter, { includeArchived: true, includeBackground: true });
+        return { entries: sources, pageInfo: { hasMore: false } };
+      }
+      return { subscription: { subscribe: (listener: { snapshot(value: unknown): void }) => {
+        listener.snapshot({ entries: [sources[0]] }); return () => {};
+      }, release: async () => {} } };
+    } } },
+    async rpc({ name }: { name: string }, input: { sessionId: string; markdown: string }) {
+      if (name === notePresence.name) return { present: ["a"] };
+      if (name === settingsRead.name) return { status: "ready", values: {} };
+      if (name === noteSummaries.name) {
+        if (failCatalog) throw new Error("offline");
+        return { notes: [{ sessionId: "a", snippet: "编辑文档", updatedAt: 20 }, { sessionId: "b", snippet: "保留结论", updatedAt: 10 }], unreadable: [] };
+      }
+      if (name === readGlobalNote.name) return global;
+      if (name === readNote.name) { rpcReads.push(input.sessionId); return { revision: null, markdown: "编辑文档" }; }
+      const revision = "f91021c2-c29f-43cb-a13f-96c220280b4f";
+      if (name === saveGlobalNote.name) {
+        global = { revision, markdown: input.markdown };
+        saved.push({ id: "global", text: input.markdown });
+        return { status: "saved", note: global };
+      }
+      assert.equal(name, saveNote.name);
+      saved.push({ id: input.sessionId, text: input.markdown });
+      return { status: "saved", note: { revision, markdown: input.markdown } };
+    },
+  } as unknown as Client;
+  const stop = startNotes(client);
+  t.after(stop);
+  let nav!: ReactTestRenderer, page!: ReactTestRenderer, composer: ReactTestRenderer | undefined;
+  try {
+    await act(async () => { nav = create(createElement(sidebar.Component, { ...props, currentScreen: null, openScreen(input) { routes.push(input); }, openPopover() {} })); });
+    await act(async () => { nav.root.findByType("SidebarRow" as never).props.onPress(); });
+    assert.deepEqual(routes.at(0), { screenId: screen.id });
+    const navigation = { openAgent: (input: unknown) => routes.push(input), openWorkspace() {} };
+    await act(async () => { page = create(createElement(screen.Component, { ...props, params: {}, navigation })); });
+    const inputs = () => page.root.findAllByType("TextInput" as never);
+    const globalInput = () => inputs().find((node) => node.props.placeholder === "写全局笔记…")!;
+    const queryInput = () => inputs().find((node) => node.props.accessibilityLabel === "搜索会话笔记")!;
+    const button = (label: string) => page.root.find((node) => node.type === ("Pressable" as never) && node.props.accessibilityLabel === label);
+    assert.equal(globalInput().props.value, "# 全局笔记正文", "global note works if the catalog fails");
+    failCatalog = false;
+    await act(async () => { button("重试").props.onPress(); });
+    assert.ok(button("查看笔记：归档会话"));
+    assert.deepEqual(rpcReads, [], "the hub does not read individual note bodies before selection");
+    await act(async () => { globalInput().props.onChangeText("新全局正文"); queryInput().props.onChangeText("项目"); });
+    assert.throws(() => button("查看笔记：归档会话"));
+    await act(async () => { button("查看笔记：设计讨论").props.onPress(); });
+    assert.equal(queryInput().props.value, "项目", "drilling in preserves the search field");
+    assert.deepEqual(rpcReads, ["a"]);
+    await act(async () => { button("打开会话").props.onPress(); });
+    assert.deepEqual(routes.at(-1), { agentId: "a", serverId: "h" });
+    assert.equal(pill.button.behavior.kind, "popover");
+    const { Content } = pill.button.behavior;
+    await act(async () => { composer = create(createElement(Content, props)); });
+    const detail = () => inputs().find((node) => node.props.placeholder === "写 Markdown…")!;
+    await act(async () => { detail().props.onChangeText("共享草稿"); });
+    assert.equal(composer!.root.findByType("TextInput" as never).props.value, "共享草稿");
+    assert.deepEqual(rpcReads, ["a"], "opening the second surface does not race a new load");
+    await act(async () => { button("返回笔记列表").props.onPress(); composer!.unmount(); composer = undefined; });
+    assert.equal(queryInput().props.value, "项目");
+    assert.match(JSON.stringify(page.toJSON()), /共享草稿/);
+  } finally { await act(async () => { nav?.unmount(); page?.unmount(); composer?.unmount(); }); }
+  assert.deepEqual(saved.sort((left, right) => left.id.localeCompare(right.id)),
+    [{ id: "a", text: "共享草稿" }, { id: "global", text: "新全局正文" }]);
+  await stop();
+  assert.equal(removed, 2);
 });
 
 test("native settings save the displayed revision, retain a failed draft, and never overwrite newer preferences", async () => {

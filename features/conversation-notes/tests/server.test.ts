@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +9,7 @@ import contribute from "../server/index";
 import contributeRpc from "../server/rpc";
 import contributeSettings from "../server/settings";
 import { NoteStore } from "../server/store";
-import { notePresence, readNote, saveNote, type SaveInput } from "../shared/contracts";
+import { MAX_SNIPPET_LENGTH, notePresence, noteSummaries, readGlobalNote, readNote, saveGlobalNote, saveNote, type SaveInput } from "../shared/contracts";
 import { preferences } from "../shared/settings";
 
 const blank = { revision: null, markdown: "" };
@@ -76,6 +76,30 @@ test("failed writes leave the previous revision readable and a stopped queued wr
   await assert.rejects(store.read("a", guard));
 });
 
+test("global note uses its own record and revision; the catalog summarizes existing session files", async (t) => {
+  const directory = join(await home(t), "notes");
+  const store = new NoteStore(directory);
+  const sessionNote = await store.save(input("global", "# 会话标题\n- [x] " + "字".repeat(211)), guard);
+  assert.deepEqual(await store.readGlobal(guard), blank);
+  const global = await store.saveGlobal({ expectedRevision: null, markdown: "# 仅宿主全局内容" }, guard);
+  assert.equal(global.status, "saved");
+  assert.deepEqual(await new NoteStore(directory).readGlobal(guard), global.note);
+  assert.notEqual(sessionNote.note.revision, global.note.revision);
+  assert.deepEqual(await store.saveGlobal({ expectedRevision: null, markdown: "旧草稿" }, guard), { status: "conflict", note: global.note });
+  await store.save(input("broken", "一度可读"), guard);
+  await writeFile(join(directory, createHash("sha256").update("broken").digest("hex") + ".json"), "{broken JSON");
+  const result = await store.summaries(["broken", "global", "global", "missing"], guard);
+  assert.deepEqual(result.unreadable, ["broken"]);
+  assert.equal(result.notes.length, 1);
+  const summary = result.notes.find((item) => item.sessionId === "global");
+  assert.ok(summary && summary.updatedAt > 0);
+  assert.doesNotMatch(summary.snippet, /仅宿主全局内容|\[x\]/);
+  assert.equal(summary.snippet.length, MAX_SNIPPET_LENGTH);
+  await store.save(input("global", "", sessionNote.note.revision), guard);
+  assert.deepEqual(await store.summaries(["global"], guard), { notes: [], unreadable: [] });
+  assert.deepEqual(await store.readGlobal(guard), global.note);
+});
+
 test("host preferences register independently of note activation and have safe defaults", () => {
   const registered: (typeof preferences)[] = [];
   const cleanup = contributeSettings({ registerSettings: (value: typeof preferences) => registered.push(value) } as unknown as PluginServerContext);
@@ -96,22 +120,29 @@ test("all RPCs register synchronously and deny calls while inactive or after cle
   const server = { handle: (contract: { name: string }, handler: (value: unknown) => Promise<unknown>) => handlers.set(contract.name, handler) } as unknown as PluginServerContext;
   const stopRpc = contributeRpc(server);
   t.after(stopRpc);
-  assert.deepEqual([...handlers.keys()], [readNote.name, saveNote.name, notePresence.name]);
+  assert.deepEqual([...handlers.keys()], [readNote.name, saveNote.name, notePresence.name, readGlobalNote.name, saveGlobalNote.name, noteSummaries.name]);
   const read = () => handlers.get(readNote.name)!({ sessionId: "a" });
   const save = () => handlers.get(saveNote.name)!(input("a", "内容"));
   const presence = () => handlers.get(notePresence.name)!({ sessionIds: ["a"] });
-  for (const call of [read, save, presence]) await assert.rejects(call, /未启用或已停止/);
+  const globalRead = () => handlers.get(readGlobalNote.name)!({});
+  const globalSave = () => handlers.get(saveGlobalNote.name)!({ expectedRevision: null, markdown: "全局正文" });
+  const summaries = () => handlers.get(noteSummaries.name)!({ sessionIds: ["a"] });
+  const calls = [read, save, presence, globalRead, globalSave, summaries];
+  for (const call of calls) await assert.rejects(call, /未启用或已停止/);
   const stop = contribute(server);
   t.after(stop);
   assert.deepEqual(await read(), blank);
   const pending = save();
   stop();
   await assert.rejects(pending, /未启用或已停止/);
-  for (const call of [read, save, presence]) await assert.rejects(call, /未启用或已停止/);
+  for (const call of calls) await assert.rejects(call, /未启用或已停止/);
   const restart = contribute(server);
   t.after(restart);
   assert.deepEqual(await read(), blank);
   assert.deepEqual(await handlers.get(saveNote.name)!(input("a", "草稿", randomUUID())), { status: "conflict", note: blank });
+  assert.deepEqual(await globalRead(), blank);
+  assert.equal((await globalSave() as { status: string }).status, "saved");
+  assert.deepEqual(await summaries(), { notes: [], unreadable: [] });
   stopRpc();
-  for (const call of [read, save, presence]) await assert.rejects(call, /已停止/);
+  for (const call of calls) await assert.rejects(call, /已停止/);
 });
