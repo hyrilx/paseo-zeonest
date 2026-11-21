@@ -1,4 +1,4 @@
-import { mkdir, writeFile, lstat, rm } from "node:fs/promises";
+import { mkdir, writeFile, lstat, rm, readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -49,7 +49,14 @@ export function featureFiles(metadata, runtime = "both", settings = false) {
 }
 
 export async function createFeature(root, metadata, runtime, settings) {
-  const files = featureFiles(metadata, runtime, settings);
+  let author = metadata.author;
+  try {
+    const localAuthor = await readFile(path.join(root, ".author"), "utf8");
+    author = localAuthor.trim() || author;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const files = featureFiles({ ...metadata, author }, runtime, settings);
   // Reject any pre-existing subtree rather than merging or overwriting user code.
   const directories = [path.join(root, "features", metadata.id)];
   for (const directory of directories) {
@@ -81,7 +88,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       },
     });
     if (values.help) {
-      console.log('npm run feature:new -- <id> --name "名称" --description "说明" --author "作者" [--runtime client|server|both] [--settings] [--tag ui]');
+      console.log('npm run feature:new -- <id> --name "名称" --description "说明" [--author "作者"] [--runtime client|server|both] [--settings] [--tag ui]\n'
+        + "优先使用仓库根目录的 .author；文件不存在或为空时须提供 --author。");
     } else {
       if (positionals.length !== 1) throw new Error("Provide exactly one feature ID; use --help for usage");
       const metadata = { id: positionals[0], name: values.name, description: values.description,
