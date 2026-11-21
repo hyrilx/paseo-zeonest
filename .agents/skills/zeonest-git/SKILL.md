@@ -1,6 +1,6 @@
 ---
 name: zeonest-git
-description: 在 Zeonest 仓库进行任何源码、测试、文档、技能或维护修改时使用。创建 feature/bugfix/doc/chore 分支，以独立 worktree 隔离并发；每轮独立提交，获授权合入主干后默认 squash 合并并推送 main、同步开发分支，复用已有 worktree 与有效验证结果，完成分支处理后移除自建 worktree。
+description: 在 Zeonest 仓库进行任何源码、测试、文档、技能或维护修改时使用。使用 feature/bugfix/doc/chore 分支，核对后复用 Paseo 或 Git 创建的任务专用 worktree，无可复用目录时用 Git 创建。每轮独立提交，复用有效验证结果；获授权后默认 squash 合并并推送 main、同步开发分支，收尾时移除 Git 自建 worktree 或将 Paseo 管理的 worktree 交给 Paseo 归档清理。
 ---
 
 # Zeonest Git 协作
@@ -9,18 +9,20 @@ description: 在 Zeonest 仓库进行任何源码、测试、文档、技能或�
 
 ## 分支与对话轮次
 
-- 开发前按任务建立分支：新功能用 `feature/<主题>`，修复用 `bugfix/<主题>`，文档与技能用 `doc/<主题>`，工具、依赖及其他维护用 `chore/<主题>`。主题使用简短的 kebab-case；重名时加任务标识，不复用他人分支。不直接在 `main` 开发或提交。
-- 同一任务的后续对话继续使用原任务分支和 worktree；新任务另建分支。已 squash 合并的任务若需后续修改，从最新 `main` 新建分支，避免重复带入旧历史。
+- 开发前核对任务分支名：新功能用 `feature/<主题>`，修复用 `bugfix/<主题>`，文档与技能用 `doc/<主题>`，工具、依赖及其他维护用 `chore/<主题>`。主题使用简短的 kebab-case；重名时加任务标识，不复用他人分支。不直接在 `main` 开发或提交。
+- 同一任务的后续对话继续使用原任务分支和 worktree；不同任务使用不同分支。已 squash 合并的任务若需后续修改，从最新 `main` 新建分支，避免重复带入旧历史。
 - 一轮指一次用户请求及完成该请求所需的工具调用、进度说明和澄清。每轮有仓库改动时，在结束回复前创建恰好一个独立提交；一轮包含多个实现步骤也合为一个提交。纯讨论、只读检查或没有文件变化时不创建空提交。
 - 不把多轮改动拖到最后一次提交，不用 `commit --amend` 覆盖前一轮提交，也不在任务分支提前压缩多轮历史。若本轮开始时发现未提交改动，先确认归属和所属轮次；不得混入当前提交。
 - 提交标题使用 `<type>(<scope>): <说明>`，scope 可省略；分支前缀 `feature`、`bugfix`、`doc`、`chore` 分别对应提交 type `feat`、`fix`、`docs`、`chore`。正文记录必要的验证结果与阻塞。
-- 本轮提交、新建分支属于默认交付流程；用户明确要求暂不提交或推送时遵从。用户授权“合入主干”时，默认包含 squash 合并、推送 main 和同步开发分支；明确要求仅本地合入时遵从。不要把“开发完成”当成主干合入授权，删除分支仍需另行授权。主干合并、推送及开发分支处理完成后，必须按下文移除本任务自建的 worktree，无需另等一次清理指令。
+- 使用任务分支并提交本轮改动属于默认交付流程；用户明确要求暂不提交或推送时遵从。用户授权“合入主干”时，默认包含 squash 合并、推送 main 和同步开发分支；明确要求仅本地合入时遵从。不要把“开发完成”当成主干合入授权，删除分支仍需另行授权。主干合并、推送及开发分支处理完成后，按下文依据 worktree 的创建与管理方收尾。
 
 ## 开始前检查与隔离
 
 先检查现场，不改动任何文件或索引：
 
 ```bash
+pwd -P
+git rev-parse --path-format=absolute --show-toplevel --git-common-dir HEAD
 git status --short --branch
 git diff --stat
 git diff --cached --stat
@@ -28,11 +30,13 @@ git worktree list --porcelain
 git branch -vv
 ```
 
-记录当前分支、HEAD、已有的已暂存/未暂存/未跟踪文件，以及各 worktree 的任务归属。主工作区即使暂时干净，也可能正在被其他会话使用；默认每个任务使用仓库外的独立 worktree。
+若当前已在本任务专用的独立 worktree（包括 Paseo 的 New worktree 预先创建的目录），核对仓库、实际路径、任务归属、分支名、HEAD 和任务基线 SHA。检查已有的已暂存、未暂存和未跟踪改动，确认其归属及没有其他写入者，并记录 worktree 由谁创建和管理。核对通过后直接复用，不再执行 `git worktree add`。
 
-有远端时先 `git fetch origin`，检查 `main` 与 `origin/main` 的差异，选定最新且包含所需已接受提交的 main 基线，并记录其 SHA。两者分叉、离线或无法确认基线时说明情况，不用 `pull`、reset 或强推自动消除差异。不要为了更新基线去切换或移动他人占用的 `main`。
+分支名不合规、基线不符或归属不明时，先说明问题并确认处理方式，不擅自重命名、重置或重建。同一任务续做沿用已确认的基线；`origin/main` 前进时不自动换基。
 
-以下为新任务示例，分支名、绝对路径和基线 SHA 必须替换为实际值：
+只有没有可复用的任务 worktree 时，才在仓库外创建独立 worktree。主工作区即使暂时干净，也可能正在被其他会话使用。有远端时先 `git fetch origin`，检查 `main` 与 `origin/main` 的差异，选定最新且包含所需已接受提交的 main 基线，并记录其 SHA。两者分叉、离线或无法确认基线时说明情况，不用 `pull`、reset 或强推自动消除差异。不要为了更新基线去切换或移动他人占用的 `main`。
+
+以下为 Git 创建示例，分支名、绝对路径和基线 SHA 必须替换为实际值：
 
 ```bash
 git worktree add -b doc/git-workflow /absolute/path/to/worktrees/doc-git-workflow <main基线SHA>
@@ -41,7 +45,7 @@ git -C /absolute/path/to/worktrees/doc-git-workflow status --short --branch
 
 以下示例以 `origin` 为远端；实际远端不同时先核对目标。无远端、认证失败或网络不可用时保留本地分支并报告未推送，不能声称分支已同步。
 
-- 创建前确认本地/远端分支名与路径均未被占用；Git 拒绝时先查明原因，不用 `--force` 或 `--ignore-other-worktrees` 绕过同一分支的 checkout 保护。继续已有任务前也须确认该 worktree 无其他写入者。
+- 创建前确认本地/远端分支名与路径均未被占用；Git 拒绝时先查明原因，不用 `--force` 或 `--ignore-other-worktrees` 绕过同一分支的 checkout 保护。
 - 后续读写文件、安装依赖、测试、构建和提交全部针对自己的 worktree；使用明确的绝对路径、`git -C` 或显式切换命令目录，不依赖工具默认 cwd。各 worktree 独立安装依赖并生成产物，不共用可写的 node_modules、bundle 或临时配置。
 - linked worktree 各自拥有工作文件、索引和 HEAD，但共享对象、分支引用、远端引用、stash 和仓库级配置。不要在一个 worktree 中移动他人使用的分支、清理共享 stash，或擅自修改 hooksPath 等公共配置。
 - 不在共享主工作区运行 `git switch`、`checkout`、`pull`、`stash` 或全量暂存来“腾出位置”。已有未提交内容留在原处，不拷贝进新 worktree；确需依赖另一任务时先协调提交和接入方式。
@@ -93,15 +97,16 @@ git -C "$main_worktree" push --atomic origin "$task_branch:refs/heads/$task_bran
 - Git 的索引锁只保护单次 Git 写入，不给整个开发或合并流程加互斥。不要删除他人可能持有的 `.git/index.lock`，也不要用共享工作区的“先检查再修改”代替独立 worktree 和必要的协调。
 - 不执行会丢失他人内容的 `reset --hard`、`clean -fd`、批量 restore、强制 checkout 或强制删除 worktree。撤销自己的改动也须确认具体路径和归属；不要清空整个仓库或暂存区。
 
-## 合并后收尾：必须移除自建 worktree
+## 合并后收尾
 
-main 合并并推送成功、独立开发分支处理完成后，必须移除本任务创建的 worktree，包括开发 worktree 及另行创建的临时集成 worktree，不把清理留给用户手动完成。按以下顺序执行：
+main 合并并推送成功、独立开发分支处理完成后，按实际创建与管理方处理本任务的开发 worktree 和临时集成 worktree：
 
 1. 确认远端 main 已包含本次已验证的 squash 提交，远端开发分支指向最终任务 tip，并记录二者 SHA；推送失败、tip 不符或仍待合并时不进入清理。
 2. 完成独立开发分支的处理：默认保留已同步的远端开发分支与逐轮历史，记录其与主干 squash 提交的对应关系；有明确删除授权时才清理相应本地/远端分支。保留已同步分支也属于处理完成，不要求为移除 worktree 而删分支。squash 后任务 tip 通常不是 main 的祖先，`git branch -d` 可能拒绝；先核对 squash 内容和验证记录，不直接用 `-D` 绕过检查。待删除的本地分支若仍被 worktree checkout，先完成以下移除，再按授权删除分支。
-3. 用 `git worktree list --porcelain` 逐项确认本任务创建的路径、分支与归属，确认没有其他会话或进程仍在使用。只清理这些自建工作区，不删除主工作区或他人 worktree。
-4. 对每个待移除路径运行 `git -C <路径> status --porcelain=v1`，确认没有已暂存、未暂存和未跟踪内容；同时确认被忽略文件中没有需保留的个人数据。存在未保存内容或占用时保留现场，报告具体阻塞，不 stash 或丢弃它们。
-5. 退出待移除目录，从仍保留的仓库工作区执行 `git -C <保留工作区> worktree remove <待移除路径>`，逐一移除本任务创建的 worktree；复用同一 worktree 的流程只移除该路径一次。使用 Git 正常移除，不用 `--force`、`rm -rf` 或 `git worktree prune` 代替；移除后不再以该路径作为工具 cwd。
-6. 再次检查 `git worktree list --porcelain` 和路径是否已移除，报告清理结果及保留的本地/远端分支。清理失败必须写明剩余路径和原因，不能声称收尾完成。
+3. 用 `git worktree list --porcelain` 核对路径和分支，并根据创建记录及 Paseo 的 worktree 所有权记录（如适用）确认实际归属，不凭目录名或是否出现在 Paseo 界面里判断。确认没有其他 workspace、会话或进程仍在使用；不清理主工作区、他人 worktree 或归属不明的目录。
+4. 对每个待清理路径运行 `git -C <路径> status --porcelain=v1`，确认没有已暂存、未暂存和未跟踪内容；同时确认没有需要保留的忽略文件。存在未保存内容或占用时保留现场，报告具体阻塞，不 stash 或丢弃它们。
+5. 本任务用 Git 创建的 worktree 由本任务移除，无需另等清理指令。退出待移除目录，从仍保留的仓库工作区运行 `git -C <保留工作区> worktree remove <待移除路径>`；复用同一 worktree 时只移除一次。不用 `--force`、`rm -rf` 或 `git worktree prune` 代替，移除后不再以该路径作为工具 cwd。
+6. Paseo 创建并管理的 worktree 交给 Paseo 归档清理，不直接用 Git 删除。归档最后一个使用该目录的 workspace 会触发目录移除，Paseo 不以合并成功为前提；因此必须先通过上述检查，再交给 Paseo 处理。当前任务会话不自行归档，检查通过时报告「可归档」，否则报告具体阻塞。
+7. 再次检查 `git worktree list --porcelain` 和实际路径，只在核实目录已移除后报告清理完成。报告保留的本地/远端分支；仍待归档或清理失败时写明剩余路径及状态。
 
 尚未获得主干合并授权、验证未完成或合并/推送失败时保留本任务 worktree，待条件满足后继续上述收尾。

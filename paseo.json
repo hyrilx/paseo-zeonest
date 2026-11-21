@@ -1,0 +1,7 @@
+{
+  "metadataGeneration": {
+    "branchName": {
+      "instructions": "按任务的主要目的选择一个分支前缀：新功能用 feature/，缺陷修复用 bugfix/，文档和技能修改用 doc/，工具、依赖及其他维护用 chore/。分支名格式为 <前缀>/<主题>。主题用简短的英文 kebab-case，只使用小写英文字母、数字和单个连字符，不加额外的斜杠。示例：feature/session-search、bugfix/restore-session、doc/paseo-worktree、chore/update-dependencies。"
+    }
+  }
+}
