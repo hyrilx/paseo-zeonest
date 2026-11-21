@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Platform, Pressable, StyleSheet, Text, View, type TextInput as NativeTextInput } from "react-native";
 import type { PluginButtonContentProps } from "@getpaseo/plugin/client";
-import { copyText, Icon, Markdown, Modal, TextInput } from "@getpaseo/plugin/client/ui";
+import { copyText, Icon, Markdown, Modal, ScrollView, TextInput } from "@getpaseo/plugin/client/ui";
 import { MAX_NOTE_LENGTH } from "../shared/contracts";
 import { formatMarkdown, toggleTaskMarker, type Format, type Selection, type TaskMarker } from "./markdown";
 import type { SessionNote } from "./note";
@@ -26,6 +26,7 @@ const styles = StyleSheet.create({
   hint: { fontSize: 12, lineHeight: 16 },
   body: { borderWidth: 1, borderRadius: 7 },
   toolbar: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", paddingHorizontal: 3, borderBottomWidth: 1 },
+  viewport: { flex: 1, minHeight: 0 },
   editor: { paddingHorizontal: 9, paddingVertical: 7, fontSize: 14, lineHeight: 20, textAlignVertical: "top" },
   preview: { paddingHorizontal: 9, paddingVertical: 7, gap: 4 },
   list: { gap: 2 },
@@ -154,7 +155,7 @@ export function NotesPanel({ note, theme, layout, close }: PluginButtonContentPr
         {layout.compact ? null : iconButton("关闭笔记", "X", close)}
       </View>
     </View>
-    {!blocked && <View testID="conversation-notes-body" style={[styles.body, { borderColor: colors.border }]}>
+    {!blocked && <View testID="conversation-notes-body" style={[styles.body, { borderColor: colors.border, height: layout.compact ? 279 : 303 }]}>
       {mode === "edit" ? <>
         <View accessibilityRole="toolbar" accessibilityLabel="Markdown 格式" style={[styles.toolbar, { borderBottomColor: colors.border }]}>
           {shortcuts.map(({ format: kind, icon, label }) => iconButton(label, icon, () => format(kind), kind))}
@@ -163,13 +164,14 @@ export function NotesPanel({ note, theme, layout, close }: PluginButtonContentPr
           autoCapitalize="none" autoCorrect={false} spellCheck={false} value={markdown}
           selection={requested?.selection} onSelectionChange={({ nativeEvent }) => { selection.current = nativeEvent.selection; }}
           onChangeText={note.edit} placeholder="写 Markdown…" placeholderTextColor={colors.foregroundMuted}
-          style={[styles.editor, { color: colors.foreground, height: layout.compact ? 240 : 270,
+          style={[styles.viewport, styles.editor, { color: colors.foreground,
             fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }) }]} />
-      </> : <View style={styles.preview}>
+      </> : <ScrollView testID="conversation-notes-preview" nestedScrollEnabled
+        style={styles.viewport} contentContainerStyle={styles.preview}>
         {preview.length ? <Preview parts={preview} colors={colors} toggle={(marker) => {
           if (note.get().markdown === markdown) note.edit(toggleTaskMarker(markdown, marker));
         }} /> : <Text style={[styles.hint, { color: colors.foregroundMuted }]}>还没有笔记</Text>}
-      </View>}
+      </ScrollView>}
     </View>}
     <Modal title="笔记状态" open={statusOpen} onOpenChange={setStatusOpen}>
       <Modal.Content>

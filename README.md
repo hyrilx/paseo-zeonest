@@ -15,7 +15,7 @@ Zeonest 取自 Zeolite（沸石）+ Nest（巢），意为「沸石之巢」：�
 | [问答选项回顾](features/ask-user-question/README.md)<br><code>ask-user-question</code> | 在已完成的 ask&#95;user&#95;question 折叠块中保留全部选项、说明和用户答案。 | 0.1.2 | <code>界面</code> <code>Pi</code> | hyrilx |
 | [Billion Context](features/billion-context/README.md)<br><code>billion-context</code> | 托管 Bili 服务，让 Pi 与 dashboard 使用同一固定实例 | 0.4.0 | <code>context</code> <code>dashboard</code> | hyrilx |
 | [历史对话展开](features/chat-history/README.md)<br><code>chat-history</code> | 将消息中的 Chat history 摘要展开为可折叠的历史对话 | 0.1.2 | <code>chat</code> <code>history</code> | hyrilx |
-| [会话笔记](features/conversation-notes/README.md)<br><code>conversation-notes</code> | 在聊天输入框旁记录本会话的结论、待办和链接。 | 0.1.1 | <code>效率</code> <code>笔记</code> | hyrilx |
+| [会话笔记](features/conversation-notes/README.md)<br><code>conversation-notes</code> | 在聊天输入框旁记录本会话的结论、待办和链接。 | 0.1.2 | <code>效率</code> <code>笔记</code> | hyrilx |
 | [文件活动](features/file-activity/README.md)<br><code>file-activity</code> | 按轮查看当前会话的文件增删改查记录与差异 | 0.1.2 | <code>files</code> <code>conversation</code> | hyrilx |
 | [Pi 设置](features/pi-settings/README.md)<br><code>pi-settings</code> | 管理全局与项目的 Pi 模型、技能、插件和 MCP，应用前审阅配置 diff | 0.1.1 | <code>pi</code> <code>configuration</code> | hyrilx |
 | [Pi 状态桥接](features/pi-status-bridge/README.md)<br><code>pi-status-bridge</code> | 按会话汇总 Pi 插件状态，查看全文并调用映射的展开命令 | 0.2.0 | <code>pi</code> <code>status</code> | hyrilx |

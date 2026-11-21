@@ -19,7 +19,7 @@ const compiled = await build({
       import React from 'react'; const make = name => props => React.createElement(name, props, props.children);
       export const Text = make('Text'), View = make('View'), Pressable = make('Pressable');
       export const TextInput = React.forwardRef((props, ref) => React.createElement('TextInput', { ...props, ref }));
-      export const Icon = make('Icon'), Markdown = make('Markdown');
+      export const Icon = make('Icon'), Markdown = make('Markdown'), ScrollView = make('ScrollView');
       export const Modal = Object.assign(({ open, children, ...props }) => open ? React.createElement('Modal', props, children) : null, { Content: make('ModalContent') });
       export const Platform = { select: options => options.default }, StyleSheet = { create: styles => styles };
       export const copyText = async () => {};
@@ -138,13 +138,20 @@ test("native pills follow the session directory and keep a failed draft in its o
   });
   assert.equal(textbox().props.value, "# A\n\n**记录**\n- [ ] 查资料");
   const tab = (label: string) => press((button) => button.accessibilityRole === "tab" && button.accessibilityLabel === label);
+  const bodyHeight = () => root.root.find((node) => node.type === ("View" as never)
+    && node.props.testID === "conversation-notes-body").props.style[1].height;
+  const editHeight = bodyHeight();
+  assert.ok(editHeight > 0, "the body has a fixed height");
   await act(async () => { tab("预览"); });
   assert.equal(root.root.findAllByType("TextInput" as never).length, 0);
+  assert.equal(bodyHeight(), editHeight);
+  assert.equal(root.root.findByType("ScrollView" as never).props.style.flex, 1, "preview scrolls within the fixed body");
   const checkbox = () => root.root.findAll((node) => node.type === ("Pressable" as never) && node.props.accessibilityRole === "checkbox")[0]!;
   assert.equal(checkbox().props["aria-checked"], false);
   await act(async () => { checkbox().props.onPress(); });
   assert.equal(checkbox().props["aria-checked"], true);
   await act(async () => { tab("编辑"); });
+  assert.equal(bodyHeight(), editHeight);
   assert.equal(textbox().props.value, "# A\n\n**记录**\n- [x] 查资料");
   await act(async () => { mounted = false; root.unmount(); observer.snapshot(entries("b") as Parameters<Observer["snapshot"]>[0]); });
   assert.equal(writes[2]?.markdown, "# A\n\n**记录**\n- [x] 查资料");
