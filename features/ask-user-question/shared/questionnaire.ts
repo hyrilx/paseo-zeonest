@@ -1,16 +1,25 @@
 import { z } from "zod";
 
-const questionSchema = z.object({
+const rpivOptionSchema = z.object({
+  label: z.string(), description: z.string(), preview: z.string().optional(),
+});
+const rpivQuestionSchema = z.object({
   question: z.string(),
   header: z.string(),
-  options: z.array(z.object({
-    label: z.string(), description: z.string(), preview: z.string().optional(),
-  })).min(2).max(4),
+  options: z.array(rpivOptionSchema).min(2).max(4),
   multiSelect: z.boolean().optional(),
 });
+const questionSchema = rpivQuestionSchema.extend({
+  header: z.string().optional(),
+  context: z.string().optional(),
+  options: z.array(rpivOptionSchema.extend({
+    description: z.string().optional(), recommended: z.boolean().optional(),
+  })),
+});
+const rpivAnswerKindSchema = z.enum(["option", "custom", "multi"]);
 const answerSchema = z.object({
   questionIndex: z.number().int().nonnegative(),
-  question: z.string(), kind: z.enum(["option", "custom", "multi"]),
+  question: z.string(), kind: rpivAnswerKindSchema.or(z.literal("unspecified")),
   answer: z.string().nullable(), selected: z.array(z.string()).optional(),
   notes: z.string().optional(), preview: z.string().optional(),
 });
@@ -20,16 +29,21 @@ const resultSchema = z.object({
   error: z.string().optional(),
 });
 export const questionnaireSchema = z.object({
-  questions: z.array(questionSchema).min(1).max(4),
+  questions: z.array(questionSchema).nonempty(),
   result: resultSchema,
 });
 export type Questionnaire = z.infer<typeof questionnaireSchema>;
 export type Question = Questionnaire["questions"][number];
 export type Answer = Questionnaire["result"]["answers"][number];
 
+const rpivArgsSchema = z.object({ questions: z.array(rpivQuestionSchema).min(1).max(4) });
+const rpivEnvelopeSchema = z.object({
+  details: resultSchema.extend({ answers: z.array(answerSchema.extend({ kind: rpivAnswerKindSchema })) }),
+});
+
 export function parseQuestionnaire(input: unknown, output: unknown): Questionnaire | undefined {
-  const args = z.object({ questions: questionnaireSchema.shape.questions }).safeParse(input);
-  const envelope = z.object({ details: resultSchema }).safeParse(output);
+  const args = rpivArgsSchema.safeParse(input);
+  const envelope = rpivEnvelopeSchema.safeParse(output);
   if (!args.success || !envelope.success) return;
   const { questions } = args.data;
   const result = envelope.data.details;

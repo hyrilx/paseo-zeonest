@@ -5,9 +5,10 @@ import { build } from "esbuild";
 import React from "react";
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 import type { PluginClientContext, PluginTimelineItemProps } from "@getpaseo/plugin/client";
-import type { Questionnaire } from "../client/transform";
+import { questionnaireTransformer, type Questionnaire } from "../client/transform";
 import type { TimelineData } from "../shared/contracts";
 import { questions, result } from "./fixtures/questionnaire";
+import { goalQuestionnaireCall } from "./fixtures/goal-questionnaire";
 
 const require = createRequire(import.meta.url);
 // The compiled renderer uses CJS; share its Query context rather than the ESM copy.
@@ -59,7 +60,7 @@ test("questionnaire defaults to folded; expansion shows all options, description
     assert.ok(text(root).includes(question.question));
     for (const option of question.options) {
       assert.ok(text(root).includes(option.label));
-      assert.ok(text(root).includes(option.description));
+      assert.ok(option.description && text(root).includes(option.description));
     }
   }
   const selected = find(root, "Text", (node) => JSON.stringify(node.props.children).includes("（已选）"));
@@ -73,6 +74,22 @@ test("questionnaire defaults to folded; expansion shows all options, description
   assert.ok(!text(root).includes("Type something."));
   await press(root, "问答选项回顾");
   assert.equal(find(root, "View", (node) => /^option-/.test(node.props.testID ?? "")).length, 0);
+});
+
+test("pi-goal-x displays context and recommendations without blank descriptions or inferred selections", async (t) => {
+  const item = questionnaireTransformer.transform({ item: goalQuestionnaireCall, phase: "complete" })!.items[0]!;
+  const input = props(item.data as TimelineData);
+  input.layout.compact = true;
+  const root = await mount(t, input);
+  await press(root, "问答选项回顾");
+  for (const value of ["需要在离线环境运行。", "自由回答", "同步 / 远程", "（推荐）", "仍是答案"]) {
+    assert.ok(text(root).includes(value));
+  }
+  const selected = find(root, "Text", (node) => JSON.stringify(node.props.children).includes("（已选）"));
+  assert.equal(selected.length, 1);
+  assert.ok(JSON.stringify(selected[0]!.props.children).includes("同步 / 远程"));
+  assert.equal(find(root, "View", (node) => /^option-/.test(node.props.testID ?? "")).length, 7);
+  assert.equal(find(root, "Text", (node) => node.props.selectable && node.props.children == null).length, 0);
 });
 
 test("previews preserve full source text and can expand independently for unselected options", async (t) => {

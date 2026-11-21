@@ -87,9 +87,12 @@ function QuestionnaireCard({ data, fallback, notice, onExpand, retry, theme: { c
             return (
               <View key={index} testID={`question-${index}`} style={{ gap: 8, minWidth: 0,
                 borderTopWidth: index ? 1 : 0, borderColor: colors.border, paddingTop: index ? 16 : 0 }}>
-                <Text style={mutedStyle}>{question.header} · {question.multiSelect ? "多选" : "单选"}</Text>
+                <Text style={mutedStyle}>
+                  {question.header ? `${question.header} · ` : ""}{!question.options.length ? "自由回答" : question.multiSelect ? "多选" : "单选"}
+                </Text>
                 <Text selectable style={{ ...textStyle, fontWeight: "500" }}>Q{index + 1}. {question.question}</Text>
-                <View style={{ gap: 10, paddingVertical: 4 }}>
+                {question.context ? <Text selectable style={mutedStyle}>{question.context}</Text> : null}
+                {question.options.length ? <View style={{ gap: 10, paddingVertical: 4 }}>
                   {question.options.map((option, optionIndex) => {
                     const chosen = selected.includes(option.label);
                     const key = `${index}-${optionIndex}`;
@@ -105,8 +108,8 @@ function QuestionnaireCard({ data, fallback, notice, onExpand, retry, theme: { c
                         </View>
                         <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
                           <Text selectable style={{ ...textStyle, color: chosen ? colors.accent : colors.foreground,
-                            fontWeight: chosen ? "500" : "normal" }}>{option.label}{chosen ? "（已选）" : ""}</Text>
-                          <Text selectable style={mutedStyle}>{option.description}</Text>
+                            fontWeight: chosen ? "500" : "normal" }}>{option.label}{option.recommended ? "（推荐）" : ""}{chosen ? "（已选）" : ""}</Text>
+                          {option.description ? <Text selectable style={mutedStyle}>{option.description}</Text> : null}
                           {option.preview !== undefined ? (
                             <>
                               <Pressable
@@ -129,7 +132,7 @@ function QuestionnaireCard({ data, fallback, notice, onExpand, retry, theme: { c
                       </View>
                     );
                   })}
-                </View>
+                </View> : null}
                 <Text selectable style={{ ...textStyle, fontWeight: "500" }}>
                   A{index + 1}. {answer ? `${answer.kind === "custom" ? "自定义：" : ""}${answerText(answer)}` : "未回答"}
                 </Text>

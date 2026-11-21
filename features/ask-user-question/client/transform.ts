@@ -1,6 +1,7 @@
 import type { PluginTimelineTransformerContribution } from "@getpaseo/plugin/client";
-import { lookupSchema } from "../shared/contracts";
+import { lookupSchema, type TimelineData } from "../shared/contracts";
 import { parseQuestionnaire } from "../shared/questionnaire";
+import { parseGoalQuestionnaire } from "./goal-questionnaire";
 
 export { questionnaireSchema, answerText, selectedLabels } from "../shared/questionnaire";
 export type { Questionnaire, Question, Answer } from "../shared/questionnaire";
@@ -10,13 +11,17 @@ export const questionnaireTransformer = {
   id: "ask-user-question",
   query: { itemType: "tool_call" },
   transform({ item }) {
-    if (item.name !== "ask_user_question" || item.status !== "completed") return undefined;
-    let data;
-    if (item.detail.type === "unknown") {
-      data = parseQuestionnaire(item.detail.input, item.detail.output);
-    } else if (item.detail.type === "plain_text" && item.detail.label === "Questions") {
-      const parsed = lookupSchema.safeParse({ callId: item.callId, summary: item.detail.text });
-      if (parsed.success) data = parsed.data;
+    if (item.status !== "completed") return undefined;
+    const { name, detail } = item;
+    let data: TimelineData | undefined;
+    if (detail.type === "unknown") {
+      if (name === "ask_user_question") {
+        data = parseQuestionnaire(detail.input, detail.output);
+      } else if (name === "goal_question" || name === "goal_questionnaire") {
+        data = parseGoalQuestionnaire(name, detail.input, detail.output);
+      }
+    } else if (name === "ask_user_question" && detail.type === "plain_text" && detail.label === "Questions") {
+      data = lookupSchema.safeParse({ callId: item.callId, summary: detail.text }).data;
     }
     if (!data) return undefined;
     return { items: [{ type: "plugin", kind: "ask-user-question", version: 1, data }] };
