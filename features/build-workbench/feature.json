@@ -1,0 +1,11 @@
+{
+  "id": "build-workbench",
+  "name": "工作台：构建",
+  "description": "在工作区发现构建目标、选择工具链，并查看独立的运行输出和产物。",
+  "version": "0.1.0",
+  "tags": [
+    "workspace",
+    "build"
+  ],
+  "author": "hyrilx"
+}

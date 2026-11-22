@@ -8,12 +8,13 @@ Zeonest 取自 Zeolite（沸石）+ Nest（巢），意为「沸石之巢」：�
 
 <!-- zeonest:features:start -->
 
-当前包含 **8** 个子功能，默认均关闭；点击名称查看使用说明。
+当前包含 **9** 个子功能，默认均关闭；点击名称查看使用说明。
 
 | 名称 / ID | 描述 | 版本 | 标签 | 作者 |
 | --- | --- | --- | --- | --- |
 | [问答选项回顾](features/ask-user-question/README.md)<br><code>ask-user-question</code> | 在 Paseo 中回顾 rpiv 和 pi-goal-x 的问题、原始选项和用户答案。 | 0.1.3 | <code>界面</code> <code>Pi</code> | hyrilx |
 | [Billion Context](features/billion-context/README.md)<br><code>billion-context</code> | 托管 Bili 服务，让 Pi 与 dashboard 使用同一固定实例 | 0.4.0 | <code>context</code> <code>dashboard</code> | hyrilx |
+| [工作台：构建](features/build-workbench/README.md)<br><code>build-workbench</code> | 在工作区发现构建目标、选择工具链，并查看独立的运行输出和产物。 | 0.1.0 | <code>workspace</code> <code>build</code> | hyrilx |
 | [历史对话展开](features/chat-history/README.md)<br><code>chat-history</code> | 将消息中的 Chat history 摘要展开为可折叠的历史对话 | 0.1.2 | <code>chat</code> <code>history</code> | hyrilx |
 | [会话笔记](features/conversation-notes/README.md)<br><code>conversation-notes</code> | 在对话旁随手记录，在侧边栏集中查看全局笔记和会话笔记。 | 0.2.2 | <code>效率</code> <code>笔记</code> | hyrilx |
 | [文件活动](features/file-activity/README.md)<br><code>file-activity</code> | 按轮查看当前会话的文件增删改查记录与差异 | 0.1.2 | <code>files</code> <code>conversation</code> | hyrilx |
