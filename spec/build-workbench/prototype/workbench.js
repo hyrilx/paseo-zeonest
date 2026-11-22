@@ -49,6 +49,27 @@ const projects = {
     targets: [{ id: 'hello-rust', desc: '编译命令行程序', group: 'Cargo 包' }],
   },
 };
+const commonOptions = {
+  configure: [
+    ['-DCMAKE_BUILD_TYPE=Release', '采用 Release 构建类型'],
+    ['-DCMAKE_PREFIX_PATH=/opt/homebrew/opt/fmt', '在此演示的 Homebrew 路径查找 fmt'],
+    ['-DCMAKE_EXPORT_COMPILE_COMMANDS=ON', '生成 compile_commands.json（Makefile 或 Ninja）'],
+  ],
+  cmakeBuild: [
+    ['--parallel 4', '最多并行执行 4 个构建任务'],
+    ['--verbose', '显示实际执行的构建命令'],
+  ],
+  gradle: [
+    ['--offline', '仅使用本地缓存，不下载依赖'],
+    ['--stacktrace', '出错时显示堆栈'],
+    ['--info', '显示更多运行信息'],
+  ],
+  cargo: [
+    ['--release', '使用 release 配置构建'],
+    ['--locked', '要求 Cargo.lock 保持不变'],
+    ['--offline', '离线构建'],
+  ],
+};
 const states = Object.fromEntries(Object.entries(projects).map(([key, p]) => [key, {
   pane: 'editor', nav: 'targets', dock: 'output', query: '', target: p.probe ?? p.targets[0].id,
   selected: key === 'alkaa' ? '' : p.tools[0].id,
@@ -64,6 +85,8 @@ const state = () => states[workspace];
 const isProbe = () => state().target === project().probe;
 const selectedTool = () => project().tools.find((t) => t.id === state().selected);
 const busyRun = (s = state()) => s.runs.find((run) => run.status === '运行中');
+const selectedRun = () => state().runs.find((run) => run.id === state().view);
+const outputRun = () => state().dock === 'output' ? selectedRun() : undefined;
 function draft() {
   const s = state();
   if (!s.drafts.has(s.target)) s.drafts.set(s.target, { args: '', name: '', paths: '', inherited: false });
@@ -211,11 +234,68 @@ function renderTools() {
   $('verify-summary').className = current?.blocked ? 'error' : current && s.verified.has(current.id) ? 'good' : '';
   $('verify-summary').textContent = !current ? '未选择。建议先看候选的来源和路径。' : current.blocked ? '最低需要 JVM 17。此项目配置不会被修改。' : s.verified.has(current.id) ? (workspace === 'alkaa' ? '启动 Java 检查通过。项目兼容性由 Gradle 探测确认。' : `${current.name} 检查通过。`) : `已选择 ${current.name}，尚未检查。`;
 }
+const log = $('run-log');
+let renderedRun;
+let renderedLines = 0;
+function renderFollow(run) {
+  const button = $('follow-output');
+  button.toggleAttribute('data-following', run.follow);
+  button.querySelector('span').textContent = run.follow ? '跟随中' : '回到底部';
+}
+function renderOutput(run) {
+  const changed = renderedRun !== run;
+  if (changed) {
+    renderedRun = run;
+    log.replaceChildren();
+    renderedLines = 0;
+    $('output-command').open = run.commandOpen;
+    $('run-command').textContent = `${run.command}\n工作目录：${run.directory}`;
+  }
+  for (const [label, line] of run.lines.slice(renderedLines)) {
+    const row = document.createElement('div');
+    const source = document.createElement('span');
+    const message = document.createElement('span');
+    row.className = 'log-line';
+    source.className = 'log-label';
+    source.textContent = label;
+    message.className = label === '失败' ? 'error' : label === '完成' ? 'good' : '';
+    message.textContent = line;
+    row.append(source, message);
+    log.append(row);
+  }
+  renderedLines = run.lines.length;
+  if (run.follow) log.scrollTop = log.scrollHeight;
+  else if (changed) log.scrollTop = run.scrollTop;
+  renderFollow(run);
+}
+log.addEventListener('scroll', () => {
+  const run = outputRun();
+  if (!run || renderedRun !== run) return;
+  run.scrollTop = log.scrollTop;
+  if (run.follow && log.scrollHeight - log.clientHeight - log.scrollTop > 2) {
+    run.follow = false;
+    renderFollow(run);
+  }
+});
+$('follow-output').addEventListener('click', () => {
+  const run = outputRun();
+  if (!run) return;
+  run.follow = true;
+  log.scrollTop = log.scrollHeight;
+  renderFollow(run);
+});
+$('output-command').addEventListener('toggle', () => {
+  const run = outputRun();
+  if (run) run.commandOpen = $('output-command').open;
+});
+new ResizeObserver(() => {
+  if (outputRun()?.follow) log.scrollTop = log.scrollHeight;
+}).observe(log);
 function renderDock() {
   const s = state();
   choices('[data-dock]', 'dock', s.dock);
   $('run-count').textContent = s.runs.length;
-  const r = s.runs.find((run) => run.id === s.view);
+  const r = selectedRun();
   const tone = (run) => run?.status === '成功' ? 'good' : run?.status === '失败' ? 'error' : '';
   $('stop-run').hidden = r?.status !== '运行中';
   $('run-context').hidden = !r;
@@ -226,13 +306,17 @@ function renderDock() {
   const focused = history.contains(document.activeElement) ? document.activeElement.getAttribute('data-run') : null;
   history.innerHTML = s.runs.length ? s.runs.map((item) => `<button class="history-row" data-run="${item.id}" aria-pressed="${item === r}">${icon(item.kind === '探测' ? 'probe' : 'box')}<span class="history-main"><strong class="mono">${esc(item.target)}</strong> <small>#${item.id} · ${item.kind}</small></span><span class="badge ${tone(item)}">${item.status}</span></button>`).join('') : '<p class="history-empty muted">还没有运行记录。</p>';
   if (focused) history.querySelector(`[data-run="${focused}"]`)?.focus({ preventScroll: true });
+  const output = outputRun();
   const detail = $('dock-body');
-  let content;
-  if (!r) content = '<span class="muted">运行后，在左侧选择记录查看详情。</span>';
-  else if (s.dock === 'artifacts') content = r.artifacts.length ? `<ul class="artifact-list">${r.artifacts.map((path) => `<li><code>${esc(path)}</code></li>`).join('')}</ul>` : '<span class="muted">这次运行没有产物。</span>';
-  else content = r.lines.map(([label, line]) => `<div class="log-line"><span class="log-label">${label}</span><span class="${label === '失败' ? 'error' : label === '完成' ? 'good' : ''}">${esc(line)}</span></div>`).join('');
-  detail.innerHTML = content;
+  $('dock-output').hidden = !output;
+  detail.hidden = !!output;
+  if (output) {
+    renderOutput(output);
+    return;
+  }
+  renderedRun = undefined;
   const detailKey = `${workspace}:${r?.id ?? ''}:${s.dock}`;
+  detail.innerHTML = !r ? '<span class="muted">运行后，在左侧选择记录查看详情。</span>' : r.artifacts.length ? `<ul class="artifact-list">${r.artifacts.map((path) => `<li><code>${esc(path)}</code></li>`).join('')}</ul>` : '<span class="muted">这次运行没有产物。</span>';
   if (detail.dataset.view !== detailKey) detail.scrollTop = 0;
   detail.dataset.view = detailKey;
 }
@@ -254,14 +338,37 @@ function selectTarget(id) {
   s.pane = 'editor';
   render();
 }
+function demoLog(key, probe, target, failed) {
+  if (failed) return ['Reading CMake presets…', 'Resolving preset: missing'];
+  if (key === 'vofa' && probe) return [
+    'The CXX compiler identification is AppleClang', 'Detecting CXX compiler ABI info',
+    'Detecting CXX compile features', 'Checking compiler flags', 'Looking for pthread.h',
+    'Found Threads: TRUE', 'Resolving fmt', 'Reading project sources',
+    'Adding examples/example', 'Adding player/player', 'Writing CMake File API replies',
+  ];
+  if (key === 'vofa') return ['Scanning dependencies', 'Preparing generated headers',
+    `[ 25%] Building CXX object ${target}.cpp.o`, '[ 50%] Building CXX object core.cpp.o',
+    '[ 75%] Building CXX object main.cpp.o', `[100%] Linking CXX executable ${target}`];
+  if (key === 'alkaa') return ['Starting Gradle build', 'Evaluating settings', 'Configuring project :app',
+    'Configuring project :desktop-app', 'Configuring project :shared', 'Resolving task dependencies',
+    ...(probe ? [':app:assembleDebug', ':app:assembleRelease', ':desktop-app:createDistributable', ':shared:allTests'] : [`> Task ${target}`])];
+  return [`Compiling ${target} v0.1.0`, 'Reading package manifest', 'Resolving package features',
+    'Checking build profile', 'Building src/main.rs', 'Generating object code', 'Linking executable', 'Writing build metadata'];
+}
 function startRun() {
   if (!canRun()) return;
   const s = state();
   const key = workspace;
   const probe = isProbe();
   const selected = selectedTool();
-  const r = { id: nextId++, target: s.target, kind: probe ? '探测' : '构建', status: '运行中', artifacts: [], lines: [['命令', command()], ['目录', project().root]] };
+  const r = {
+    id: nextId++, target: s.target, kind: probe ? '探测' : '构建', status: '运行中', artifacts: [],
+    command: command(), directory: project().root, commandOpen: false,
+    lines: [], follow: true, scrollTop: 0,
+  };
   const args = draft().args.trim();
+  const failed = key === 'vofa' && probe && args.includes('--preset missing');
+  const progress = demoLog(key, probe, r.target, failed);
   const paths = draft().paths.split('\n').map((path) => path.trim()).filter(Boolean);
   if (!probe && key === 'alkaa') s.discovery.consumed = true;
   s.runs.unshift(r);
@@ -270,9 +377,16 @@ function startRun() {
   s.pane = 'editor';
   render();
   $('run-history').scrollTop = 0;
-  setTimeout(() => {
+  let step = 0;
+  function tick() {
     if (r.status !== '运行中') return;
-    if (key === 'vofa' && probe && args.includes('--preset missing')) {
+    if (step < progress.length) {
+      r.lines.push(['stdout', progress[step++]]);
+      if (outputRun() === r) renderOutput(r);
+      setTimeout(tick, 320);
+      return;
+    }
+    if (failed) {
       r.status = '失败';
       r.lines.push(['stderr', 'CMake Error: No such preset: "missing"'], ['失败', '配置失败 · 退出码 1 · 本次未生成新目标']);
     } else {
@@ -287,7 +401,7 @@ function startRun() {
         if (key === 'cargo') {
           const profile = args.split(/\s+/).includes('--release') ? 'release' : 'debug';
           r.artifacts = [`target/${profile}/${r.target}`];
-          r.lines.push(['stdout', `Compiling ${r.target}`], ['stdout', `Finished \`${profile === 'debug' ? 'dev' : 'release'}\` profile`]);
+          r.lines.push(['stdout', `Finished \`${profile === 'debug' ? 'dev' : 'release'}\` profile`]);
         } else r.lines.push(['stdout', key === 'vofa' ? `Built target ${r.target}` : 'BUILD SUCCESSFUL']);
         if (r.target === ':app:assembleDebug') r.artifacts = ['app/build/outputs/apk/debug/app-debug.apk'];
         if (r.target === ':desktop-app:createDistributable') r.artifacts = ['desktop-app/build/compose/binaries/main/app/'];
@@ -301,7 +415,8 @@ function startRun() {
       renderTools();
       renderDock();
     }
-  }, 850);
+  }
+  tick();
 }
 function applyTheme() {
   document.documentElement.dataset.theme = theme;
@@ -387,10 +502,30 @@ $('verify').addEventListener('click', () => {
   renderFields();
   if (canRun()) $('primary').focus();
 });
-$('example').addEventListener('click', () => {
-  draft().args = workspace === 'cargo' ? '--release' : workspace === 'alkaa' ? '--offline' : isProbe() ? '-DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/homebrew/opt/fmt' : '--parallel 4';
-  draft().inherited = false;
+const optionsDialog = $('options-dialog');
+const applyOptions = $('apply-options');
+const optionChecks = () => [...$('options-list').querySelectorAll('input:checked')];
+$('common-options').addEventListener('click', () => {
+  const group = workspace === 'cargo' ? 'cargo' : workspace === 'alkaa' ? 'gradle' : isProbe() ? 'configure' : 'cmakeBuild';
+  $('options-context').textContent = `${project().family} · ${isProbe() ? '探测' : '构建'}`;
+  $('options-list').innerHTML = commonOptions[group].map(([flag, label]) =>
+    `<label class="common-option"><input type="checkbox" value="${esc(flag)}"><span><code>${esc(flag)}</code><small>${esc(label)}</small></span></label>`).join('');
+  applyOptions.disabled = true;
+  optionsDialog.returnValue = '';
+  optionsDialog.showModal();
+});
+$('options-form').addEventListener('change', () => { applyOptions.disabled = !optionChecks().length; });
+optionsDialog.addEventListener('close', () => {
+  if (optionsDialog.returnValue !== 'apply') return;
+  const flags = optionChecks().map((check) => check.value).join(' ');
+  if (!flags) return;
+  const d = draft();
+  d.args += `${d.args && !/\s$/u.test(d.args) ? ' ' : ''}${flags}`;
+  d.inherited = false;
   renderEditor();
+  const input = $('arguments');
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
 });
 ['arguments', 'config-name', 'extra-paths'].forEach((id, i) => {
   $(id).addEventListener('input', (e) => {

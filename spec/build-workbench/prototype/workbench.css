@@ -168,6 +168,15 @@ i { display: inline-block; width: 6px; height: 6px; background: var(--accent); b
 .dock-history .dock-body { padding: 5px 6px; }
 .dock-body .log-line { display: grid; grid-template-columns: 53px minmax(0, 1fr); gap: 7px; font: 12px/1.55 ui-monospace, monospace; overflow-wrap: anywhere; }
 .log-line .log-label { color: var(--muted); }
+.dock-output { min-height: 0; flex: 1; display: flex; flex-direction: column; }
+.output-tools { position: relative; flex: 0 0 auto; border-bottom: 1px solid var(--edge); background: var(--panel); }
+#output-command { font-size: 12px; }
+#output-command summary { cursor: pointer; margin: 0 106px 0 13px; min-height: 33px; padding-block: 7px; width: fit-content; }
+#run-command { max-height: clamp(20px, calc(var(--dock-height) - 110px), 76px); overflow: auto; padding: 0 13px 5px; color: var(--accent); }
+.follow-output { position: absolute; top: 4px; right: 13px; min-height: 25px; font-size: 11px; }
+.follow-output[data-following] { color: var(--muted); }
+.run-log { overflow-anchor: none; overscroll-behavior: contain; }
+.run-log:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .history-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; width: 100%; align-items: center; text-align: left; gap: 6px; padding: 5px 6px; border: 1px solid transparent; border-radius: 4px; }
 .history-row:hover { background: var(--hover); }
 .history-row[aria-pressed="true"] { background: var(--select); border-color: var(--accent); }
@@ -186,7 +195,14 @@ dialog::backdrop { background: #0b1019a8; }
 .dialog-body { padding: 14px; }
 .dialog-body p { margin-top: 7px; color: var(--muted); overflow-wrap: anywhere; }
 .dialog-body pre { margin-top: 7px; padding: 8px; background: var(--input); border: 1px solid var(--edge); border-radius: 5px; color: var(--accent); }
-.dialog-body form { display: flex; justify-content: end; gap: 7px; margin-top: 12px; }
+.dialog-body form, .dialog-actions { display: flex; justify-content: end; gap: 7px; margin-top: 12px; }
+.common-list { min-width: 0; margin: 12px 0 0; padding: 7px; border: 1px solid var(--edge); border-radius: 5px; }
+.common-list legend { padding-inline: 5px; color: var(--muted); }
+.common-option { display: flex; align-items: start; gap: 8px; padding: 6px; border-radius: 4px; cursor: pointer; }
+.common-option:hover { background: var(--hover); }
+.common-option:has(:checked) { background: var(--select); }
+.common-option input { margin: 3px 0 0; height: auto; accent-color: var(--accent); }
+.common-option code, .common-option small { display: block; overflow-wrap: anywhere; }
 @media (max-width: 880px) {
   .compact-tabs { display: flex; min-height: 33px; padding: 0 5px; align-self: auto; background: var(--bar); border-bottom: 1px solid var(--edge); }
   .compact-tabs button { flex: 1; justify-content: center; }
@@ -214,7 +230,10 @@ dialog::backdrop { background: #0b1019a8; }
   .history-row strong { grid-column: 1 / -1; }
   .history-row small { font-size: 10px; }
   .history-row .badge { font-size: 10px; }
-  .dock-body .log-line { grid-template-columns: 37px minmax(0, 1fr); gap: 5px; }
+  .dock-body .log-line { grid-template-columns: 6ch minmax(0, 1fr); gap: 5px; }
+  #output-command summary { margin-left: 8px; }
+  #run-command { padding-inline: 8px; }
+  .follow-output { right: 8px; }
   .run-context #run-status { display: none; }
 }
 @media (max-width: 360px) {
