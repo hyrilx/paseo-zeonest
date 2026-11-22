@@ -2,6 +2,7 @@ import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin
 import * as rpc from "../shared/contracts";
 import { activeWorkbench } from "./index";
 import { workspaceRoot } from "./paths";
+import { ConfigurationFieldError } from "./options";
 
 export async function resolveWorkspace(paseo: PluginHandlerContext["paseo"], id: string) {
   const snapshot = await paseo.workspaces.ref(id).refresh();
@@ -37,7 +38,11 @@ export default function contribute(server: PluginServerContext) {
   });
   server.handle(rpc.preview, async ({ workspaceId, configuration }, { paseo }) => {
     const { store, workspace } = await access(paseo, workspaceId);
-    return store.preview(workspace, configuration);
+    try { return { kind: "ready" as const, ...store.preview(workspace, configuration) }; }
+    catch (error) {
+      if (error instanceof ConfigurationFieldError) return { kind: "invalid" as const, field: error.field, message: error.message };
+      throw error;
+    }
   });
   server.handle(rpc.save, async ({ workspaceId, configuration }, { paseo }) => {
     const { store, workspace } = await access(paseo, workspaceId);

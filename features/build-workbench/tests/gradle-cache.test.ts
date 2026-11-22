@@ -100,6 +100,10 @@ test("Gradle shares canonical project results independently of workspace history
   assert.equal(found(w, peer, name)?.project, ".");
   assert.deepEqual(found(w, author, name)?.probeOptions, [property]);
   assert.equal(found(w, peer, name)?.probeOptions, undefined);
+  const candidates = w.tools(author, key(name, "java")).candidates;
+  assert.deepEqual(candidates.filter((candidate) => candidate.probeOptions).map((candidate) => [candidate.id, candidate.probeOptions]), [[c.tool, [property]]]);
+  assert.ok(candidates.some((candidate) => candidate.id !== c.tool));
+  assert.doesNotMatch(JSON.stringify(w.tools(peer, key(name))), /private-fixture-credential/u);
   assert.doesNotMatch(JSON.stringify(w.discover(peer)), /private-fixture-credential/u);
   assert.equal(found(w, isolated, name), undefined);
   assert.equal(count(), ".");

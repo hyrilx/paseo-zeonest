@@ -3,9 +3,10 @@ import { relative } from "node:path";
 import { PROBE_TARGET_LIMIT } from "../shared/contracts";
 import type { ProjectTarget } from "./projects";
 import { misePin } from "./mise";
+import { wrapperVersion } from "./gradle-runtime.ts";
 import { at, digest, projectDirs, readText, resolveWithin } from "./paths";
 
-export type Gradle = { wrapper?: string; jar?: string; volatile?: boolean };
+export type Gradle = { wrapper?: string; jar?: string; distributionVersion?: string; volatile?: boolean };
 export type Xcode = { kind: "workspace" | "project"; derived: string; volatile?: boolean };
 
 function scanInputs(root: string, project: string, extension: RegExp, hidden = false) {
@@ -100,7 +101,7 @@ export function discoverGradle(root: string, dirs: string[], notices: string[], 
       if (readText(root, wrapper) !== undefined || properties !== undefined) {
         accessSync(resolveWithin(root, wrapper), constants.X_OK);
         if (!properties || !statSync(resolveWithin(root, jar)).isFile()) throw new Error("Gradle Wrapper 缺少配置或 JAR");
-        gradle = { wrapper, jar };
+        gradle = { wrapper, jar, distributionVersion: wrapperVersion(properties) };
       }
       const input = gradleInputs(root, project, inputs[0] ?? inputs[1] ?? "");
       const competingScripts = (inputs[0] !== undefined && inputs[1] !== undefined) || (inputs[2] !== undefined && inputs[3] !== undefined);
