@@ -134,7 +134,7 @@ test("npm/pnpm refuse out-of-scope installation roots and scope-changing switche
     const envOnly = new Workbench(join(root, `${mono}-env`), { ...env, NPM_CONFIG_WORKSPACE: "beta" });
     t.after(() => envOnly.close());
     rmSync(join(workspace.root, ".npmrc"));
-    if (manager === "npm") assert.throws(() => envOnly.preview(workspace, selected), /宿主环境.*workspace/u);
+    if (manager === "npm") assert.throws(() => envOnly.preview(workspace, selected), /宿主环境.*NPM_CONFIG_WORKSPACE/u);
     else {
       put(".npmrc", "prefix=~/global\n");
       assert.throws(() => w.preview(workspace, selected), /\.npmrc.*prefix.*pnpm/u);
@@ -144,6 +144,71 @@ test("npm/pnpm refuse out-of-scope installation roots and scope-changing switche
   put("npm-mono/standalone/package.json", { name: "standalone", scripts });
   const standalone = { id: "standalone", root: join(root, "npm-mono/standalone") };
   assert.equal(w.discover(standalone).targets.find(({ name }) => name === "build")?.project, ".");
+});
+
+test("pnpm normalizes native configuration, pins the verified manager and rechecks script scope after install", { skip: process.platform === "win32" }, async (t) => {
+  const { root, put } = fixture(t);
+  mkdirSync(join(root, "outside"));
+  const path = [join(root, "bin"), dirname(process.execPath)].join(delimiter);
+  const benign = { HOME: root, PATH: path, pnpm_config_registry: "http://127.0.0.1:1", npm_config_proxy: "http://127.0.0.1:1", PNPM_CONFIG_PM_ON_FAIL: "download" };
+  const restricted = new Workbench(join(root, "restricted"), { ...benign, pnpm_config_lockfile_dir: join(root, "outside") });
+  t.after(() => restricted.close());
+  const makeProject = (id: string, version: string) => {
+    put(`${id}/package.json`, { name: "owner", packageManager: `pnpm@${version}` });
+    put(`${id}/pnpm-workspace.yaml`, 'packages: ["members/*"]\n');
+    put(`${id}/members/app/package.json`, { name: "app", scripts: { build: "fixture" } });
+    return { id, root: join(root, id) };
+  };
+  const target = { adapter: "pnpm", project: "members/app", name: "build" } as const;
+  const manager = (version: string) => put("bin/pnpm", `
+const fs = require('node:fs');
+const cmd = process.argv[2];
+if (cmd === '--version') console.log(${JSON.stringify(version)});
+else {
+  const p = process.env;
+  if (p.PNPM_CONFIG_PM_ON_FAIL !== undefined || p.pnpm_config_registry !== 'http://127.0.0.1:1') process.exit(51);
+  if (${version.startsWith("10.")} ? p.npm_config_manage_package_manager_versions !== 'false' || p.npm_config_package_manager_strict_version !== 'true' || p.pnpm_config_pm_on_fail !== undefined
+    : p.pnpm_config_pm_on_fail !== 'ignore' || p.npm_config_manage_package_manager_versions !== undefined) process.exit(52);
+  if (cmd === 'install' && fs.existsSync('redirect-after-install')) fs.writeFileSync('members/app/.npmrc', 'filter=wrong');
+  fs.writeFileSync(cmd === 'install' ? 'installed' : 'built', process.cwd());
+}`, true);
+  for (const version of ["12.21.0", "10.35.1"]) {
+    const w = new Workbench(join(root, `state-${version}`), benign);
+    t.after(() => w.close());
+    const exe = manager(version);
+    const workspace = makeProject(`mono-${version}`, version);
+    const select = (owner: Workbench, project = workspace) => config(owner, project, target, owner.tools(project, target).candidates.find(({ paths }) => paths[1] === exe)?.id);
+    if (version.startsWith("12.")) {
+      const selected = select(restricted);
+      assert.throws(() => restricted.preview(workspace, selected), /pnpm_config_lockfile_dir/u);
+      await assert.rejects(() => restricted.verify(workspace, selected), /pnpm_config_lockfile_dir/u);
+      const wrong = makeProject("wrong-pin", "12.20.0");
+      await assert.rejects(() => w.verify(wrong, select(w, wrong)), /版本不符合要求.*12\.20\.0/u);
+      assert.throws(() => submit(w, wrong, select(w, wrong)), /先检查所选工具/u);
+      assert.throws(() => readFileSync(join(wrong.root, "installed")), /ENOENT/u);
+      for (const key of ["PNPM_CONFIG_FILTER", "npm_config_modules_dir"]) {
+        const redirect = new Workbench(join(root, key), { ...benign, [key]: "secret-value" });
+        t.after(() => redirect.close());
+        assert.throws(() => redirect.preview(workspace, select(redirect)), (error: Error) => error.message.includes(key) && !error.message.includes("secret-value"));
+      }
+      put("pnpm-config/pnpm/config.yaml", "lockfileDir: /not-the-approved-root\n");
+      const globalConfig = new Workbench(join(root, "global-pnpm"), { ...benign, XDG_CONFIG_HOME: join(root, "pnpm-config") });
+      t.after(() => globalConfig.close());
+      assert.throws(() => globalConfig.preview(workspace, select(globalConfig)), /全局 pnpm config\.yaml.*lockfileDir/u);
+      const changed = makeProject("changed-during-install", version);
+      put("changed-during-install/redirect-after-install", "");
+      await w.verify(changed, select(w, changed));
+      const stopped = await finish(w, changed, submit(w, changed, select(w, changed)).id);
+      assert.equal(stopped.run.status, "failed");
+      assert.match(stopped.run.result ?? "", /\.npmrc 的 filter/u);
+      assert.throws(() => readFileSync(join(changed.root, target.project, "built")), /ENOENT/u);
+    }
+    const selected = select(w);
+    await w.verify(workspace, selected);
+    assert.equal((await finish(w, workspace, submit(w, workspace, selected).id)).run.status, "success");
+    assert.equal(readFileSync(join(workspace.root, "installed"), "utf8"), workspace.root);
+    assert.equal(readFileSync(join(workspace.root, target.project, "built"), "utf8"), join(workspace.root, target.project));
+  }
 });
 
 test("npm permits a user global-install prefix without accepting scope overrides", { skip: process.platform === "win32" }, async (t) => {
@@ -176,7 +241,7 @@ else require('node:fs').writeFileSync(process.argv.includes('install') ? 'instal
   put("home/.npmrc", "prefix=~/global install\n");
   const redirected = service({ NPM_CONFIG_PREFIX: join(root, "other") });
   t.after(() => redirected.close());
-  assert.throws(() => redirected.preview(workspace, selected), /宿主环境.*prefix/u);
+  assert.throws(() => redirected.preview(workspace, selected), /宿主环境.*NPM_CONFIG_PREFIX/u);
 });
 
 test("mise TOML versions constrain both Node and the manager; unsupported declarations are diagnosed", { skip: process.platform === "win32" }, async (t) => {
@@ -331,20 +396,33 @@ else {
   assert.equal(context?.buildDir, join(root, "temp-objects"));
 });
 
-for (const manager of ["npm", "pnpm"] as const) {
-  test(`Tauri ${manager} resolves a member CLI after cold preparation and requires confirmation if an installed entry changes`, { skip: process.platform === "win32" }, async (t) => {
+for (const { manager, catalog } of [
+  { manager: "npm", catalog: undefined }, { manager: "pnpm", catalog: undefined },
+  { manager: "pnpm", catalog: "default" }, { manager: "pnpm", catalog: "desktop" },
+] as const) {
+  test(`Tauri ${manager} ${catalog ?? "range"} resolves the member CLI and hook after cold and warm preparation`, { skip: process.platform === "win32" }, async (t) => {
     const { root, put } = fixture(t);
     const ws = { id: manager, root: join(root, "workspace") };
     const parent = (range: string) => put("workspace/package.json", { name: "parent", ...(manager === "npm" ? { workspaces: ["desktop"] } : {}), devDependencies: { "@tauri-apps/cli": range } });
     parent("^1");
-    put("workspace/desktop/package.json", { name: "desktop", dependencies: { "@tauri-apps/cli": "^2" } });
-    if (manager === "pnpm") put("workspace/pnpm-workspace.yaml", "packages: ['desktop']\n");
+    const spec = catalog === "default" ? "catalog:" : catalog ? `catalog:${catalog}` : "^2";
+    put("workspace/desktop/package.json", { name: "desktop", dependencies: { "@tauri-apps/cli": spec } });
+    const catalogFile = (range: string) => "packages: ['desktop']\n" + (catalog === "default" ? `catalog:\n  '@tauri-apps/cli': '${range}'\n` :
+      catalog ? `catalogs:\n  ${catalog}:\n    '@tauri-apps/cli': '${range}'\n` : "");
+    if (manager === "pnpm") put("workspace/pnpm-workspace.yaml", catalogFile("^2"));
     put("workspace/desktop/src-tauri/Cargo.toml", '[package]\nname="desktop"\n');
     put("workspace/desktop/src-tauri/tauri.conf.json", {});
     const oldPackage = "node_modules/@tauri-apps/cli";
     put(`workspace/${oldPackage}/package.json`, { name: "@tauri-apps/cli", version: "1.0.0", bin: { tauri: "run.js" } });
     put(`workspace/${oldPackage}/run.js`, "process.exit(51)");
     put("bin/tauri", "process.exit(52)", true);
+    put("bin/assetgen", "console.log('host-asset')", true);
+    put("workspace/node_modules/.bin/assetgen", "console.log('root-asset')", true);
+    const memberBin = "desktop/node_modules/.bin";
+    const cli = `
+const fs = require('node:fs'), cp = require('node:child_process');
+const hook = cp.execFileSync('/bin/sh', ['-c', 'assetgen; node -p process.execPath; cargo --version; rustc --version'], { cwd:process.env.TAURI_FRONTEND_PATH, encoding:'utf8' });
+fs.writeFileSync('ran', JSON.stringify([process.cwd(), process.env.TAURI_FRONTEND_PATH, process.execPath, ...hook.trim().split('\\n')]));`;
     const nextPackage = manager === "npm" ? `desktop/${oldPackage}` : "node_modules/.pnpm/@tauri-apps+cli@2.1.0/node_modules/@tauri-apps/cli";
     const executable = put(`bin/${manager}`, `
 const fs = require('node:fs');
@@ -355,7 +433,10 @@ else if (process.argv.includes('install')) {
   if (!fs.existsSync('skip-cli')) {
     fs.mkdirSync(directory,{recursive:true});
     fs.writeFileSync(directory+'/package.json',JSON.stringify({name:'@tauri-apps/cli',version:'2.1.0',bin:{tauri:'cli.js'}}));
-    fs.writeFileSync(directory+'/cli.js',"require('node:fs').writeFileSync('ran',process.env.TAURI_FRONTEND_PATH)" + (fs.existsSync('change-entry') ? ';process.exit(0)' : ''));
+    fs.writeFileSync(directory+'/cli.js',${JSON.stringify(cli)} + (fs.existsSync('change-entry') ? ';process.exit(0)' : ''));
+    fs.mkdirSync('${memberBin}',{recursive:true});
+    if (!fs.existsSync('skip-assetgen')) fs.writeFileSync('${memberBin}/assetgen', '#!/bin/sh\\necho member-asset\\n', {mode:0o700});
+    if (fs.existsSync('change-catalog')) fs.writeFileSync('pnpm-workspace.yaml', ${JSON.stringify(catalogFile("~2.1.0"))});
     if (${JSON.stringify(manager)} === 'pnpm' && !fs.existsSync('desktop/node_modules/@tauri-apps/cli')) {
       fs.mkdirSync('desktop/node_modules/@tauri-apps',{recursive:true});
       fs.symlinkSync(require('node:path').resolve(directory),'desktop/node_modules/@tauri-apps/cli');
@@ -375,10 +456,44 @@ else if (process.argv.includes('install')) {
     assert.equal(first.run.status, "success", first.run.result);
     assert.equal(first.run.command?.argv[1], join(ws.root, nextPackage, "cli.js"));
     assert.deepEqual(first.run.command?.preparation, cold.preparation);
-    assert.equal(readFileSync(join(ws.root, "desktop/ran"), "utf8"), join(ws.root, "desktop"));
+    const assertHook = (mark: string) => {
+      const [cwd, frontend, directNode, hookMark, hookNode, hookCargo, hookRustc] = JSON.parse(readFileSync(join(ws.root, "desktop/ran"), "utf8")) as string[];
+      assert.deepEqual([cwd, frontend, hookMark, hookCargo, hookRustc], [join(ws.root, "desktop"), join(ws.root, "desktop"), mark, "cargo 1.96.0", "rustc 1.96.0"]);
+      for (const node of [directNode, hookNode]) assert.equal(realpathSync(node!), realpathSync(cold.argv[0]!));
+    };
+    assertHook("member-asset");
     assert.deepEqual(w.preview(ws, c).command.argv, first.run.command?.argv);
+    assert.equal((await finish(w, ws, submit(w, ws, c).id)).run.status, "success");
+    assertHook("member-asset");
+    put("workspace/skip-assetgen", "");
+    rmSync(join(ws.root, memberBin, "assetgen"));
+    assert.equal((await finish(w, ws, submit(w, ws, c).id)).run.status, "success");
+    assertHook("root-asset");
 
     rmSync(join(ws.root, "desktop/ran"));
+    if (catalog) {
+      const yaml = (body: string) => put("workspace/pnpm-workspace.yaml", body);
+      yaml("packages: ['desktop']\n");
+      assert.throws(() => w.preview(ws, c), /未为 Tauri CLI 声明有效/u);
+      if (catalog === "default") {
+        yaml(catalogFile("^2") + "catalogs:\n  default: {}\n");
+        assert.throws(() => w.preview(ws, c), /同时声明 catalog 和 catalogs.default/u);
+      }
+      yaml(catalogFile("^3"));
+      await w.verify(ws, c);
+      assert.match(w.preview(ws, c).command.argv[1]!, /准备后确认/u);
+      const mismatched = await finish(w, ws, submit(w, ws, c).id);
+      assert.match(mismatched.run.result ?? "", /仍无法核对所声明的 Tauri CLI/u);
+      assert.throws(() => readFileSync(join(ws.root, "desktop/ran")), { code: "ENOENT" });
+      yaml(catalogFile("^2"));
+      await w.verify(ws, c);
+      put("workspace/change-catalog", "");
+      const updated = await finish(w, ws, submit(w, ws, c).id);
+      assert.match(updated.run.result ?? "", /Tauri 项目或工具配置发生变化/u);
+      assert.throws(() => readFileSync(join(ws.root, "desktop/ran")), { code: "ENOENT" });
+      rmSync(join(ws.root, "change-catalog"));
+      await w.verify(ws, c);
+    }
     put("workspace/change-entry", "");
     const changed = await finish(w, ws, submit(w, ws, c).id);
     assert.equal(changed.run.status, "failed");

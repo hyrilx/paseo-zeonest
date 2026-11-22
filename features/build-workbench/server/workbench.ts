@@ -12,7 +12,7 @@ import { digest, inside, missing, readBounded, resolveWithin, workspaceRoot } fr
 import { discoverProjects, type ProjectTarget } from "./projects";
 import { launch } from "./process";
 import type { Invocation, OwnedProcess } from "./process";
-import { assertPackageBindings, buildArguments, preparation, requirement, toolchains, toolIssues, verifyTool } from "./toolchains";
+import { assertJsConfig, assertPackageBindings, buildArguments, preparation, requirement, toolchains, toolIssues, verifyTool, type Checks } from "./toolchains";
 import type { ResolvedTauriCli } from "./tauri-cli";
 
 const HISTORY = 24;
@@ -31,7 +31,7 @@ export type Workspace = { id: string; root: string };
 type NativeProbe = { adapter: "gradle" | "xcode"; stamp: string; context: string; tool: string; filter?: string; options: string[]; gradleScope?: GradleScope };
 type Plan = { command: Command; fingerprint: string; steps: Invocation[]; outputs: string[]; hints: string[]; locks: string[]; configure?: { base: string; dir: string; stamp: string; tool: string };
   nativeProbe?: NativeProbe; consume?: NativeResult["consume"]; cargoReport?: { source?: string; dir: string };
-  tauriCli?: { context: string; installed?: ResolvedTauriCli } };
+  tauriCli?: { context: string; installed?: ResolvedTauriCli }; checkJsScope?: (phase: "install" | "script") => void };
 type Job = { workspace: Workspace; entry: Entry; plan: Plan; process?: OwnedProcess; flush?: ReturnType<typeof setTimeout>; stopTimer?: ReturnType<typeof setTimeout>; before?: ReturnType<typeof observe>; reported?: Set<string>; reportLimited?: boolean };
 
 function cargoMessages(job: Job) {
@@ -74,7 +74,7 @@ export function conflicts(a: { root: string; locks?: string[] }, b: { root: stri
 
 export class Workbench {
   readonly #session = randomUUID();
-  readonly #checks = new Map<string, string>();
+  readonly #checks: Checks = new Map();
   readonly #probes = new Set<OwnedProcess>();
   readonly #jobs: Job[] = [];
   readonly #states = new Map<string, State>();
@@ -234,7 +234,7 @@ export class Workbench {
       if (refreshed?.signature !== tool.signature || updated.stamp !== t.stamp) throw new Error("检查期间工具或项目声明发生变化，请重试");
       if (this.#checks.size >= 128) { const oldest = this.#checks.keys().next(); if (!oldest.done) this.#checks.delete(oldest.value); }
       this.#checks.set(JSON.stringify([w.id, w.root, t.adapter, t.project]) + ":" + tool.signature, found);
-      return { ...tool.candidate, version: found };
+      return { ...tool.candidate, version: found.version };
     } finally { this.#verificationRoot = undefined; this.#pump(); }
   }
 
@@ -263,6 +263,7 @@ export class Workbench {
     if (build.tauriCli) {
       const { request, installed } = build.tauriCli;
       notes.push(`Tauri CLI 由 ${request.owner === "." ? "安装根目录" : request.owner} 声明；${installed ? `已找到 ${installed.version}，准备依赖后再次核对` : "准备依赖后确认入口，不使用宿主或其他包的 CLI"}。`);
+      notes.push(`Tauri 钩子按 ${request.manager} 的顺序搜索前端项目工具；Node、包管理器和 Rust 仍使用选定的工具。`);
     }
     if (hints.length) notes.push(`产物线索（未经构建工具确认）：${hints.join("、")}`);
     if (!outputs.length && !build.cargoReport && !t.operation) notes.push("未取得原生产物路径；可手填要观察的工作区路径。");
@@ -281,15 +282,17 @@ export class Workbench {
     const locks = [...new Set([w.root, build.cargo?.targetDir, build.cargo?.buildDir, ...(build.sharedWrites ?? [])].filter((p): p is string => !!p))];
     const tauriCli = build.tauriCli && { installed: build.tauriCli.installed,
       context: digest(JSON.stringify([t.tauri?.declaration, build.tauriCli.request, tool.signature, cwd, executable, args.slice(1),
-        outputs, locks, build.cargo, build.environment, build.planInputs, command.preparation])) };
+        outputs, locks, build.cargo, build.environment, build.scriptBins, build.planInputs, command.preparation])) };
     const fingerprint = digest(JSON.stringify([w.root, targetId(t), t.stamp, tool.signature, command, outputs, locks, build.cargo, build.planInputs, consume?.id, tauriCli]));
     const configure = build.configureDir && t.cmake ? { base: t.cmake.dir, dir: build.configureDir, stamp: t.cmake.stamp, tool: tool.signature } : undefined;
     const nativeProbe = t.operation && (t.adapter === "gradle" || t.adapter === "xcode") ? { adapter: t.adapter, stamp: t.stamp, context, tool: tool.signature,
       filter: build.taskFilter, options: build.nativeOptions ?? [], gradleScope: t.gradle ? this.#gradleScope(w, t) : undefined } : undefined;
-    const main = { executable, args, cwd, env: { ...tool.env, ...build.environment }, bindings: tool.bindings, reapAfterExit: !!t.gradle,
+    const main = { executable, args, cwd, env: { ...tool.env, ...build.environment }, bindings: tool.bindings, scriptBins: build.scriptBins, reapAfterExit: !!t.gradle,
       bindingDirectory: t.cmake ? join(this.data, "cmake-bin", digest(JSON.stringify(tool.bindings ?? {}))) : undefined };
     const cargoReport = build.cargoReport && build.cargo ? { source: t.cargo?.name ? resolveWithin(w.root, t.source) : undefined, dir: build.cargo.targetDir } : undefined;
-    return { command, fingerprint, steps: [...prep.steps.map(({ invocation }) => invocation), main], outputs, hints, configure, nativeProbe, consume, cargoReport, locks, tauriCli };
+    const checkJsScope: Plan["checkJsScope"] = t.adapter === "npm" || t.adapter === "pnpm" || t.tauri?.manager ?
+      (phase) => assertJsConfig(w.root, t, tool, phase) : undefined;
+    return { command, fingerprint, steps: [...prep.steps.map(({ invocation }) => invocation), main], outputs, hints, configure, nativeProbe, consume, cargoReport, locks, tauriCli, checkJsScope };
   }
   preview(w: Workspace, c: Configuration) {
     const { command, fingerprint } = this.#plan(w, c);
@@ -401,6 +404,7 @@ export class Workbench {
     if (!this.#sameRoot(job.workspace.root) || resolveWithin(job.workspace.root, relativeCwd) !== invocation.cwd) {
       throw new Error("工作区或命令目录已变化，请刷新");
     }
+    job.plan.checkJsScope?.(preparing ? "install" : "script");
     assertPackageBindings(invocation);
     if (preparing || index > 0) this.#append(job, "stdout", `\n[${phase}] ${JSON.stringify([invocation.executable, ...invocation.args])}\n`);
     const probeAdapter = preparing ? undefined : job.plan.nativeProbe?.adapter;

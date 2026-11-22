@@ -2,7 +2,7 @@ import { lstatSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { satisfies, valid, validRange } from "semver";
 import { parse as yaml } from "yaml";
-import { digest, inside, missing, readBounded, resolveWithin } from "./paths";
+import { at, digest, inside, missing, readBounded, readText, resolveWithin } from "./paths";
 import { object, TAURI_CLI_PACKAGE } from "./projects";
 
 export type TauriCliRequest = { root: string; owner: string; install: string; manager: "npm" | "pnpm"; spec: string };
@@ -35,6 +35,24 @@ function matchesFile(request: TauriCliRequest, owner: string, install: string, m
   return locked.version === version && pkg === join(install, "node_modules/.pnpm", key.replace(/\//gu, "+").replace(/:/gu, "+"), "node_modules", TAURI_CLI_PACKAGE);
 }
 
+function versionRange(request: TauriCliRequest) {
+  const { root, install, manager, spec } = request;
+  if (manager !== "pnpm" || !spec.startsWith("catalog:")) return validRange(spec);
+  const name = spec.slice("catalog:".length) || "default";
+  const file = at(install, "pnpm-workspace.yaml");
+  const source = readText(root, file);
+  const config = source === undefined ? {} : object(yaml(source, { maxAliasCount: 0 }));
+  const catalogs = object(config.catalogs);
+  if (name === "default" && Object.hasOwn(config, "catalog") && Object.hasOwn(catalogs, name)) {
+    throw new Error(`${file} 同时声明 catalog 和 catalogs.default，无法确认 Tauri CLI`);
+  }
+  const selected = name === "default" && Object.hasOwn(config, "catalog") ? config.catalog : Object.hasOwn(catalogs, name) ? catalogs[name] : undefined;
+  const entry = object(selected)[TAURI_CLI_PACKAGE];
+  const range = typeof entry === "string" && entry.trim() ? validRange(entry) : null;
+  if (!range) throw new Error(`${file} 未为 Tauri CLI 声明有效的 ${name} catalog 版本范围`);
+  return range;
+}
+
 // Resolve from the declaring package up to its install root, just like a local
 // node_modules lookup. Never search executables on PATH or past that root.
 export function resolveTauriCli(request: TauriCliRequest): ResolvedTauriCli | undefined {
@@ -42,7 +60,7 @@ export function resolveTauriCli(request: TauriCliRequest): ResolvedTauriCli | un
   const owner = resolveWithin(root, request.owner);
   const install = resolveWithin(root, request.install);
   if (!inside(install, owner)) throw new Error("Tauri CLI 的声明不在所选安装根内");
-  const range = validRange(spec);
+  const range = versionRange(request);
   if (!range && !spec.startsWith("file:")) throw new Error("暂无法核对 Tauri CLI 依赖声明；支持版本范围和可核对的项目内 tarball");
   for (let parent = owner;; parent = dirname(parent)) {
     const manifest = join(parent, "node_modules", TAURI_CLI_PACKAGE, "package.json");

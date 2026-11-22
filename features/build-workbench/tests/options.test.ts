@@ -32,7 +32,7 @@ test("form options roundtrip quoted arguments, literal shell syntax, and empty s
 
 test("stack options compile to native arguments without changing the chosen operation", (t) => {
   const { root, put } = fixture(t);
-  const selectedTool = { ...tool, env: { HOME: root }, bindings: { node: process.execPath } };
+  const selectedTool = { ...tool, executable: put("bin/pnpm", "", true), env: { HOME: root }, bindings: { node: process.execPath } };
   put("package.json", '{"packageManager":"pnpm@11.0.0","scripts":{"build":"fixture"},"dependencies":{"@tauri-apps/cli":"^2"}}');
   put("src-tauri/tauri.conf.json", '{"build":{"frontendDist":"../dist"}}');
   put("src-tauri/Cargo.toml", '[package]\nname = "desktop"\n');

@@ -5,7 +5,7 @@ import { delimiter, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 export type Bindings = Record<string, string>;
-export type Invocation = { executable: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; bindings?: Bindings; bindingDirectory?: string; reapAfterExit?: boolean };
+export type Invocation = { executable: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; bindings?: Bindings; bindingDirectory?: string; reapAfterExit?: boolean; scriptBins?: string[] };
 type Output = (stream: "stdout" | "stderr", text: string) => void;
 type Exit = { code: number | null; signal: string | null; error?: string; stopped: boolean };
 export type OwnedProcess = { done: Promise<Exit>; stop(): void };
@@ -30,8 +30,9 @@ export function launch(invocation: Invocation, output: Output): OwnedProcess {
         }
       }
     }
-    const path = bin ? { ...env, PATH: [bin, env.PATH].filter(Boolean).join(delimiter) } : env;
-    child = spawn(executable, args, { cwd, env: path, detached: true, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    const prefix = [bin, ...(invocation.scriptBins ?? [])].filter(Boolean);
+    const childEnv = prefix.length ? { ...env, PATH: [...prefix, env.PATH].filter(Boolean).join(delimiter) } : env;
+    child = spawn(executable, args, { cwd, env: childEnv, detached: true, shell: false, stdio: ["ignore", "pipe", "pipe"] });
   } catch (error) { cleanup(); throw error; }
   const pid = child.pid;
   let error: string | undefined;

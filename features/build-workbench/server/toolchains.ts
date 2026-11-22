@@ -15,7 +15,8 @@ import { object, tauriConfig, type ProjectTarget } from "./projects";
 import { resolveTauriCli, type TauriCliRequest } from "./tauri-cli";
 
 export type Tool = { candidate: Candidate; signature: string; executable: string; env: NodeJS.ProcessEnv; bindings?: Bindings; overrides?: string[]; tauriCargoCli?: string; gradlePersistent?: boolean };
-export type Checks = Map<string, string>;
+type VerifiedTool = { version: string; pnpmMajor?: number };
+export type Checks = Map<string, VerifiedTool>;
 
 export function identity(path: string) {
   const s = statSync(path, { bigint: true });
@@ -40,7 +41,9 @@ function makeTool(t: ProjectTarget, checked: Checks, paths: string[], executable
   const cmakeSelection = t.cmake && [env.CMAKE_GENERATOR, env.CMAKE_GENERATOR_PLATFORM, env.CMAKE_GENERATOR_TOOLSET, env.CMAKE_GENERATOR_INSTANCE, env.CMAKE_TOOLCHAIN_FILE, env.CC, env.CXX];
   const signature = digest(JSON.stringify([t.requirements, gradleContext, t.xcode, cmakeSelection, env.PATH, env.JAVA_HOME, env.ANDROID_HOME, env.DEVELOPER_DIR, env.GRADLE_USER_HOME, env.JAVA_TOOL_OPTIONS, env.PROTOC,
     ...[...new Set([...paths, ...Object.values(bindings ?? {})])].map(identity)]));
-  return { candidate: { id, paths, label, requirement: requirement(t), version: checked.get(signature) }, executable, env, signature, bindings, overrides };
+  const check = checked.get(signature);
+  const runEnv = check?.pnpmMajor === undefined ? env : fixedPnpmEnvironment(env, check.pnpmMajor);
+  return { candidate: { id, paths, label, requirement: requirement(t), version: check?.version }, executable, env: runEnv, signature, bindings, overrides };
 }
 
 function rustPairs(t: ProjectTarget, env: NodeJS.ProcessEnv) {
@@ -208,20 +211,53 @@ export function toolchains(t: ProjectTarget, env: NodeJS.ProcessEnv, checked: Ch
     [node, manager], manager, runEnv, `${t.adapter} · ${dirname(node)} → ${dirname(manager)}`, bindings, overrides));
 }
 
-// npm/pnpm prepend local package bins after launch. Detect an override before
-// the selected script or CLI can resolve a different runtime than the preview.
+function* ancestorBins(cwd: string) {
+  for (let dir = cwd;; dir = dirname(dir)) {
+    yield join(dir, "node_modules", ".bin");
+    if (dirname(dir) === dir) return;
+  }
+}
+
+// npm/pnpm prepend local package bins after launch. Direct Tauri launches
+// use the explicitly planned hook paths instead of an unrelated install dir.
 export function assertPackageBindings(invocation: Invocation) {
   const bindings = invocation.bindings;
   if (!bindings?.node) return;
-  for (let dir = invocation.cwd;; dir = dirname(dir)) {
-    for (const name of ["node", ...(bindings.cargo ? ["cargo", "rustc"] : [])]) {
-      const path = join(dir, "node_modules", ".bin", name);
+  for (const dir of invocation.scriptBins ?? ancestorBins(invocation.cwd)) {
+    const names = invocation.scriptBins ? Object.keys(bindings) : ["node", ...(bindings.cargo ? ["cargo", "rustc"] : [])];
+    for (const name of names) {
+      const path = join(dir, name);
       if (executable(path) && realpathSync(path) !== realpathSync(bindings[name]!)) {
         throw new Error(`项目的 ${path} 会覆盖所选 ${name}；请检查项目的运行时配置`);
       }
     }
-    if (dirname(dir) === dir) break;
   }
+}
+
+function tauriScriptBins(root: string, cwd: string, request: TauriCliRequest, manager: string) {
+  const native = realpathSync(manager);
+  const base = dirname(native);
+  const bundled = request.manager === "npm" ? [join(base, "../node_modules/@npmcli/run-script/lib/node-gyp-bin"),
+    join(base, "../lib/node_modules/npm/node_modules/@npmcli/run-script/lib/node-gyp-bin"), join(base, "node-gyp-bin")] :
+    [join(base, "dist/node-gyp-bin"), join(base, "node-gyp-bin"), join(base, "../dist/node-gyp-bin")];
+  const available = (path: string) => {
+    try { return statSync(path).isDirectory(); }
+    catch (error) { if (!missing(error)) throw error; return false; }
+  };
+  const nodeGyp = bundled.find(available);
+  const bundledPaths = nodeGyp ? [nodeGyp] : [];
+  const local = (path: string) => resolveWithin(root, relative(root, path));
+  if (request.manager === "pnpm") {
+    const member = local(join(cwd, "node_modules/.bin"));
+    const workspace = local(join(resolveWithin(root, request.install), "node_modules/.bin"));
+    return [...new Set([member, ...bundledPaths, workspace])];
+  }
+  const paths: string[] = [];
+  for (const path of ancestorBins(cwd)) {
+    if (inside(root, path)) paths.push(local(path));
+    else if (available(path)) throw new Error(`npm 钩子会搜索工作区外的 ${path}；无法确认项目工具范围`);
+  }
+  return [...paths, ...bundledPaths];
 }
 
 function helperBinding(name: string, env: NodeJS.ProcessEnv): Bindings {
@@ -232,21 +268,26 @@ function helperBinding(name: string, env: NodeJS.ProcessEnv): Bindings {
 }
 
 const configKey = (name: string) => name.toLowerCase().replace(/\[\]$/u, "").replace(/[-_]/gu, "");
+const envOption = (name: string, nativePnpm: boolean) => {
+  const key = name.toLowerCase();
+  if (key.startsWith("npm_config_")) return key.slice("npm_config_".length);
+  if (nativePnpm && key.startsWith("pnpm_config_")) return key.slice("pnpm_config_".length);
+};
 const runtimeSetting = (name: string) => /^(?:usenodeversion|nodeversionforrun|nodeoptionsforrun)$/u.test(configKey(name));
-function assertJsConfig(root: string, t: ProjectTarget, tool: Tool, phase: "install" | "script") {
+export function assertJsConfig(root: string, t: ProjectTarget, tool: Tool, phase: "install" | "script") {
   const { env } = tool;
   const cwd = resolveWithin(root, phase === "install" ? t.install?.cwd ?? t.cwd : t.cwd);
   const manager = t.tauri?.manager ?? t.adapter;
   const config = new Map(Object.entries(env).map(([name, value]) => [name.toLowerCase(), value]));
   const scopeSetting = (name: string) => (manager === "npm" ? /^(?:workspace|workspaces|includeworkspaceroot|prefix|global|location)$/u :
-    /^(?:workspace|workspacedir|workspaceprefix|ignoreworkspace|dir|filter|filterprod|recursive|recursiveinstall|lockfiledir|lockfileonly|global|prefix)$/u).test(configKey(name));
-  const check = (name: string, source: string) => {
+    /^(?:workspace|workspaceroot|workspacedir|workspaceprefix|workspacepackages|ignoreworkspace|dir|filter|filterprod|recursive|recursiveinstall|lockfiledir|lockfileonly|sharedworkspacelockfile|modulesdir|virtualstoredir|enableglobalvirtualstore|globalvirtualstoredir|global|prefix)$/u).test(configKey(name));
+  const check = (name: string, source: string, label = name) => {
     if (runtimeSetting(name)) throw new Error(`${source} 可能替换脚本 Node，无法验证所选运行时`);
-    if (scopeSetting(name)) throw new Error(`${source} 的 ${name} 可改变 ${manager} 执行范围；请在工作台选择目标，移除此覆盖后重试`);
+    if (scopeSetting(name)) throw new Error(`${source} 的 ${label} 可改变 ${manager} 执行范围；请在工作台选择目标，移除此覆盖后重试`);
   };
-  for (const [name, value] of config) if (value !== undefined) {
-    if (name.startsWith("npm_config_")) check(name.slice(11), "宿主环境");
-    if (manager === "pnpm" && name.startsWith("pnpm_")) check(name.slice(5), "宿主环境");
+  for (const [label, value] of Object.entries(env)) if (value !== undefined) {
+    const option = envOption(label, manager === "pnpm");
+    if (option) check(option, "宿主环境", label);
   }
   const userHome = env.HOME || homedir();
   const scan = (file: string, npmUser = false) => {
@@ -271,9 +312,26 @@ function assertJsConfig(root: string, t: ProjectTarget, tool: Tool, phase: "inst
   if (manager === "pnpm") {
     scan(config.get("npm_config_userconfig") ?? join(userHome, ".npmrc"));
     scan(config.get("npm_config_globalconfig") ?? join(dirname(dirname(tool.executable)), "etc/npmrc"));
-    scan(join(env.XDG_CONFIG_HOME ?? join(userHome, ".config"), "pnpm/rc"));
+    for (const key of ["pnpm_config_userconfig", "pnpm_config_globalconfig"]) {
+      const file = config.get(key);
+      if (file) scan(file);
+    }
+    const configDir = env.XDG_CONFIG_HOME ? join(env.XDG_CONFIG_HOME, "pnpm") :
+      join(userHome, process.platform === "darwin" ? "Library/Preferences/pnpm" : ".config/pnpm");
+    scan(join(configDir, "rc"));
+    const checkYaml = (text: string, source: string) => {
+      let keys: string[];
+      try { keys = Object.keys(object(yaml(text, { maxAliasCount: 0 }))); }
+      catch { throw new Error(`无法读取 ${source} 的 pnpm 配置`); }
+      for (const name of keys) check(name, source);
+    };
+    const globalYaml = join(configDir, "config.yaml");
+    let globalText: string | undefined;
+    try { globalText = readBounded(realpathSync(globalYaml), 512 * 1024); }
+    catch (error) { if (!missing(error)) throw new Error("无法读取全局 pnpm config.yaml"); }
+    if (globalText !== undefined) checkYaml(globalText, "全局 pnpm config.yaml");
     const text = readText(root, at(t.install?.cwd ?? t.cwd, "pnpm-workspace.yaml"));
-    if (text !== undefined) for (const name of Object.keys(object(yaml(text, { maxAliasCount: 0 })))) check(name, "pnpm-workspace.yaml");
+    if (text !== undefined) checkYaml(text, "pnpm-workspace.yaml");
     return;
   }
   // npm reads its local project before the user's config. A user prefix only
@@ -294,12 +352,24 @@ function assertJsConfig(root: string, t: ProjectTarget, tool: Tool, phase: "inst
   scan(global ? expand(global) : join(prefix === undefined ? defaultPrefix : expand(prefix), "etc/npmrc"));
 }
 
+function fixedPnpmEnvironment(env: NodeJS.ProcessEnv, major: number): NodeJS.ProcessEnv {
+  const result = { ...env };
+  for (const name of Object.keys(result)) {
+    const option = envOption(name, true);
+    if (option && /^(?:pmonfail|managepackagemanagerversions|packagemanagerstrict(?:version)?)$/u.test(configKey(option))) delete result[name];
+  }
+  // pnpm 11+ uses pmOnFail; older releases use the npmrc-compatible switches.
+  // The selected version has already passed packageManager/engines/mise validation.
+  return major >= 11 ? { ...result, pnpm_config_pm_on_fail: "ignore" } :
+    { ...result, npm_config_manage_package_manager_versions: "false", npm_config_package_manager_strict_version: "true" };
+}
+
 function jsTools(t: ProjectTarget, env: NodeJS.ProcessEnv, name: "npm" | "pnpm") {
   return installedExecutables("node", env, t.requirements.miseNode).flatMap((node) =>
     installedExecutables(name, env, t.requirements.miseManager ?? t.requirements.manager).map((manager) => ({ node, manager,
       bindings: { node, [name]: manager },
       overrides: name === "pnpm" ? ["pnpm 使用已选安装，不切换包管理器版本"] : [],
-      env: { ...env, ...(name === "pnpm" ? { npm_config_manage_package_manager_versions: "false", npm_config_package_manager_strict_version: "true" } : {}) },
+      env,
     }))).slice(0, 32);
 }
 
@@ -375,8 +445,9 @@ export function buildArguments(root: string, t: ProjectTarget, opts: Configurati
     const node = tauriCli ? tool.bindings?.node : undefined;
     if (tauriCli && !node) throw new Error("缺少 Tauri CLI 使用的所选 Node");
     const invoke = tauriCli ? [installedCli?.path ?? "<依赖准备后确认项目 Tauri CLI>"] : ["tauri"];
+    const scriptBins = tauriCli && tauriScriptBins(root, cwd, tauriCli, tool.executable);
     return { args: [...invoke, "build", ...(selected.debug ? ["--debug"] : []), "--no-bundle", ...selected.args], outputs: t.outputs,
-      executable: node, tauriCli: tauriCli && { request: tauriCli, installed: installedCli },
+      executable: node, scriptBins, tauriCli: tauriCli && { request: tauriCli, installed: installedCli },
       cargo: rustContext(root, t.project, t.tauri.workspace, tool), environment: bindings, planInputs: inputs };
   }
   if (t.cargo) {
@@ -416,13 +487,13 @@ export async function checkedCommand(invocation: Invocation, owned: Set<OwnedPro
   } finally { clearTimeout(timer); owned.delete(proc); }
 }
 
-export async function verifyTool(t: ProjectTarget, tool: Tool, owned: Set<OwnedProcess>, accept: () => void, root?: string) {
+export async function verifyTool(t: ProjectTarget, tool: Tool, owned: Set<OwnedProcess>, accept: () => void, root?: string): Promise<VerifiedTool> {
   if (t.xcode) {
     const common = { cwd: tmpdir(), env: tool.env, executable: tool.executable };
     const version = await checkedCommand({ ...common, args: ["-version"] }, owned, accept);
     const sdk = await checkedCommand({ ...common, args: ["-version", "-sdk", "iphonesimulator", "SDKVersion"] }, owned, accept);
     if (!/^Xcode \d/u.test(version) || !matchesVersion(sdk, undefined)) throw new Error("未确认完整 Xcode 与 iPhone Simulator SDK");
-    return [version.split("\n")[0], "iPhone Simulator SDK " + sdk].join(" · ");
+    return { version: [version.split("\n")[0], "iPhone Simulator SDK " + sdk].join(" · ") };
   }
   if (t.gradle) {
     const java = tool.candidate.paths[0];
@@ -431,7 +502,7 @@ export async function verifyTool(t: ProjectTarget, tool: Tool, owned: Set<OwnedP
     const jv = /(?:openjdk|java) version "([^"+]+)(?:\+[^"\n]*)?"/u.exec(output)?.[1] ?? "";
     const pin = t.requirements.miseJava;
     if (pin && !matchesMiseVersion(/^\d+$/u.test(jv) ? jv + ".0.0" : jv, pin, "java", java, tool.env)) throw new Error(`启动 Java 无法满足 mise 声明 ${pin}；请选择匹配的已安装 JDK`);
-    return `启动 Java：${output.split("\n")[0]}（Gradle/JVM 由项目确定）`;
+    return { version: `启动 Java：${output.split("\n")[0]}（Gradle/JVM 由项目确定）` };
   }
   if (t.cmake) {
     const cmake = tool.executable;
@@ -440,7 +511,7 @@ export async function verifyTool(t: ProjectTarget, tool: Tool, owned: Set<OwnedP
     if (!found || !matchesVersion(found, t.cmake.preset ? ">=3.19" : ">=3.14") || !matchesMiseVersion(found, t.requirements.miseCmake, "cmake", cmake, tool.env)) {
       throw new Error("CMake 版本不支持所选配置，或与 mise 声明不符");
     }
-    return cv;
+    return { version: cv };
   }
   if (t.adapter === "cargo" || t.tauri) {
     const offset = t.tauri?.manager ? 2 : 0;
@@ -452,16 +523,16 @@ export async function verifyTool(t: ProjectTarget, tool: Tool, owned: Set<OwnedP
     const found = /^rustc (\d+\.\d+\.\d+)/u.exec(rv)?.[1];
     if (!found || !matchesVersion(found, t.requirements.rust && `>=${t.requirements.rust}`)) throw new Error(`Rust 版本不符合要求：${rv.slice(0, 80)}`);
     const rust = `${cv.split(" ").slice(0, 2).join(" ")} · ${rv.split(" ").slice(0, 2).join(" ")}`;
-    if (!t.tauri) return rust;
-    const js = t.tauri.manager && await verifyJs(t, tool, owned, accept, t.tauri.manager, root);
+    if (!t.tauri) return { version: rust };
+    const js = t.tauri.manager ? await verifyJs(t, tool, owned, accept, t.tauri.manager, root) : undefined;
     const cliVersion = tool.tauriCargoCli && await checkedCommand({ ...common, executable: cargo, args: ["tauri", "--version"] }, owned, accept);
-    return [js, rust, cliVersion || "Tauri CLI 由项目依赖提供", "目标 SDK 由构建检查"].filter(Boolean).join(" · ");
+    return { ...js, version: [js?.version, rust, cliVersion || "Tauri CLI 由项目依赖提供", "目标 SDK 由构建检查"].filter(Boolean).join(" · ") };
   }
   if (t.adapter === "npm" || t.adapter === "pnpm") return verifyJs(t, tool, owned, accept, t.adapter, root);
   throw new Error("该目标没有可验证的工具链");
 }
 
-async function verifyJs(t: ProjectTarget, tool: Tool, owned: Set<OwnedProcess>, accept: () => void, managerName: string, root?: string) {
+async function verifyJs(t: ProjectTarget, tool: Tool, owned: Set<OwnedProcess>, accept: () => void, managerName: string, root?: string): Promise<VerifiedTool> {
   const [node, manager] = tool.candidate.paths;
   if (!node || !manager || [node, manager].some(autoInstallRisk)) throw new Error("请选择已安装的 Node 和包管理器。");
   const common = { cwd: tmpdir(), env: tool.env, bindings: tool.bindings, args: ["--version"] };
@@ -492,5 +563,6 @@ async function verifyJs(t: ProjectTarget, tool: Tool, owned: Set<OwnedProcess>, 
   if (install && !matches(install)) {
     throw new Error(`版本不满足依赖安装根 ${t.install?.cwd} 的 Node 或 ${managerName} 声明`);
   }
-  return `Node ${nv} · ${managerName} ${mv}${managerName === "pnpm" ? "（候选版本；脚本使用绑定的 Node）" : ""}`;
+  const version = `Node ${nv} · ${managerName} ${mv}`;
+  return managerName === "pnpm" ? { version: version + "（脚本使用绑定的 Node）", pnpmMajor: Number(mv.replace(/^v/u, "").split(".")[0]) } : { version };
 }

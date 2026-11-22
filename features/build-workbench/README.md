@@ -12,7 +12,7 @@
 
 | 技术栈 | 发现与构建 |
 | --- | --- |
-| npm/pnpm | 按各自成员规则确定脚本包和安装根；pnpm 未声明 `packages` 时只包含根包。若安装根在外部，请打开父工作区。npm 用户 `.npmrc` 中仅用于全局安装的 `prefix` 可保留；工作台仍检查由它定位的全局配置。改变包选择、安装位置或全局模式的覆盖需移除。选项如 `--mode staging` 由脚本解释。 |
+| npm/pnpm | 按各自成员规则确定脚本包和安装根；pnpm 未声明 `packages` 时只包含根包。若安装根在外部，请打开父工作区。npm 用户 `.npmrc` 中仅用于全局安装的 `prefix` 可保留；工作台仍检查由它定位的全局配置。安装和启动脚本前都会检查影响包选择、安装范围或全局模式的设置，包括 `pnpm_config_*` 和兼容的 `npm_config_*`。registry、认证和代理设置照常使用。pnpm 使用已检查且符合项目声明的固定版本，不自动切换版本。选项如 `--mode staging` 由脚本解释。 |
 | Cargo | 从实际启动目录读取配置、TOML `include` 和输出目录环境变量。识别 workspace 显式成员及根内路径依赖。成员单独打开时，请打开其 workspace 根；Cargo 会拒绝的非成员也不列为可运行任务。支持 Rust `channel` / `path` 固定、profile、features 和 target。声明的编译器与所选工具不同时拒绝启动；产物由 Cargo 报告。 |
 | CMake | 先 configure，再从 File API 选择目标。工具或 configure 参数变化时使用独立构建目录；报告的配置输入（含外部文件）变化后重新配置。按配置对目标及依赖链的已知产物排队；外部产物不在面板展示。支持 `--config Release --parallel 4`；留空时使用 CMake 默认值。 |
 | Tauri | 原生目录有 `package.json` 时用同目录前端；标准 `src-tauri` 布局用上一级前端。按项目声明从本地依赖定位 JS CLI，或使用已选 `cargo-tauri`。默认 Debug，可选 `--release`、features 和 target，保持 `--no-bundle`。 |
@@ -21,7 +21,7 @@
 
 选项栏支持引号和反斜杠，例如 `--label "two words"`。预览显示参数、准备步骤和工具环境调整。切换目标会清空临时选项和手填产物路径，可以主动复制 Gradle 探测参数。
 
-Tauri 的成员依赖优先从成员包查找，也可使用提升到安装根且符合该成员声明的版本。预览在尚未安装时会注明入口待确认；安装完成后记录实际入口。若安装改变了预览里已显示的入口或内容，先重新预览再运行。支持版本范围和能用锁文件核对的项目内 tarball；无法核对时停止，不从宿主 PATH 或其他包选择 CLI。
+Tauri 的成员依赖优先从成员包查找，也可使用提升到安装根且符合该成员声明的版本。预览在尚未安装时会注明入口待确认；安装完成后记录实际入口。若安装改变了预览里已显示的入口或内容，先重新预览再运行。支持直接版本范围、安装根 `pnpm-workspace.yaml` 中 `catalog:` / `catalog:<名称>` 的版本范围，以及能用锁文件核对的项目内 tarball。依赖声明或 catalog 在准备期间变化时须重新预览；无法核对就停止。钩子从前端目录执行，按 npm/pnpm 脚本顺序搜索项目 `.bin`，并保留已选 Node、包管理器、Cargo 和 rustc 的绑定；工具冲突会提示。
 
 同一 daemon 的工作区指向同一个实际 Gradle 项目目录时，可以共享已确认的任务。只有可追踪的声明（简单的字面模块声明和内建插件）与可确认的已安装 Gradle/JDK 组合才写入共享缓存。Wrapper、Groovy 与 Kotlin 入口并存、自定义 catalog、`apply`、动态项目配置、无法确认的初始化脚本和 JVM 设置等仍可探测，但结果仅在发起工作区的当前会话用一次。
 
@@ -46,6 +46,8 @@ Tauri 的成员依赖优先从成员包查找，也可使用提升到安装根�
 - 本轮另用真实 CMake `4.5.1` 在两个隔离 checkout 读取相对和绝对外部 include，以默认 Release 和显式 Debug 生成外部产物，修改外部文件后旧目标失效。真实 Cargo `1.100.0` 的 `metadata` 和离线构建使用 `include` 指定的共享目标及中间目录。两种共享输出的排队以 fixture 验证；外部产物均未对面板开放。pnpm `12.21.0` 复验原生安装和脚本使用绑定的 Node。Tauri 应用引用与 Xcode scheme 以替身测试，未运行真实 Tauri/Xcode 构建。
 - 隔离目录复验：npm `11.20.0` 的 `workspace=beta` 会把 alpha 构建改为 beta，工作台拒绝该覆盖；移除后 npm 和 pnpm `12.21.0` 均从根安装并构建 alpha，独立包也可运行。Cargo `1.100.0` 的 `metadata` 确认两个成员共用父 workspace 和 `target/`；打开父目录后成功构建，观察到 `target/debug/alpha`。CMake `4.5.1` + Ninja Multi-Config 在两个 checkout 分别使用默认和显式 Release 构建；通过两层依赖共享 `libcore.a` 的运行进入同一队列，依次成功。mise `node={version="22"}` 拒绝本机 Node `26.13.1`；Xcode 替身验证继承的配置文件不会传入检查、探测或构建。
 - 用真实 npm `11.20.0` 和 pnpm `12.21.0` 离线安装两个本地 CLI 替身：根包为 `1.0.0`，成员为 `2.0.0`。首次安装、再次运行和原生文件与前端同目录的布局均调用成员版本，记录的入口与下一次预览一致。另用 npm 用户 `.npmrc` 的 `prefix` 验证锁文件仍写入安装根，且运行的是成员脚本，全局前缀目录没有写入。CLI 替身只验证入口和工作目录，未运行真实 Tauri 构建。
+- pnpm `12.21.0` 在隔离目录复现了 `pnpm_config_lockfile_dir` 外写。工作台现在在准备前拒绝该设置，外部目录保持为空；fixture 也验证准备后新增的脚本范围覆盖不会执行脚本。pnpm `12.21.0`、`11.20.0`、`11.3.0` 均在冷缓存下离线安装并运行匹配版本声明的工作区脚本；不匹配的声明在安装前拒绝。npm `11.20.0` 的用户 `prefix` 行为同时复验。
+- 用真实 npm `11.20.0` 和 pnpm `12.21.0` 从本地 registry 安装 Tauri CLI 与 `assetgen` 替身。成员钩子冷安装和暖缓存均选中项目命令，而非同名宿主命令；pnpm 直接声明、默认 catalog、命名 catalog 均调用已核对的 CLI `2.1.0`。fixture 另覆盖缺失、冲突、不匹配和准备期间变化的 catalog。这些测试验的是安装、入口及子进程环境，未运行真实 Tauri 编译。
 - 未在原样本仓库安装依赖或修改配置。
 
 ### paseo-zeonest
