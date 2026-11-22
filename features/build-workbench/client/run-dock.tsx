@@ -1,9 +1,10 @@
 import { createElement, useEffect, useRef, useState } from "react";
 import { PanResponder, Platform, StyleSheet, Text, View } from "react-native";
 import { useRpc } from "@getpaseo/plugin/client";
+import { Icon } from "@getpaseo/plugin/client/ui";
 import * as rpc from "../shared/contracts";
 import type { Log, Run } from "../shared/contracts";
-import { Button, Caption, Choice, Code, CommandPreview, Heading, PaneHead, Region, errorMessage, labels, styles } from "./panel-ui.tsx";
+import { Badge, Button, Caption, Choice, Code, CommandPreview, Heading, PaneHead, Region, Tab, Tabs, errorMessage, labels, styles } from "./panel-ui.tsx";
 import type { Colors } from "./panel-ui.tsx";
 import { limitDock } from "./workbench-state";
 
@@ -21,8 +22,8 @@ export function ResizeHandle({ colors, height, min, max, set }: { colors: Colors
   const pointer = useRef<{ y: number; height: number }>(undefined);
   if (Platform.OS === "web") return createElement("div", {
     "aria-label": "调整运行区高度", "aria-valuemin": min, "aria-valuemax": max, "aria-valuenow": height,
-    style: { minHeight: 16, flexShrink: 0, cursor: "ns-resize", touchAction: "none", boxSizing: "border-box",
-      display: "grid", placeItems: "center", background: colors.surface2, borderBlock: `1px solid ${colors.border}` },
+    style: { minHeight: 13, flexShrink: 0, cursor: "ns-resize", touchAction: "none", boxSizing: "border-box",
+      display: "grid", placeItems: "center", background: colors.surface1, borderBlock: `1px solid ${colors.border}` },
     role: "separator" as const, tabIndex: 0 as const, "aria-orientation": "horizontal" as const,
     onKeyDown: (event: { key: string; shiftKey: boolean; preventDefault(): void; stopPropagation(): void }) => {
       const step = event.shiftKey ? 64 : 16;
@@ -46,38 +47,51 @@ export function ResizeHandle({ colors, height, min, max, set }: { colors: Colors
     accessibilityRole="adjustable" accessibilityValue={{ min, max, now: height }}
     accessibilityActions={[{ name: "increment" }, { name: "decrement" }]}
     onAccessibilityAction={(event) => resize(height + (event.nativeEvent.actionName === "increment" ? 16 : -16))}
-    style={[local.handle, { backgroundColor: colors.surface2, borderColor: colors.border }]}>
+    style={[local.handle, { backgroundColor: colors.surface1, borderColor: colors.border }]}>
     <View style={[local.grip, { backgroundColor: colors.foregroundMuted }]} />
   </View>;
 }
 
-export function RunDock({ colors, workspaceId, height, compact, runs, id, select, tab, setTab, update, connection, busy, retry, stop }: {
-  colors: Colors; workspaceId: string; height: number; compact: boolean; runs: Run[]; id: string; select(id: string): void; tab: DetailTab;
+const statusTone = (run: Run) => run.status === "failed" ? "danger" : run.status === "success" ? "success" : undefined;
+
+export function RunDock({ colors, workspaceId, height, navWidth, tight, runs, id, select, tab, setTab, update, connection, busy, retry, stop }: {
+  colors: Colors; workspaceId: string; height: number; navWidth: number; tight: boolean; runs: Run[]; id: string; select(id: string): void; tab: DetailTab;
   setTab(tab: DetailTab): void; update: number; connection: string; busy: boolean; retry(): void; stop(): void;
 }) {
   const current = runs.find((run) => run.id === id);
   return <View style={[local.dock, { height }]}>
-    <View style={[styles.frame, local.history, { width: compact ? "36%" : "24%", borderColor: colors.border }]}>
-      <PaneHead colors={colors}><Heading colors={colors}>运行历史</Heading></PaneHead>
-      <Region label="运行历史">
+    <View style={[styles.frame, { width: navWidth, borderColor: colors.border, backgroundColor: colors.surface1 }]}>
+      <PaneHead colors={colors} bar><View style={styles.inline}><Heading colors={colors}>运行记录</Heading><Badge colors={colors}>{runs.length}</Badge></View></PaneHead>
+      <Region label="运行记录" content={local.history}>
         {connection ? <Caption colors={colors} tone="warning">历史刷新失败，保留上次结果：{connection}</Caption> : null}
         {runs.length === 0 ? <Caption colors={colors}>还没有运行记录。</Caption> : null}
         {runs.map((run) => <Choice key={run.id} colors={colors} active={id === run.id} onPress={() => select(run.id)}>
-          <Text style={[styles.wrapText, { color: colors.foreground }]}>#{run.sequence} {run.configuration.target.name}</Text>
-          <Caption colors={colors} tone={run.status === "failed" ? "danger" : run.status === "success" ? "success" : undefined}>
-            {labels[run.status]} · {new Date(run.createdAt).toLocaleTimeString()}{"\n"}{run.configuration.target.project}
-          </Caption>
+          {!tight ? <Icon name={run.operation === "probe" ? "FlaskConical" : "Box"} size={14} color={colors.foregroundMuted} /> : null}
+          <View style={local.historyLine}>
+            <Text style={[styles.wrapText, styles.mono, local.historyName, { color: colors.foreground }]}>{run.configuration.target.name}</Text>
+            <View style={local.historyMeta}>
+              <Caption colors={colors}>#{run.sequence}{tight ? "" : ` · ${new Date(run.createdAt).toLocaleTimeString()}`}</Caption>
+              <Badge colors={colors} tone={statusTone(run)}>{labels[run.status]}</Badge>
+            </View>
+          </View>
         </Choice>)}
       </Region>
     </View>
-    {current ? <RunDetail key={current.id} run={current} {...{ colors, workspaceId, update, busy, retry, stop, tab, setTab }} />
-      : <View style={styles.pane}><PaneHead colors={colors}><Heading colors={colors}>运行详情</Heading></PaneHead>
-        <Region label="运行详情"><Caption colors={colors}>选择一条记录查看输出和产物。</Caption></Region></View>}
+    {current ? <RunDetail key={current.id} run={current} {...{ colors, workspaceId, tight, update, busy, retry, stop, tab, setTab }} />
+      : <View style={styles.pane}><PaneHead colors={colors} bar><DetailTabs {...{ colors, tight, tab, setTab }} /></PaneHead>
+        <Region label="运行详情"><Caption colors={colors}>运行后，在左侧选择记录查看详情。</Caption></Region></View>}
   </View>;
 }
 
-function RunDetail({ colors, workspaceId, run: current, update, busy, retry, stop, tab, setTab }: {
-  colors: Colors; workspaceId: string; run: Run; update: number; busy: boolean; retry(): void; stop(): void; tab: DetailTab; setTab(tab: DetailTab): void;
+function DetailTabs({ colors, tight, tab, setTab }: { colors: Colors; tight: boolean; tab: DetailTab; setTab(tab: DetailTab): void }) {
+  return <Tabs label="运行详情">
+    <Tab colors={colors} label="输出" icon={tight ? undefined : "SquareTerminal"} tight={tight} active={tab === "output"} onPress={() => setTab("output")} />
+    <Tab colors={colors} label="产物" tight={tight} active={tab === "artifacts"} onPress={() => setTab("artifacts")} />
+  </Tabs>;
+}
+
+function RunDetail({ colors, workspaceId, tight, run: current, update, busy, retry, stop, tab, setTab }: {
+  colors: Colors; workspaceId: string; tight: boolean; run: Run; update: number; busy: boolean; retry(): void; stop(): void; tab: DetailTab; setTab(tab: DetailTab): void;
 }) {
   const { id } = current;
   const read = useRpc(rpc.detail);
@@ -107,12 +121,14 @@ function RunDetail({ colors, workspaceId, run: current, update, busy, retry, sto
   }, [read, workspaceId, id, update]);
   const run = snapshot?.run ?? current;
   return <View style={styles.pane}>
-    <PaneHead colors={colors}>
-      <Heading colors={colors}>#{run.sequence} · {labels[run.status]}</Heading>
-      <Button colors={colors} label="输出" active={tab === "output"} onPress={() => setTab("output")} />
-      <Button colors={colors} label="产物" active={tab === "artifacts"} onPress={() => setTab("artifacts")} />
-      {rpc.live(run.status) ? <Button colors={colors} label={run.status === "queued" ? "移出队列" : "停止"} disabled={busy || run.status === "stopping"} onPress={stop} /> : null}
-      {rpc.retryable(run.status) ? <Button colors={colors} label="重试" disabled={busy || run.endedAt === undefined} onPress={retry} /> : null}
+    <PaneHead colors={colors} bar>
+      <DetailTabs {...{ colors, tight, tab, setTab }} />
+      <View style={styles.inline}>
+        {rpc.live(run.status) ? <Button colors={colors} small icon={tight ? undefined : "Square"} label={run.status === "queued" ? "移出队列" : "停止"} disabled={busy || run.status === "stopping"} onPress={stop} /> : null}
+        {rpc.retryable(run.status) ? <Button colors={colors} small icon={tight ? undefined : "RotateCcw"} label="重试" disabled={busy || run.endedAt === undefined} onPress={retry} /> : null}
+        <Caption colors={colors}>#{run.sequence}</Caption>
+        {!tight ? <Badge colors={colors} tone={statusTone(run)}>{run.operation === "probe" ? "探测" : "构建"} · {labels[run.status]}</Badge> : null}
+      </View>
     </PaneHead>
     <Region key={tab} label={tab === "output" ? "运行输出" : "运行产物"}>
       {failure ? <Caption colors={colors} tone="warning">详情刷新失败，保留上次结果：{failure}</Caption> : null}
@@ -134,8 +150,11 @@ function RunDetail({ colors, workspaceId, run: current, update, busy, retry, sto
 }
 
 const local = StyleSheet.create({
-  handle: { minHeight: 16, flexShrink: 0, borderTopWidth: 1, borderBottomWidth: 1, alignItems: "center", justifyContent: "center" },
-  grip: { width: 32, height: 2, borderRadius: 1 },
+  handle: { minHeight: 13, flexShrink: 0, borderTopWidth: 1, borderBottomWidth: 1, alignItems: "center", justifyContent: "center" },
+  grip: { width: 28, height: 3, borderRadius: 2 },
   dock: { flexDirection: "row", minWidth: 0, flexShrink: 0 },
-  history: { minWidth: 0 },
+  history: { padding: 5, gap: 2 },
+  historyLine: { flex: 1, minWidth: 0, flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 3 },
+  historyName: { fontWeight: "700", lineHeight: 17 },
+  historyMeta: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 4 },
 });

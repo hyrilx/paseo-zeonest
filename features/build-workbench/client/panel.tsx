@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useRpc } from "@getpaseo/plugin/client";
 import type { PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
-import { Loading, SettingsSelect } from "@getpaseo/plugin/client/ui";
+import { Icon, Loading } from "@getpaseo/plugin/client/ui";
 import { formatArguments, parseArguments } from "../shared/arguments";
 import * as rpc from "../shared/contracts";
 import type { Candidate, Command, Configuration, Run, Saved, Target } from "../shared/contracts";
-import { Button, Caption, Choice, Code, CommandPreview, Field, Heading, PaneHead, Region, errorMessage, styles } from "./panel-ui.tsx";
+import { Badge, Button, Caption, Choice, Code, CommandPreview, Field, Heading, Notice, PaneHead, Region, Tab, Tabs, errorMessage, styles } from "./panel-ui.tsx";
 import type { Colors } from "./panel-ui.tsx";
 import { ResizeHandle, RunDock } from "./run-dock.tsx";
 import type { DetailTab } from "./run-dock.tsx";
@@ -17,7 +17,8 @@ type Plan = { command: Command; fingerprint: string };
 type ToolList = { candidates: Candidate[]; requirement: string; issues: string[]; selected?: string };
 type Area = "targets" | "config" | "tools";
 const areas = { targets: "目标", config: "配置", tools: "工具链" };
-const projectLabel = (target: rpc.TargetKey) => `${target.project === "." ? "根目录" : target.project} · ${target.adapter}`;
+const family: Record<rpc.Adapter, string> = { npm: "npm", pnpm: "pnpm", cargo: "Cargo", cmake: "CMake", tauri: "Tauri", gradle: "Gradle", xcode: "Xcode" };
+const projectLabel = (target: rpc.TargetKey) => `${family[target.adapter]} · ${target.project === "." ? "根目录" : target.project}`;
 const examples: Record<rpc.Adapter, string[]> = {
   npm: ["--mode staging"], pnpm: ["--mode staging"], cargo: ["--release", "--all-features", "--profile dev"],
   cmake: ["--parallel 4", "--config Release"], tauri: ["--release", "-- --locked"],
@@ -56,11 +57,12 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
   const [detailTab, setDetailTab] = useState<DetailTab>("output");
   const [connection, setConnection] = useState("");
   const [selection, select] = useState("");
-  const [project, setProject] = useState("");
   const [search, setSearch] = useState("");
   const [onlyNew, showOnlyNew] = useState(false);
+  const [nav, setNav] = useState<"targets" | "saved">("targets");
   const [area, setArea] = useState<Area>("targets");
   const [draft, setDraft] = useState(blank);
+  const [expanded, setExpanded] = useState(false);
   const [toolRevision, reloadTools] = useState(0);
   const [automaticTool, setAutomaticTool] = useState<{ selection: string; id: string }>();
   const [available, setAvailable] = useState<{ key: string; value?: ToolList; error?: string }>();
@@ -72,10 +74,14 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
   const [busy, setBusy] = useState(false);
   const [{ width, height }, setSize] = useState({ width: 0, height: 0 });
   const [dockHeight, setDockHeight] = useState<number>();
-  const compact = layout.compact || (width > 0 && width < 820);
-  const maxDock = Math.max(90, Math.floor(height * 0.66));
-  const minDock = Math.min(145, maxDock);
-  const dock = limitDock(dockHeight ?? Math.floor(height * 0.36), minDock, maxDock);
+  const compact = layout.compact || (width > 0 && width <= 880);
+  const tight = width > 0 && width <= 530;
+  const navWidth = compact ? Math.max(108, Math.min(170, Math.round(width * 0.34))) : Math.max(214, Math.min(336, Math.round(width * 0.23)));
+  const toolsWidth = Math.max(246, Math.min(390, Math.round(width * 0.26)));
+  const upperAndDock = Math.max(0, height - 58 - (compact ? 37 : 0));
+  const minDock = Math.min(104, Math.floor(upperAndDock * 0.45));
+  const maxDock = Math.max(minDock, Math.min(Math.floor(upperAndDock * 0.62), upperAndDock - 156));
+  const dock = limitDock(dockHeight ?? (height <= 550 ? 104 : limitDock(Math.round(height * 0.23), 125, 242)), minDock, maxDock);
   const selected = discovery.result?.targets.find((item) => rpc.targetId(item) === selection);
   const toolsKey = JSON.stringify([selection, discovery.revision, toolRevision]);
   const currentTools = available?.key === toolsKey && selected ? available : undefined;
@@ -93,6 +99,8 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
   const planKey = configuration && JSON.stringify([toolsKey, configuration]);
   const currentPreview = preview?.key === planKey ? preview : undefined;
   const plan = currentPreview?.plan;
+  const pathError = artifactError ?? (currentPreview?.field === "artifacts" ? currentPreview.error : undefined);
+  const previewError = currentPreview?.field ? undefined : currentPreview?.error;
   const confirm = confirmation && (confirmation.id ? confirmation.id === runId : confirmation.key === planKey && !!planKey) ? confirmation : undefined;
   const current = runs.find((row) => row.id === runId);
   const action = !busy && !connection;
@@ -100,11 +108,12 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
     : !selected ? (selection ? "原目标已失效，请重新选择" : "请先选择目标") : selected.blocked
       || (currentTools?.error ? "无法读取工具链，请重试" : !tools ? "正在查找工具链" : undefined)
       || (!actual ? (tool ? "所选工具已失效，请重新选择" : "请选择可用的工具") : undefined)
-      || (actual?.gradleRuntime?.status === "incompatible" ? actual.gradleRuntime.reason : undefined)
+      || (actual?.gradleRuntime?.status === "incompatible" ? "所选 Java 不兼容" : undefined)
       || (parsed.error || artifactError || currentPreview?.field ? "请修正配置中的字段错误" : undefined)
       || (!actual?.version ? "请先检查所选工具" : undefined)
-      || currentPreview?.error || (!plan ? "正在准备命令预览" : "");
+      || (previewError ? "命令预览失败" : undefined) || (!plan ? "正在准备命令预览" : "");
 
+  useEffect(() => { if (pathError) setExpanded(true); }, [pathError]);
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -171,7 +180,9 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
     if (selection !== rpc.targetId(target)) setAutomaticTool(undefined);
     select(rpc.targetId(target)); setCheckError(""); setActionError(""); setConfirmation(undefined);
     setDraft(saved ? { tool: saved.tool, options: formatArguments(saved.options), artifacts: saved.artifacts.join("\n"), name: saved.name, named: saved.name, optionsTouched: true } : blank);
-    if (saved) { setSearch(""); setProject(""); showOnlyNew(false); }
+    setExpanded(false);
+    if (saved) setSearch("");
+    if (saved || !("operation" in target) || target.operation !== "probe") showOnlyNew(false);
     setArea("config");
   }
   function checkTool() {
@@ -191,74 +202,129 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
     });
   }
   const all = discovery.result?.targets ?? [];
-  const projects = [...new Set(all.map(projectLabel))];
-  const viewingNew = onlyNew && !!discovery.feedback?.added.length;
-  const targets = all.filter((target) => (!project || projectLabel(target) === project) &&
-    (!viewingNew || discovery.feedback?.added.includes(rpc.targetId(target))) &&
-    `${projectLabel(target)} ${target.name}`.toLowerCase().includes(search.trim().toLowerCase()));
+  const view = useMemo(() => {
+    const ids = new Set(discovery.feedback?.added);
+    const stacks = new Set<rpc.Adapter>();
+    const buildProjects = new Set(all.filter((item) => !item.operation).map(projectLabel));
+    const groups = new Map<string, Target[]>();
+    const viewingNew = onlyNew && all.some((target) => ids.has(rpc.targetId(target)));
+    const query = search.trim().toLowerCase();
+    for (const target of all) {
+      stacks.add(target.adapter);
+      const group = projectLabel(target);
+      if (viewingNew && !ids.has(rpc.targetId(target))) continue;
+      if (!`${group} ${target.name} ${target.source}`.toLowerCase().includes(query)) continue;
+      const rows = groups.get(group) ?? [];
+      rows.push(target);
+      groups.set(group, rows);
+    }
+    return { ids, stacks: [...stacks].map((stack) => family[stack]), buildProjects, groups, viewingNew };
+  }, [all, search, onlyNew, discovery.feedback]);
   const suggestions = !selected ? [] : selected.operation && selected.adapter === "cmake" ? ['-DCMAKE_BUILD_TYPE=Release', '-G "Unix Makefiles"']
     : selected.operation && selected.adapter === "xcode" ? ["-verbose"]
       : selected.operation && selected.adapter === "gradle" ? ["--offline", "--workbench-task-filter=:模块:", "--workbench-task-filter=assembleDebug"] : examples[selected.adapter];
   const setOptions = (value: string) => changeDraft({ options: value, optionsTouched: true });
   const nameError = draft.name.trim().length > 64 ? "配置名称最多 64 个字符。" : undefined;
-  const refreshLabel = discovery.busy ? "正在刷新…" : discovery.failure ? "重试刷新" : "刷新目标";
+  const refreshLabel = discovery.busy ? "正在刷新目标" : discovery.failure ? "重试刷新" : "刷新目标";
+  const inspectTools = !!selected && !selected.blocked && (!actual?.version || actual.gradleRuntime?.status === "incompatible" || !!currentTools?.error);
+  const newAvailable = !discovery.busy && !discovery.failure && !view.viewingNew && all.some((target) => view.ids.has(rpc.targetId(target)));
+  const showNew = () => { setSearch(""); showOnlyNew(true); setNav("targets"); setArea("targets"); };
+  const showTargets = () => { setNav("targets"); setArea("targets"); };
+  const primaryShowsNew = newAvailable && !!selected?.operation && !blocked && !confirm;
+  const status = blocked || (confirm ? "请核对并确认命令" : discovery.feedback && selected?.operation ? "目标已刷新" : "可运行");
+  const statusTone = blocked || confirm ? colors.statusWarning : colors.statusSuccess;
+  const stack = selected ? family[selected.adapter] : view.stacks.join(" / ") || "构建工作台";
+  const savedDraft = discovery.saved.some((row) => row.name === draft.name.trim() && configuration && rpc.targetId(row.target) === selection &&
+    row.tool === configuration.tool && formatArguments(row.options) === formatArguments(configuration.options) && row.artifacts.join("\n") === artifacts.join("\n"));
 
   return <View style={[local.root, { backgroundColor: colors.surface0 }]} onLayout={({ nativeEvent: { layout: size } }) => setSize((old) => old.width === size.width && old.height === size.height ? old : { width: size.width, height: size.height })}>
-    <PaneHead colors={colors}>
-      <Heading colors={colors}>工作台：构建</Heading>
-      <Button colors={colors} label={selected?.operation ? "执行探测" : "构建"} primary disabled={!!blocked || !!confirm} onPress={() => {
-        if (!plan) return;
-        if (selected?.adapter === "gradle" && !selected.operation) { setConfirmation({ key: planKey, plan }); setArea("config"); }
-        else perform(() => submit(plan));
-      }} />
-      <View style={local.barStatus}>
-        <Text selectable accessibilityLiveRegion="polite" style={{ color: blocked ? colors.statusWarning : colors.foreground, fontSize: 12 }}>
-          {blocked || (confirm ? "请核对并确认命令" : selected?.operation ? "探测完成后会刷新目标列表" : "可构建")}
-        </Text>
+    <View style={[local.toolbar, tight && local.toolbarTight, { borderColor: colors.border, backgroundColor: colors.surface1 }]}>
+      <View style={[styles.inline, local.breadcrumb]}>
+        <Text numberOfLines={1} style={[styles.label, local.stack, { color: colors.foregroundMuted }]}>{stack}</Text>
+        {selected ? <>
+          <Icon name="ChevronRight" size={13} color={colors.foregroundMuted} />
+          <Text numberOfLines={1} style={[styles.mono, local.breadcrumbName, { color: colors.foreground }]}>{selected.name}</Text>
+        </> : null}
       </View>
-      {confirm ? <Button colors={colors} label="取消确认" onPress={() => setConfirmation(undefined)} /> : null}
-    </PaneHead>
-    {discovery.failure && compact && area !== "targets" ? <PaneHead colors={colors}>
-      <Caption colors={colors} tone="warning">目标刷新失败{discovery.result ? "，保留上次结果" : ""}。</Caption>
-      <Button colors={colors} label="查看刷新问题" onPress={() => setArea("targets")} />
-    </PaneHead> : null}
-    {discovery.feedback ? <PaneHead colors={colors}>
-      <Caption colors={colors} tone="success">探测成功。{discovery.feedback.added.length ? `已发现 ${discovery.feedback.added.length} 个新目标。` : "目标列表没有新增。"}</Caption>
-      {discovery.feedback.limited ? <Caption colors={colors} tone="warning">结果已截断。</Caption> : null}
-      {discovery.feedback.added.length ? <Button colors={colors} label="查看新目标" onPress={() => { setSearch(""); setProject(""); showOnlyNew(true); setArea("targets"); }} /> : null}
-    </PaneHead> : null}
-    {compact ? <PaneHead colors={colors}>{(Object.keys(areas) as Area[]).map((key) => <Button key={key} colors={colors} label={areas[key]} active={area === key} onPress={() => setArea(key)} />)}</PaneHead> : null}
+      <View style={styles.inline}>
+        <Icon name={blocked || confirm ? "TriangleAlert" : "Check"} size={14} color={statusTone} />
+        <Text selectable accessibilityLiveRegion="polite" style={[styles.wrapText, local.status, tight && local.statusTight, { color: statusTone }]}>{status}</Text>
+      </View>
+      <Button colors={colors} label={primaryShowsNew ? "查看新目标" : selected?.operation ? "执行探测" : selected?.adapter === "gradle" ? "预览并构建" : "构建目标"}
+        icon={tight ? undefined : primaryShowsNew ? "ChevronRight" : "Play"} primary disabled={!!blocked || !!confirm} onPress={() => {
+          if (primaryShowsNew) { showNew(); return; }
+          if (!plan) return;
+          if (selected?.adapter === "gradle" && !selected.operation) { setConfirmation({ key: planKey, plan }); setArea("config"); }
+          else perform(() => submit(plan));
+        }} />
+    </View>
+    {compact ? <PaneHead colors={colors} bar><Tabs fill label="工作区分区">
+      {(Object.keys(areas) as Area[]).map((key) => <Tab key={key} fill colors={colors} label={areas[key]} active={area === key} onPress={() => setArea(key)} />)}
+    </Tabs></PaneHead> : null}
     <View style={local.upper}>
-      <View style={[styles.pane, !compact && { flexBasis: "25%", flexGrow: 0, flexShrink: 0 }, !compact && styles.frame, { borderColor: colors.border }, compact && area !== "targets" && local.hidden]}>
-        {!compact ? <PaneHead colors={colors}><Heading colors={colors}>目标</Heading></PaneHead> : null}
-        <View style={local.search}><Field colors={colors} label="搜索目标" hideLabel value={search} set={setSearch} placeholder="搜索目标" action={
-          <Button colors={colors} label={refreshLabel} disabled={discovery.busy} onPress={() => refresh()} />
-        } /></View>
-        <Region key={viewingNew ? "new" : "all"} label="目标列表">
-          {discovery.busy && !discovery.result ? <Loading /> : null}
-          {discovery.failure ? <Caption colors={colors} tone="warning">刷新失败{discovery.result ? "，保留上次结果" : ""}：{discovery.failure}</Caption> : null}
-          <SettingsSelect label="分组" value={project} options={[{ label: "所有项目", value: "" }, ...projects.map((group) => ({ label: group, value: group }))]} onValueChange={setProject} />
-          {viewingNew ? <Button colors={colors} label="显示全部目标" onPress={() => showOnlyNew(false)} /> : null}
-          {targets.length === 0 && discovery.result ? <Caption colors={colors}>没有符合条件的目标。</Caption> : null}
-          {projects.map((group) => {
-            const rows = targets.filter((target) => projectLabel(target) === group);
-            return rows.length ? <View key={group} style={local.group}>
-              <Heading colors={colors}>{group}</Heading>
+      <View style={[styles.pane, !compact && [styles.frame, { flexBasis: navWidth, flexGrow: 0, flexShrink: 0 }], { borderColor: colors.border, backgroundColor: colors.surface1 }, compact && area !== "targets" && local.hidden]}>
+        <PaneHead colors={colors}>
+          <Tabs label="构建导航">
+            <Tab colors={colors} label="目标" count={all.length} active={nav === "targets"} onPress={() => setNav("targets")} />
+            <Tab colors={colors} label="已保存" active={nav === "saved"} onPress={() => setNav("saved")} />
+          </Tabs>
+          {nav === "targets" ? <Button colors={colors} icon={discovery.failure ? "RotateCcw" : "RefreshCw"} iconOnly label={refreshLabel} disabled={discovery.busy} onPress={() => refresh()} /> : null}
+        </PaneHead>
+        {nav === "targets" ? <>
+          <View style={local.search}><Field colors={colors} label="搜索任务或路径" hideLabel icon="Search" value={search} set={setSearch} placeholder="搜索任务或路径" /></View>
+          <Region key={view.viewingNew ? "new" : "all"} label="目标列表" content={local.navContent}>
+            {discovery.busy && !discovery.result ? <Loading /> : null}
+            {discovery.failure ? <Notice colors={colors} tone="warning" title="目标刷新失败">{discovery.result ? "保留上次结果。\n" : ""}{discovery.failure}</Notice> : null}
+            {view.viewingNew ? <View style={styles.actions}><Button colors={colors} small label="显示全部目标" onPress={() => showOnlyNew(false)} /></View> : null}
+            {view.groups.size === 0 && discovery.result ? <Caption colors={colors}>没有匹配的目标。</Caption> : null}
+            {[...view.groups].map(([group, rows]) => <View key={group} style={local.group}>
+              <Text style={[styles.wrapText, local.groupLabel, { color: colors.foregroundMuted }]}>{group}</Text>
               {rows.map((target) => {
                 const id = rpc.targetId(target);
-                return <Choice key={id} colors={colors} active={id === selection} disabled={busy} onPress={() => openTarget(target)}>
-                  <Text style={[styles.wrapText, { color: colors.foreground }]}>{target.name}</Text>
-                  <Caption colors={colors}>{target.operation ? "探测" : target.blocked ? "不可运行" : target.confirmed ? "已探测" : "构建"}{discovery.feedback?.added.includes(id) ? " · 新目标" : ""}</Caption>
+                return <Choice key={id} colors={colors} label={target.name} active={id === selection} disabled={busy} onPress={() => openTarget(target)}>
+                  <Icon name={target.operation ? "FlaskConical" : "Box"} size={14} color={colors.accent} />
+                  <View style={local.rowBody}>
+                    <Text style={[styles.wrapText, styles.mono, local.rowTitle, { color: colors.foreground }]}>{target.name}</Text>
+                    <Caption colors={colors}>{target.source}</Caption>
+                  </View>
+                  {view.ids.has(id) ? <Badge colors={colors} tone="success" top>新</Badge> : null}
                 </Choice>;
               })}
-            </View> : null;
-          })}
-          {discovery.result?.notices.map((msg, i) => <Caption key={i} colors={colors} tone="warning">{msg}</Caption>)}
-        </Region>
+            </View>)}
+            {!view.viewingNew && !search.trim() && selected?.operation && !view.buildProjects.has(projectLabel(selected))
+              ? <View style={[local.navHint, { backgroundColor: colors.surface2, borderColor: colors.border }]}><Caption colors={colors}>先执行探测，构建目标会显示在这里。</Caption></View> : null}
+            {discovery.result?.notices.map((msg, i) => <Caption key={i} colors={colors} tone="warning">{msg}</Caption>)}
+          </Region>
+        </> : <Region label="已保存配置列表" content={local.navContent}>
+          {discovery.saved.length ? discovery.saved.map((item) => <Choice key={item.name} colors={colors} active={draft.named === item.name} disabled={busy} onPress={() => openTarget(item.target, item)}>
+            <Icon name="Save" size={14} color={colors.accent} />
+            <View style={local.rowBody}>
+              <Text style={[styles.wrapText, styles.label, local.rowTitle, { color: colors.foreground }]}>{item.name}</Text>
+              <Caption colors={colors}>{projectLabel(item.target)} · {item.target.name}</Caption>
+            </View>
+          </Choice>) : <Caption colors={colors}>没有保存的配置。在运行配置中填入名称即可保存。</Caption>}
+        </Region>}
       </View>
       <View style={[styles.pane, compact && area !== "config" && local.hidden]}>
-        {!compact ? <PaneHead colors={colors}><Heading colors={colors}>配置与命令</Heading></PaneHead> : null}
-        <Region label="配置与命令">
+        <PaneHead colors={colors}><Heading colors={colors}>运行配置</Heading><Caption colors={colors}>{selected ? savedDraft ? "已保存配置" : "临时配置" : ""}</Caption></PaneHead>
+        <Region label="运行配置" content={[local.editor, tight && local.editorTight]}>
+          {discovery.failure ? <Notice colors={colors} tone="warning" title="目标刷新失败" action={<Button colors={colors} small label="查看刷新问题" onPress={showTargets} />}>
+            {discovery.result ? "保留上次结果，可在目标栏重试。" : "可在目标栏重试。"}
+          </Notice> : null}
+          {actionError ? <Notice colors={colors} tone="danger" title="操作未提交">{actionError}</Notice> : null}
+          {!confirm && !actionError && selected ? inspectTools && !discovery.busy ?
+            <Notice colors={colors} tone="warning" title={actual?.gradleRuntime?.status === "incompatible" ? "所选 Java 不兼容" : actual ? "需要检查工具链" : "工具链未就绪"}
+              action={compact ? <Button colors={colors} small label="查看工具" onPress={() => setArea("tools")} /> : undefined}>
+              {currentTools?.error ?? (actual?.gradleRuntime?.status === "incompatible" ? actual.gradleRuntime.reason : actual && !actual.version ? "检查通过后即可运行当前目标。" : blocked)}
+            </Notice> : selected.blocked || previewError ? <Notice colors={colors} tone="warning" title={selected.blocked ? "当前目标不可运行" : "命令预览失败"}>
+              {selected.blocked ?? previewError}
+            </Notice> : discovery.feedback && !discovery.failure ?
+              <Notice colors={colors} tone="success" title="探测完成，目标已刷新"
+                action={newAvailable && !primaryShowsNew ? <Button colors={colors} small label="查看新目标" onPress={showNew} /> : undefined}>
+                {discovery.feedback.added.length ? `已发现 ${discovery.feedback.added.length} 个新目标。` : "目标列表没有新增。"}{discovery.feedback.limited ? " 结果已截断。" : ""}
+              </Notice> : plan ? <Notice colors={colors} tone={selected.operation ? undefined : "success"} title={selected.operation ? "可以执行探测" : "工具链已就绪"}>
+                {selected.operation ? "探测会执行项目配置，可能下载依赖，不会开始构建。" : selected.adapter === "gradle" ? "构建前需核对命令和所选工具。" : "核对命令后，即可构建当前目标。"}
+              </Notice> : null : null}
           {confirm ? <View style={[styles.tile, { borderColor: colors.accent }]}>
             <Heading colors={colors}>{(confirm.id ? current?.configuration.target.adapter : selected?.adapter) === "gradle" ? "确认 Gradle 任务" : "命令或工具链已变化"}</Heading>
             <Caption colors={colors}>请核对命令、工作目录和工具版本后再运行。</Caption>
@@ -271,51 +337,71 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
                 if (result.kind === "changed") setConfirmation({ ...confirm, plan: result });
                 reloadTools((n) => n + 1);
               })} /> : null}
+              <Button colors={colors} label="取消确认" onPress={() => setConfirmation(undefined)} />
               <Button colors={colors} label="确认运行" primary disabled={!action || !confirm.plan.command.tool.version || (!confirm.id && !!blocked)} onPress={() => perform(() => submit(confirm.plan, confirm.id))} />
             </View>
           </View> : null}
-          {actionError ? <Caption colors={colors} tone="danger">操作未提交：{actionError}</Caption> : null}
-          <SettingsSelect label="已保存配置" value={draft.named} options={[{ label: "临时配置", value: "" }, ...discovery.saved.map((c) => ({ label: c.name, value: c.name }))]} onValueChange={(value) => {
-            const c = discovery.saved.find((item) => item.name === value);
-            if (c) openTarget(c.target, c);
-            else changeDraft({ name: "", named: "" });
-          }} />
           {selected ? <>
-            <Heading colors={colors}>{selected.name}</Heading>
-            <Caption colors={colors}>{projectLabel(selected)} · {selected.source}</Caption>
-            {selected.operation ? <Caption colors={colors} tone="warning">探测会执行项目配置，可能下载项目依赖。</Caption> : null}
-            {selected.adapter === "gradle" && !selected.operation ? <Caption colors={colors}>构建变体在目标列表选择。任务执行前需核对命令。</Caption> : null}
-            <Field colors={colors} label="构建选项" placeholder="留空使用项目默认值" value={options} set={setOptions} error={parsed.error ?? (currentPreview?.field === "options" ? currentPreview.error : undefined)} maxLength={65536} />
-            {suggestedOptions ? <Caption colors={colors}>当前工具有匹配的探测选项：{suggestedOptions}</Caption> : null}
-            {suggestedOptions && options !== suggestedOptions ? <View style={styles.actions}><Button colors={colors} label="带入探测选项" onPress={() => setOptions(suggestedOptions)} /></View> : null}
-            <SettingsSelect label="常用选项" value={suggestions.includes(options) ? options : ""} options={[{ label: "选择示例", value: "" }, ...suggestions.map((value) => ({ label: value, value }))]} onValueChange={(value) => { if (value) setOptions(value); }} />
-            <Field colors={colors} label="附加产物路径（每行一个）" multiline value={draft.artifacts} set={(value) => changeDraft({ artifacts: value })} error={artifactError ?? (currentPreview?.field === "artifacts" ? currentPreview.error : undefined)} maxLength={8200} />
-            <Heading colors={colors}>命令预览</Heading>
-            {plan ? <CommandPreview plan={plan.command} colors={colors} /> : <Caption colors={colors}>配置和工具可用后显示命令。</Caption>}
-            <Field colors={colors} label="配置名称" value={draft.name} set={(value) => changeDraft({ name: value })} error={nameError} action={
-              <Button colors={colors} label="保存配置" disabled={!action || !plan || !configuration || !draft.name.trim() || !!nameError} onPress={() => perform(async () => {
+            <View style={local.targetHeading}>
+              <Icon name={selected.operation ? "FlaskConical" : "Box"} size={15} color={colors.accent} />
+              <View style={local.rowBody}>
+                <Text accessibilityRole="header" selectable style={[styles.wrapText, styles.mono, local.targetName, { color: colors.foreground }]}>{selected.name}</Text>
+                <Caption colors={colors}>{selected.source} · {projectLabel(selected)}</Caption>
+              </View>
+              <Badge colors={colors}>{selected.operation ? "探测" : "构建"}</Badge>
+            </View>
+            <Field colors={colors} sideLabel mono label="命令选项" placeholder="留空使用项目默认值" value={options} set={setOptions}
+              error={parsed.error ?? (currentPreview?.field === "options" ? currentPreview.error : undefined)}
+              hint={suggestedOptions && options === suggestedOptions ? "已带入匹配的探测选项，可编辑。" : selected.operation ? "只应用于本次探测。" : "只应用于当前目标。"}
+              maxLength={65536} action={suggestions.length ? <Button colors={colors} label="填入示例" disabled={busy} onPress={() => setOptions(suggestions[(suggestions.indexOf(options) + 1) % suggestions.length]!)} /> : undefined} />
+            {suggestedOptions && options !== suggestedOptions ? <View style={[styles.actions, local.fieldInset]}>
+              <Button colors={colors} small label="带入探测选项" onPress={() => setOptions(suggestedOptions)} />
+            </View> : null}
+            <Field colors={colors} sideLabel label="配置名称" placeholder="如：本地 Release" value={draft.name} set={(value) => changeDraft({ name: value })} error={nameError} action={
+              <Button colors={colors} icon={tight ? undefined : "Save"} label="保存" disabled={!action || !plan || !configuration || !draft.name.trim() || !!nameError} onPress={() => perform(async () => {
                 if (!configuration) return;
                 const name = draft.name.trim();
                 discovery.replaceSaved(await save({ workspaceId, configuration: { ...configuration, name } }));
                 setDraft((old) => ({ ...old, named: name, name }));
               })} />
             } />
-            {draft.named ? <View style={styles.actions}><Button colors={colors} label="删除已保存配置" disabled={!action} onPress={() => perform(async () => {
-              discovery.replaceSaved(await remove({ workspaceId, name: draft.named })); setDraft((old) => ({ ...old, named: "" }));
-            })} /></View> : null}
+            <View style={[local.expander, { borderColor: colors.border, backgroundColor: colors.surface1 }]}>
+              <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded((open) => !open)} style={local.expanderHead}>
+                <Icon name={expanded ? "ChevronDown" : "ChevronRight"} size={14} color={colors.foregroundMuted} />
+                <Text style={[styles.label, { color: colors.foreground }]}>附加产物路径</Text>
+                <Caption colors={colors}>{artifacts.length ? `可选 · ${artifacts.length} 条` : "可选"}</Caption>
+              </Pressable>
+              {expanded ? <View style={local.expanderBody}><Field colors={colors} label="每行一个工作区相对路径" placeholder="dist" multiline mono
+                value={draft.artifacts} set={(value) => changeDraft({ artifacts: value })} error={pathError} maxLength={8200} /></View> : null}
+            </View>
+            {plan ? <CommandPreview plan={plan.command} colors={colors} /> : <View style={[styles.preview, { borderColor: colors.border, backgroundColor: colors.surface1 }]}>
+              <View style={[styles.previewHead, { borderColor: colors.border }]}><Heading colors={colors}>命令预览</Heading></View>
+              <View style={styles.previewBody}><Caption colors={colors}>配置和工具可用后显示命令。</Caption></View>
+            </View>}
           </> : <Caption colors={colors}>{selection ? "原目标已失效。重新选择前，当前草稿仍保留。" : "从目标列表选择要配置的构建或探测。"}</Caption>}
+          {draft.named ? <View style={styles.actions}><Button colors={colors} small label="删除已保存配置" disabled={!action} onPress={() => perform(async () => {
+            discovery.replaceSaved(await remove({ workspaceId, name: draft.named })); setDraft((old) => ({ ...old, named: "" }));
+          })} /></View> : null}
         </Region>
       </View>
-      <View style={[styles.pane, !compact && { flexBasis: "29%", flexGrow: 0, flexShrink: 0, borderLeftWidth: 1, borderColor: colors.border }, compact && area !== "tools" && local.hidden]}>
-        {!compact ? <PaneHead colors={colors}><Heading colors={colors}>工具链</Heading></PaneHead> : null}
+      <View style={[styles.pane, !compact && { flexBasis: toolsWidth, flexGrow: 0, flexShrink: 0, borderLeftWidth: 1 }, { borderColor: colors.border, backgroundColor: colors.surface1 }, compact && area !== "tools" && local.hidden]}>
+        <PaneHead colors={colors}>
+          <View style={styles.inline}><Icon name="Wrench" size={14} color={colors.foreground} /><Heading colors={colors}>工具链</Heading></View>
+          <View style={styles.inline}>
+            <Caption colors={colors}>{tools ? `${tools.candidates.length} 个候选` : ""}</Caption>
+            <Button colors={colors} icon="RefreshCw" iconOnly label="刷新工具链" disabled={!selected || busy} onPress={() => { setCheckError(""); reloadTools((n) => n + 1); }} />
+          </View>
+        </PaneHead>
         <Region label="工作区工具链">
-          <Caption colors={colors}>{tools?.requirement ?? (selected ? "正在读取工作区工具链" : "先选择目标")}</Caption>
-          {currentTools?.error || checkError ? <Caption colors={colors} tone="danger">{currentTools?.error ?? checkError}</Caption> : null}
+          <Heading colors={colors}>{tools?.requirement ?? (selected ? "正在读取工作区工具链" : "先选择目标")}</Heading>
           {tools?.issues.map((issue, i) => <Caption key={i} colors={colors} tone="warning">{issue}</Caption>)}
-          {tool && tools && !actual ? <Caption colors={colors} tone="warning">所选工具已失效，请明确选择替代工具。</Caption> : null}
-          <View style={styles.actions}>
-            <Button colors={colors} label="检查所选工具" disabled={!action || !actual} onPress={checkTool} />
-            <Button colors={colors} label="刷新工具链" disabled={!selected || busy} onPress={() => { setCheckError(""); reloadTools((n) => n + 1); }} />
+          {currentTools?.error ? <Caption colors={colors} tone="danger">{currentTools.error}</Caption> : null}
+          <View style={[local.toolActions, { borderColor: colors.border }]}>
+            <Button colors={colors} icon="Check" label="检查所选工具" disabled={!action || !actual || actual.gradleRuntime?.status === "incompatible"} onPress={checkTool} />
+            <View style={local.rowBody}><Caption colors={colors} tone={checkError ? "danger" : actual?.gradleRuntime?.status === "incompatible" ? "warning" : actual?.version ? "success" : undefined}>
+              {checkError || (tool && tools && !actual ? "所选工具已失效，请选择替代工具。" :
+                actual?.gradleRuntime?.status === "incompatible" ? "请选择兼容的工具。" : actual?.version ? "所选工具检查通过。" : actual ? "所选工具尚未检查。" : "尚未选择工具。")}
+            </Caption></View>
           </View>
           {tools?.candidates.map((candidate) => <ToolCard key={candidate.id} colors={colors} candidate={candidate} active={candidate.id === tool} disabled={busy} choose={() => {
             if (!selected || candidate.id === tool) return;
@@ -329,7 +415,7 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
       </View>
     </View>
     <ResizeHandle colors={colors} height={dock} min={minDock} max={maxDock} set={setDockHeight} />
-    <RunDock colors={colors} workspaceId={workspaceId} height={dock} compact={compact} runs={runs} id={runId} tab={detailTab} setTab={setDetailTab}
+    <RunDock colors={colors} workspaceId={workspaceId} height={dock} navWidth={navWidth} tight={tight} runs={runs} id={runId} tab={detailTab} setTab={setDetailTab}
       update={updates} connection={connection} busy={!action} select={(id) => { if (!lock.current) { setRunId(id); setConfirmation(undefined); } }} retry={retryRun}
       stop={() => perform(async () => { await stop({ workspaceId, id: runId }); updateRuns((x) => x + 1); })} />
   </View>;
@@ -337,20 +423,49 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
 
 function ToolCard({ colors, candidate, active, disabled, choose }: { colors: Colors; candidate: Candidate; active: boolean; disabled: boolean; choose(): void }) {
   const runtime = candidate.gradleRuntime;
-  return <View style={[styles.tile, { borderColor: active ? colors.accent : colors.border, backgroundColor: active ? colors.surface2 : colors.surface1 }]}>
-    <Text selectable style={[styles.wrapText, { color: colors.foreground, fontWeight: "600" }]}>{candidate.label}</Text>
-    <Caption colors={colors}>{candidate.version ?? (runtime ? "启动 Java 未检查" : "版本未检查")}</Caption>
-    <Code colors={colors}>{candidate.paths.join("\n")}</Code>
-    {runtime ? <Caption colors={colors} tone={runtime.status === "compatible" ? "success" : "warning"}>{runtime.reason}</Caption> : null}
-    <View style={styles.actions}><Button colors={colors} label={active ? "当前工具" : "选择此工具"} active={active} disabled={disabled || active} onPress={choose} /></View>
-  </View>;
+  const [name, ...qualifiers] = candidate.label.split(" · ");
+  // Tool labels include executable directories; display those once via the complete paths below.
+  const context = qualifiers.filter((item) => !item.split(" → ").every((dir) => dir.startsWith("/") &&
+    candidate.paths.some((path) => path === dir || path.startsWith(`${dir}/`)))).join(" · ");
+  return <Choice colors={colors} label={candidate.label} card active={active} disabled={disabled} onPress={choose}>
+    <View style={local.rowBody}>
+      <Text style={[styles.wrapText, styles.label, local.rowTitle, { color: colors.foreground }]}>{name}</Text>
+      {context ? <Caption colors={colors}>{context}</Caption> : null}
+      <Caption colors={colors}>{candidate.version ?? (runtime ? "启动 Java 未检查" : "版本未检查")}</Caption>
+      <Code colors={colors} muted>{candidate.paths.join("\n")}</Code>
+      {runtime ? <Caption colors={colors} tone={runtime.status === "compatible" ? "success" : "warning"}>{runtime.reason}</Caption> : null}
+    </View>
+    {runtime?.status === "incompatible" ? <Badge colors={colors} tone="danger" top>不兼容</Badge> :
+      candidate.version ? <Badge colors={colors} tone="success" top>已检查</Badge> :
+      runtime?.status === "compatible" ? <Badge colors={colors} tone="success" top>兼容</Badge> : null}
+  </Choice>;
 }
 
 const local = StyleSheet.create({
   root: { flex: 1, minHeight: 0, minWidth: 0, overflow: "hidden" },
+  toolbar: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 12, paddingVertical: 4, minHeight: 45, flexShrink: 0, borderBottomWidth: 1 },
+  toolbarTight: { paddingHorizontal: 7, gap: 6 },
+  breadcrumb: { flex: 1 },
+  stack: { flexShrink: 0, maxWidth: "100%" },
+  breadcrumbName: { flexShrink: 1, minWidth: 0, fontWeight: "700" },
+  status: { fontSize: 12, lineHeight: 15, textAlign: "right", maxWidth: 360 },
+  statusTight: { maxWidth: 102 },
   upper: { flex: 1, minHeight: 0, flexDirection: "row" },
   hidden: { display: "none" },
   search: { padding: 8 },
-  group: { gap: 5 },
-  barStatus: { flex: 1, minWidth: 100 },
+  navContent: { paddingHorizontal: 6, paddingTop: 3 },
+  navHint: { marginHorizontal: 5, borderLeftWidth: 2, paddingHorizontal: 7, paddingVertical: 5 },
+  group: { gap: 2 },
+  groupLabel: { fontSize: 11, fontWeight: "700", paddingHorizontal: 6, paddingTop: 3, paddingBottom: 2 },
+  rowBody: { flex: 1, minWidth: 0, gap: 1 },
+  rowTitle: { fontWeight: "700", lineHeight: 17 },
+  editor: { padding: 12, gap: 8 },
+  editorTight: { padding: 8 },
+  targetHeading: { flexDirection: "row", alignItems: "flex-start", gap: 7, marginTop: 5, marginBottom: 3 },
+  targetName: { fontSize: 15, lineHeight: 20, fontWeight: "700" },
+  fieldInset: { marginLeft: 73 },
+  expander: { borderRadius: 5, borderWidth: 1, marginTop: 2 },
+  expanderHead: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 7, minHeight: 30 },
+  expanderBody: { paddingHorizontal: 8, paddingBottom: 6 },
+  toolActions: { flexDirection: "row", alignItems: "center", gap: 6, borderTopWidth: 1, borderBottomWidth: 1, paddingVertical: 6 },
 });
