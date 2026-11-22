@@ -6,13 +6,14 @@ import { parse as yaml } from "yaml";
 import type { Candidate, Configuration } from "../shared/contracts";
 import { at, digest, inside, missing, readBounded, readText, resolveWithin } from "./paths";
 import { autoInstallRisk, directories, executable, executables, installedExecutables, matchesInstalledAlias } from "./mise";
-import { cargoOptions, cmakeOptions, gradleOptions, tauriOptions, xcodeOptions } from "./options";
+import { cargoOptions, cmakeOptions, gradleOptions, tauriOptions, validateOptions, xcodeOptions } from "./options";
 import { launch } from "./process";
 import type { Bindings, Invocation, OwnedProcess } from "./process";
 import { cargoContext } from "./rust-projects";
 import { cmakeBuildDir } from "./cmake";
 import { object, tauriConfig, type ProjectTarget } from "./projects";
 import { resolveTauriCli, type TauriCliRequest } from "./tauri-cli";
+import { gradleJvmOverride, gradleRuntime, javaRelease } from "./gradle-runtime.ts";
 
 export type Tool = { candidate: Candidate; signature: string; executable: string; env: NodeJS.ProcessEnv; bindings?: Bindings; overrides?: string[]; tauriCargoCli?: string; gradlePersistent?: boolean; pnpmMajor?: number };
 type VerifiedTool = { version: string; pnpmMajor?: number };
@@ -25,7 +26,7 @@ export function identity(path: string) {
 
 export function requirement(t: ProjectTarget) {
   if (t.xcode) return "完整 Xcode · iPhone Simulator SDK";
-  if (t.gradle) return `${t.gradle.wrapper ? "项目 Gradle Wrapper" : "Gradle"} · Java（兼容性由 Gradle 检查）`;
+  if (t.gradle) return `${t.gradle.wrapper ? "项目 Gradle Wrapper" : "Gradle"} · 启动 Java 与运行 Gradle 的 JVM 可能不同`;
   if (t.cmake) return "CMake ≥ 3.14 · 生成器和编译器由配置检查";
   if (t.tauri) return [t.tauri.manager && jsRequirement(t, t.tauri.manager), "Cargo + rustc", t.tauri.cli ? "项目声明的 Tauri CLI" : "cargo-tauri", "平台构建依赖"].filter(Boolean).join(" · ");
   if (t.adapter === "cargo") return `Cargo + rustc${t.requirements.rustChannel ? " · " + t.requirements.rustChannel : ""}${t.requirements.rust ? " · Rust >=" + t.requirements.rust : ""}`;
@@ -117,7 +118,7 @@ function gradleEnvironment(env: NodeJS.ProcessEnv, cwd: string) {
   const safe = isAbsolute(env.HOME ?? "") && declarations.every((entry) => entry === "ENOENT") &&
     init.every((entry) => entry === "ENOENT") && !["GRADLE_OPTS", "JAVA_OPTS", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "BASH_ENV", "ENV"].some((key) => env[key]) &&
     !Object.keys(env).some((key) => /^ORG_GRADLE_PROJECT_org\.gradle\./u.test(key));
-  return { identity: [home, variables, optionalIdentity(initDir), ...init.sort(), ...declarations], safe };
+  return { home, identity: [home, variables, optionalIdentity(initDir), ...init.sort(), ...declarations], safe };
 }
 
 function gradleDistribution(launcher: string) {
@@ -166,6 +167,7 @@ function nativeTools(t: ProjectTarget, env: NodeJS.ProcessEnv, checked: Checks, 
   const javaExecutables = [...new Set([...preferred, ...installedExecutables("java", env, t.requirements.miseJava), ...systemJdks])]
     .filter((path) => executable(path) && (process.platform !== "darwin" || realpathSync(path) !== "/usr/bin/java") && !autoInstallRisk(path));
   const context = gradleEnvironment(env, resolveWithin(root, t.cwd));
+  const override = gradleJvmOverride(root, t.cwd, context.home, env);
   // A project-controlled Wrapper may pick a different or customized distribution.
   // Do not promote its result to a persistent record without a verified launcher chain.
   const distributions = new Map(gradles.map((gradle) => [gradle, wrapper ? undefined : gradleDistribution(gradle)]));
@@ -175,10 +177,11 @@ function nativeTools(t: ProjectTarget, env: NodeJS.ProcessEnv, checked: Checks, 
     const runEnv = { ...env, JAVA_HOME: javaHome, JAVA_TOOL_OPTIONS: [env.JAVA_TOOL_OPTIONS, "-Dorg.gradle.native=false"].filter(Boolean).join(" ") };
     const distro = distributions.get(gradle);
     const javaFiles = ["release", "lib/modules", "lib/server/libjvm.dylib", "lib/server/libjvm.so"].map((file) => optionalIdentity(join(javaHome, file)));
-    const gradleContext = [context.identity, !!wrapper, distro?.identity, javaFiles];
-    return { ...makeTool(t, checked, [java, gradle, ...(jar ? [jar] : [])], gradle, runEnv,
-      `${wrapper ? "Gradle Wrapper" : gradle} · ${javaHome}`, { java }, [`JAVA_HOME=${javaHome}`, "JAVA_TOOL_OPTIONS 追加 -Dorg.gradle.native=false，让 Gradle 单次运行留在可停止的进程组中"], gradleContext),
-      gradlePersistent: context.safe && !!distro?.safe && javaFiles.slice(0, 2).every((value) => isAbsolute(value)) && javaFiles.slice(2).some((value) => isAbsolute(value)) };
+    const tool = makeTool(t, checked, [java, gradle, ...(jar ? [jar] : [])], gradle, runEnv,
+      `${wrapper ? "Gradle Wrapper" : "Gradle"} · ${javaHome}`, { java }, [`JAVA_HOME=${javaHome}`, "JAVA_TOOL_OPTIONS 追加 -Dorg.gradle.native=false，让 Gradle 单次运行留在可停止的进程组中"],
+      [context.identity, !!wrapper, distro?.identity, javaFiles, t.gradle?.distributionVersion, override]);
+    tool.candidate.gradleRuntime = gradleRuntime(t.gradle?.distributionVersion, javaRelease(javaHome), override);
+    return { ...tool, gradlePersistent: context.safe && !!distro?.safe && javaFiles.slice(0, 2).every((value) => isAbsolute(value)) && javaFiles.slice(2).some((value) => isAbsolute(value)) };
   })).slice(0, 32);
 }
 
@@ -490,18 +493,18 @@ function rustContext(root: string, cwd: string, owner: string, tool: Tool) {
 
 export function buildArguments(root: string, t: ProjectTarget, opts: Configuration["options"], tool: Tool) {
   if (t.xcode) {
-    xcodeOptions(opts, !!t.operation);
+    validateOptions(() => xcodeOptions(opts, !!t.operation));
     const container = [`-${t.xcode.kind}`, resolveWithin(root, t.project)];
     if (t.operation === "probe") return { args: ["-list", "-json", ...container, ...opts], outputs: [] };
     return { args: [...container, "-scheme", t.name, "-sdk", "iphonesimulator", "-destination", "generic/platform=iOS Simulator",
       "-derivedDataPath", resolveWithin(root, t.xcode.derived), ...opts, "CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO", "build"], outputs: [] };
   }
   if (t.gradle) {
-    const selected = gradleOptions(opts, !!t.operation);
+    const selected = validateOptions(() => gradleOptions(opts, !!t.operation));
     return { args: ["--no-daemon", "--console=plain", ...(t.operation ? ["tasks", "--all"] : [t.name]), ...selected.forwarded], outputs: [], nativeOptions: selected.context, taskFilter: selected.filter };
   }
   if (t.cmake) {
-    const chosen = cmakeOptions(opts, !!t.operation);
+    const chosen = validateOptions(() => cmakeOptions(opts, !!t.operation));
     if (t.operation === "probe") {
       const config = t.cmake.preset ? ["--preset", t.cmake.preset] : [];
       const dir = cmakeBuildDir(t.cmake.dir, tool.signature, opts);
@@ -515,7 +518,7 @@ export function buildArguments(root: string, t: ProjectTarget, opts: Configurati
     return { args: ["--build", resolveWithin(root, t.cmake.dir), "--target", t.cmake.target, ...opts], outputs: chosen ? t.cmake.configurations![chosen]! : t.outputs, sharedWrites };
   }
   if (t.tauri) {
-    const selected = tauriOptions(root, t.cwd, opts);
+    const selected = validateOptions(() => tauriOptions(root, t.cwd, opts));
     const cwd = resolveWithin(root, t.cwd);
     if (t.tauri.manager) assertJsConfig(root, t, tool, "script");
     const bindings = { TAURI_APP_PATH: resolveWithin(root, t.project), TAURI_FRONTEND_PATH: resolveWithin(root, t.tauri.frontend) };
@@ -548,7 +551,7 @@ export function buildArguments(root: string, t: ProjectTarget, opts: Configurati
       cargo: rustContext(root, t.project, t.tauri.workspace, tool), environment: bindings, planInputs: inputs };
   }
   if (t.cargo) {
-    cargoOptions(root, t.cwd, opts);
+    validateOptions(() => cargoOptions(root, t.cwd, opts));
     const report = !opts.some((s) => /^--message-format(?:=|$)/u.test(s));
     return { args: ["build", ...(t.cargo.name ? ["--package", t.cargo.name] : ["--workspace"]), ...(report ? ["--message-format=json-render-diagnostics"] : []), ...opts],
       outputs: [], cargo: rustContext(root, t.cwd, t.cargo.workspace, tool), cargoReport: report };
@@ -599,7 +602,8 @@ export async function verifyTool(t: ProjectTarget, tool: Tool, owned: Set<OwnedP
     const jv = /(?:openjdk|java) version "([^"+]+)(?:\+[^"\n]*)?"/u.exec(output)?.[1] ?? "";
     const pin = t.requirements.miseJava;
     if (pin && !matchesMiseVersion(/^\d+$/u.test(jv) ? jv + ".0.0" : jv, pin, "java", java, tool.env)) throw new Error(`启动 Java 无法满足 mise 声明 ${pin}；请选择匹配的已安装 JDK`);
-    return { version: `启动 Java：${output.split("\n")[0]}（Gradle/JVM 由项目确定）` };
+    const version = output.split("\n").find((line) => /(?:openjdk|java) version "/u.test(line)) ?? output.split("\n")[0];
+    return { version: `启动 Java：${version}` };
   }
   if (t.cmake) {
     const cmake = tool.executable;

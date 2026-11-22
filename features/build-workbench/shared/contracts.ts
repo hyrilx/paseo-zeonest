@@ -7,7 +7,13 @@ const targetKey = z.object({ adapter, project: path, name: z.string().min(1).max
 export const target = targetKey.extend({ source: path, outputs: z.array(path).max(16), operation: z.literal("probe").optional(), confirmed: z.boolean().optional(), probeOptions: z.array(z.string()).optional(), blocked: z.string().optional() });
 const token = z.string().max(4096).refine((s) => !/[\x00-\x1f\x7f]/u.test(s));
 const toolId = z.string().max(64);
-export const candidate = z.object({ id: toolId, label: z.string(), paths: z.array(path), requirement: z.string(), version: z.string().optional() });
+const gradleRuntime = z.object({
+  status: z.enum(["compatible", "incompatible", "unknown"]),
+  reason: z.string(),
+});
+export const candidate = z.object({ id: toolId, label: z.string(), paths: z.array(path), requirement: z.string(), version: z.string().optional(),
+  gradleRuntime: gradleRuntime.optional(), probeOptions: z.array(token).max(64).optional(),
+});
 export const config = z.object({
   target: targetKey, tool: toolId, options: z.array(token).max(64), artifacts: z.array(path).max(8),
 });
@@ -19,6 +25,7 @@ export const command = commandStep.extend({ tool: candidate, source: path, prepa
 export const status = z.enum(["queued", "running", "stopping", "success", "failed", "stopped", "interrupted"]);
 export const run = z.object({
   id: z.uuid(), sequence: z.number().int(), status, configuration: config, command, fingerprint: z.string(),
+  operation: target.shape.operation,
   confirmedTargets: z.array(z.string()).max(PROBE_TARGET_LIMIT).optional(), confirmedTargetsLimited: z.boolean().optional(),
   createdAt: z.number(), startedAt: z.number().optional(), endedAt: z.number().optional(), result: z.string().optional(),
 });
@@ -38,7 +45,10 @@ export const discover = rpc("discover", scope, z.object({ targets: z.array(targe
 export const tools = rpc("tools", scope.extend({ target: targetKey }), z.object({ candidates: z.array(candidate), requirement: z.string(), issues: z.array(z.string()), selected: toolId.optional() }));
 export const selectTool = rpc("select-tool", scope.extend({ target: targetKey, tool: toolId }), z.object({ selected: toolId }));
 export const verify = rpc("verify", planInput, candidate);
-export const preview = rpc("preview", planInput, z.object({ command, fingerprint: z.string() }));
+export const preview = rpc("preview", planInput, z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("ready"), command, fingerprint: z.string() }),
+  z.object({ kind: z.literal("invalid"), field: z.enum(["options", "artifacts"]), message: z.string() }),
+]));
 export const save = rpc("save", scope.extend({ configuration: saved }), z.array(saved));
 export const remove = rpc("remove", scope.extend({ name: saved.shape.name }), z.array(saved));
 export const start = rpc("start", planInput.extend({ fingerprint: z.string().length(64) }), submitted);

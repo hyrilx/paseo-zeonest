@@ -1,6 +1,17 @@
 import { isAbsolute } from "node:path";
 import { resolveWithin } from "./paths";
 
+export class ConfigurationFieldError extends Error {
+  constructor(readonly field: "options" | "artifacts", cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
+}
+
+export function validateOptions<T>(validate: () => T): T {
+  try { return validate(); }
+  catch (error) { throw new ConfigurationFieldError("options", error); }
+}
+
 type Check = (value: string) => boolean;
 type Rule = true | Check | { optional: Check };
 const value = (s: string) => !!s && !s.startsWith("-");
@@ -64,7 +75,7 @@ export function gradleOptions(args: string[], probe: boolean) {
     if (!/^[:\w.-]{1,192}$/u.test(filter)) throw new Error("任务范围使用项目或任务名称片段，例如 :renderer: 或 assembleDemo");
     return false;
   });
-  const reserved = /^(?:org\.gradle\.(?:daemon|native)(?:\.|$)|org\.gradle\.java\.home$)/u;
+  const reserved = /^(?:org\.gradle\.(?:daemon|native)(?:\.|$)|org\.gradle\.java\.home$|gradle\.user\.home$)/u;
   const flagsByPhase: Record<string, Rule> = probe ? {} : { "--tests": value, "--args": value, "--rerun": true };
   const context: string[] = [];
   parse(forwarded, {

@@ -18,7 +18,7 @@ const document = z.object({ version: z.literal(2), results: z.array(result).max(
 type Result = z.infer<typeof result>;
 export type GradleScope = { directory: string; stamp: string; owner: string };
 export type NativeResult = {
-  context: string; filter?: string; options?: string[]; names: string[]; limited?: boolean;
+  context: string; tool: string; filter?: string; options?: string[]; names: string[]; limited?: boolean;
   consume?: { id: string; take: () => void };
 };
 

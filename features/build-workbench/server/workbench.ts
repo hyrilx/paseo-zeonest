@@ -9,6 +9,7 @@ import { finishCmake, prepareCmake } from "./cmake";
 import { GradleCache, type GradleScope, type NativeResult } from "./gradle-cache";
 import { gradleProbe, gradleTaskPriority, nativeTarget, parseXcodeProbe } from "./native-projects";
 import { digest, inside, missing, readBounded, resolveWithin, workspaceRoot } from "./paths";
+import { ConfigurationFieldError } from "./options";
 import { discoverProjects, type ProjectTarget } from "./projects";
 import { launch } from "./process";
 import type { Invocation, OwnedProcess } from "./process";
@@ -29,7 +30,7 @@ type State = z.infer<typeof document>;
 type Entry = z.infer<typeof entrySchema>;
 export type Workspace = { id: string; root: string };
 type NativeProbe = { adapter: "gradle" | "xcode"; stamp: string; context: string; tool: string; filter?: string; options: string[]; gradleScope?: GradleScope };
-type Plan = { command: Command; fingerprint: string; steps: Invocation[]; outputs: string[]; hints: string[]; locks: string[]; configure?: { base: string; dir: string; stamp: string; tool: string };
+type Plan = { command: Command; fingerprint: string; operation: Run["operation"]; steps: Invocation[]; outputs: string[]; hints: string[]; locks: string[]; configure?: { base: string; dir: string; stamp: string; tool: string };
   nativeProbe?: NativeProbe; consume?: NativeResult["consume"]; cargoReport?: { source?: string; dir: string };
   tauriCli?: { context: string; installed?: ResolvedTauriCli }; checkJsScope?: (phase: "install" | "script") => void };
 type Job = { workspace: Workspace; entry: Entry; plan: Plan; process?: OwnedProcess; flush?: ReturnType<typeof setTimeout>; stopTimer?: ReturnType<typeof setTimeout>; before?: ReturnType<typeof observe>; reported?: Set<string>; reportLimited?: boolean };
@@ -156,7 +157,7 @@ export class Workbench {
       if (scopes.has(scope)) continue;
       scopes.add(scope);
       if (t.xcode?.volatile && (entry.consumed || entry.probeSession !== this.#session)) continue;
-      results.push({ context, filter: entry.probeFilter, options: entry.probeOptions, names: entry.run.confirmedTargets ?? [], limited: entry.run.confirmedTargetsLimited,
+      results.push({ context, tool: entry.probeTool, filter: entry.probeFilter, options: entry.probeOptions, names: entry.run.confirmedTargets ?? [], limited: entry.run.confirmedTargetsLimited,
         consume: t.xcode?.volatile ? { id: entry.run.id, take: () => { entry.consumed = true; } } : undefined });
     }
     return results;
@@ -206,7 +207,12 @@ export class Workbench {
   }
   tools(w: Workspace, k: TargetKey) {
     const t = this.#lookup(w, k);
-    const candidates = toolchains(t, this.environment, this.#cache(w, t), w.root).map((tool) => tool.candidate);
+    const results = t.gradle && !t.operation ? this.#nativeResults(w, t) : [];
+    const candidates = toolchains(t, this.environment, this.#cache(w, t), w.root).map(({ candidate, signature }) => {
+      const match = results.find((p) => p.tool === signature && p.names.includes(t.name) && p.options &&
+        p.context === nativeContext(signature, p.options));
+      return match ? { ...candidate, probeOptions: match.options } : candidate;
+    });
     return { candidates, requirement: requirement(t), issues: toolIssues(t, this.environment), selected: this.#state(w.id).tools[t.adapter] };
   }
   selectTool(w: Workspace, key: TargetKey, id: string) {
@@ -245,14 +251,17 @@ export class Workbench {
     if (t.blocked) throw new Error(t.blocked);
     const tool = toolchains(t, this.environment, this.#cache(w, t), w.root).find(({ candidate }) => candidate.id === c.tool);
     if (!tool) throw new Error("所选工具不存在或路径已变更，请重新选择");
+    if (tool.candidate.gradleRuntime?.status === "incompatible") throw new Error(tool.candidate.gradleRuntime.reason);
     const build = buildArguments(w.root, t, c.options, tool);
     const args = build.args;
     const hints = t.adapter === "npm" || t.adapter === "pnpm" || t.tauri ? build.outputs.filter((path) => !c.artifacts.includes(path)) : [];
     const outputs = [...new Set([...build.outputs, ...c.artifacts])];
     for (const dir of c.artifacts) {
       const xcodeOutput = t.xcode && (dir === t.xcode.derived || dir.startsWith(t.xcode.derived + "/")) && !dir.split("/").slice(1).some((part) => part.startsWith("."));
-      if (!xcodeOutput && (dir === "." || dir.split("/").some((part) => part.startsWith(".")))) throw new Error("产物须指定明确的工作区相对路径（隐藏目录仅支持本次 Xcode 的 DerivedData）");
-      resolveWithin(w.root, dir);
+      try {
+        if (!xcodeOutput && (dir === "." || dir.split("/").some((part) => part.startsWith(".")))) throw new Error("产物须指定明确的工作区相对路径（隐藏目录仅支持本次 Xcode 的 DerivedData）");
+        resolveWithin(w.root, dir);
+      } catch (error) { throw new ConfigurationFieldError("artifacts", error); }
     }
     const cwd = resolveWithin(w.root, t.cwd);
     const prep = preparation(w.root, t, tool);
@@ -292,7 +301,7 @@ export class Workbench {
     const cargoReport = build.cargoReport && build.cargo ? { source: t.cargo?.name ? resolveWithin(w.root, t.source) : undefined, dir: build.cargo.targetDir } : undefined;
     const checkJsScope: Plan["checkJsScope"] = t.adapter === "npm" || t.adapter === "pnpm" || t.tauri?.manager ?
       (phase) => assertJsConfig(w.root, t, tool, phase) : undefined;
-    return { command, fingerprint, steps: [...prep.steps.map(({ invocation }) => invocation), main], outputs, hints, configure, nativeProbe, consume, cargoReport, locks, tauriCli, checkJsScope };
+    return { command, fingerprint, operation: t.operation, steps: [...prep.steps.map(({ invocation }) => invocation), main], outputs, hints, configure, nativeProbe, consume, cargoReport, locks, tauriCli, checkJsScope };
   }
   preview(w: Workspace, c: Configuration) {
     const { command, fingerprint } = this.#plan(w, c);
@@ -338,7 +347,7 @@ export class Workbench {
     if (process.platform === "win32") throw new Error("当前仅支持可管理 POSIX 进程组的宿主");
     const state = this.#state(w.id);
     const entry: Entry = { run: { id: randomUUID(), sequence: ++state.sequence, status: "queued", configuration, command: plan.command,
-      fingerprint: plan.fingerprint, createdAt: Date.now() }, rows: [], cursor: 0, artifacts: [], artifactsLimited: false };
+      fingerprint: plan.fingerprint, operation: plan.operation, createdAt: Date.now() }, rows: [], cursor: 0, artifacts: [], artifactsLimited: false };
     const old = state.history;
     state.history = [entry, ...old];
     while (state.history.length > HISTORY) {
@@ -436,7 +445,7 @@ export class Workbench {
       }
       if (status === "success" && job.plan.configure) {
         const { base, dir, stamp, tool } = job.plan.configure;
-        try { finishCmake(job.workspace.root, job.entry.run.configuration.target.project, base, dir, stamp, tool); result += "；刷新目标以读取 File API"; }
+        try { finishCmake(job.workspace.root, job.entry.run.configuration.target.project, base, dir, stamp, tool); result += "；CMake File API 已就绪"; }
         catch (error) { status = "failed"; result = (error as Error).message; }
       }
       if (status === "success" && job.plan.nativeProbe) {
@@ -466,7 +475,7 @@ export class Workbench {
           }
           job.entry.run.confirmedTargets = confirmed;
           if (reported.limited) job.entry.run.confirmedTargetsLimited = true;
-          result += reported.limited ? `；保留 ${confirmed.length} 个可选目标，部分条目未收录` : `；发现 ${confirmed.length} 个可选目标，刷新后可查看`;
+          result += reported.limited ? `；保留 ${confirmed.length} 个可选目标，部分条目未收录` : `；发现 ${confirmed.length} 个可选目标`;
         } catch (error) { status = "failed"; result = (error as Error).message; }
       }
       this.#finish(job, status, result);
