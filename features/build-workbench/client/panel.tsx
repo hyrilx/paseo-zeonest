@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import type { TextInput } from "react-native";
 import { useRpc } from "@getpaseo/plugin/client";
 import type { PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { Icon, Loading } from "@getpaseo/plugin/client/ui";
@@ -12,6 +13,8 @@ import { ResizeHandle, RunDock } from "./run-dock.tsx";
 import type { DetailTab } from "./run-dock.tsx";
 import { defaultTool, limitDock, ProbeCompletions } from "./workbench-state";
 import { useDiscovery } from "./use-discovery";
+import { appendOptions } from "./common-options";
+import { OptionPicker } from "./option-picker.tsx";
 
 type Plan = { command: Command; fingerprint: string };
 type ToolList = { candidates: Candidate[]; requirement: string; issues: string[]; selected?: string };
@@ -19,11 +22,6 @@ type Area = "targets" | "config" | "tools";
 const areas = { targets: "目标", config: "配置", tools: "工具链" };
 const family: Record<rpc.Adapter, string> = { npm: "npm", pnpm: "pnpm", cargo: "Cargo", cmake: "CMake", tauri: "Tauri", gradle: "Gradle", xcode: "Xcode" };
 const projectLabel = (target: rpc.TargetKey) => `${family[target.adapter]} · ${target.project === "." ? "根目录" : target.project}`;
-const examples: Record<rpc.Adapter, string[]> = {
-  npm: ["--mode staging"], pnpm: ["--mode staging"], cargo: ["--release", "--all-features", "--profile dev"],
-  cmake: ["--parallel 4", "--config Release"], tauri: ["--release", "-- --locked"],
-  gradle: ["--stacktrace", "--parallel --max-workers 4", "--refresh-dependencies"], xcode: ["-configuration Release", "-showBuildTimingSummary"],
-};
 function optionInput(text: string) {
   try {
     const argv = parseArguments(text);
@@ -63,6 +61,8 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
   const [area, setArea] = useState<Area>("targets");
   const [draft, setDraft] = useState(blank);
   const [expanded, setExpanded] = useState(false);
+  const [picker, setPicker] = useState("");
+  const argsInput = useRef<TextInput>(null);
   const [toolRevision, reloadTools] = useState(0);
   const [automaticTool, setAutomaticTool] = useState<{ selection: string; id: string }>();
   const [available, setAvailable] = useState<{ key: string; value?: ToolList; error?: string }>();
@@ -178,6 +178,7 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
     if (lock.current) return;
     if (!saved && selection === rpc.targetId(target)) { setArea("config"); return; }
     if (selection !== rpc.targetId(target)) setAutomaticTool(undefined);
+    setPicker("");
     select(rpc.targetId(target)); setCheckError(""); setActionError(""); setConfirmation(undefined);
     setDraft(saved ? { tool: saved.tool, options: formatArguments(saved.options), artifacts: saved.artifacts.join("\n"), name: saved.name, named: saved.name, optionsTouched: true } : blank);
     setExpanded(false);
@@ -220,9 +221,6 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
     }
     return { ids, stacks: [...stacks].map((stack) => family[stack]), buildProjects, groups, viewingNew };
   }, [all, search, onlyNew, discovery.feedback]);
-  const suggestions = !selected ? [] : selected.operation && selected.adapter === "cmake" ? ['-DCMAKE_BUILD_TYPE=Release', '-G "Unix Makefiles"']
-    : selected.operation && selected.adapter === "xcode" ? ["-verbose"]
-      : selected.operation && selected.adapter === "gradle" ? ["--offline", "--workbench-task-filter=:模块:", "--workbench-task-filter=assembleDebug"] : examples[selected.adapter];
   const setOptions = (value: string) => changeDraft({ options: value, optionsTouched: true });
   const nameError = draft.name.trim().length > 64 ? "配置名称最多 64 个字符。" : undefined;
   const refreshLabel = discovery.busy ? "正在刷新目标" : discovery.failure ? "重试刷新" : "刷新目标";
@@ -350,10 +348,10 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
               </View>
               <Badge colors={colors}>{selected.operation ? "探测" : "构建"}</Badge>
             </View>
-            <Field colors={colors} sideLabel mono label="命令选项" placeholder="留空使用项目默认值" value={options} set={setOptions}
+            <Field colors={colors} sideLabel mono label="命令选项" placeholder="留空使用项目默认值" value={options} set={setOptions} inputRef={argsInput}
               error={parsed.error ?? (currentPreview?.field === "options" ? currentPreview.error : undefined)}
               hint={suggestedOptions && options === suggestedOptions ? "已带入匹配的探测选项，可编辑。" : selected.operation ? "只应用于本次探测。" : "只应用于当前目标。"}
-              maxLength={65536} action={suggestions.length ? <Button colors={colors} label="填入示例" disabled={busy} onPress={() => setOptions(suggestions[(suggestions.indexOf(options) + 1) % suggestions.length]!)} /> : undefined} />
+              maxLength={65536} action={<Button colors={colors} label="常用选项" disabled={busy} onPress={() => setPicker(selection)} />} />
             {suggestedOptions && options !== suggestedOptions ? <View style={[styles.actions, local.fieldInset]}>
               <Button colors={colors} small label="带入探测选项" onPress={() => setOptions(suggestedOptions)} />
             </View> : null}
@@ -414,6 +412,12 @@ function Workbench({ workspaceId, layout, theme: { colors } }: PluginWorkspacePa
         </Region>
       </View>
     </View>
+    {selected && picker === selection ? <OptionPicker key={selection} colors={colors} target={selected}
+      context={`${family[selected.adapter]} · ${selected.operation ? "探测" : "构建"}`} close={() => setPicker("")} apply={(flags) => {
+        setOptions(appendOptions(options, flags));
+        setPicker("");
+        requestAnimationFrame(() => argsInput.current?.focus());
+      }} /> : null}
     <ResizeHandle colors={colors} height={dock} min={minDock} max={maxDock} set={setDockHeight} />
     <RunDock colors={colors} workspaceId={workspaceId} height={dock} navWidth={navWidth} tight={tight} runs={runs} id={runId} tab={detailTab} setTab={setDetailTab}
       update={updates} connection={connection} busy={!action} select={(id) => { if (!lock.current) { setRunId(id); setConfirmation(undefined); } }} retry={retryRun}

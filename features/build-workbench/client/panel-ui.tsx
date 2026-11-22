@@ -1,6 +1,6 @@
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
-import type { StyleProp, ViewStyle } from "react-native";
+import type { StyleProp, TextInput as NativeTextInput, ViewStyle } from "react-native";
 import type { PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { Icon, ScrollView, TextInput } from "@getpaseo/plugin/client/ui";
 import type { Command, Run } from "../shared/contracts";
@@ -24,10 +24,10 @@ export function Heading({ colors, children }: { colors: Colors; children: ReactN
 export function Badge({ colors, children, tone, top }: { colors: Colors; children: ReactNode; tone?: Tone; top?: boolean }) {
   return <Text style={[styles.badge, { color: toneColor(colors, tone), borderColor: colors.border }, top && { alignSelf: "flex-start" }]}>{children}</Text>;
 }
-export function Button({ colors, label, onPress, disabled, primary, icon, iconOnly, small }: {
-  colors: Colors; label: string; onPress(): void; disabled?: boolean; primary?: boolean; icon?: string; iconOnly?: boolean; small?: boolean;
+export function Button({ colors, label, onPress, disabled, primary, icon, iconOnly, small, muted }: {
+  colors: Colors; label: string; onPress(): void; disabled?: boolean; primary?: boolean; icon?: string; iconOnly?: boolean; small?: boolean; muted?: boolean;
 }) {
-  const color = primary ? colors.accentForeground : iconOnly ? colors.foregroundMuted : colors.foreground;
+  const color = primary ? colors.accentForeground : iconOnly || muted ? colors.foregroundMuted : colors.foreground;
   return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress}
     style={({ pressed, hovered }: PressState) => [styles.button, (small || iconOnly) && styles.smallButton, iconOnly && styles.iconButton,
       { borderColor: primary || iconOnly ? "transparent" : colors.border, backgroundColor: primary ? colors.accent : (pressed || hovered || !iconOnly) ? colors.surface2 : "transparent",
@@ -61,9 +61,9 @@ export function Choice({ colors, children, active, onPress, disabled, card, labe
     {children}
   </Pressable>;
 }
-export function Field({ colors, label, value, set, placeholder, multiline, error, hint, action, hideLabel, sideLabel, mono, icon, maxLength = 2048 }: {
+export function Field({ colors, label, value, set, placeholder, multiline, error, hint, action, hideLabel, sideLabel, mono, icon, inputRef, maxLength = 2048 }: {
   colors: Colors; label: string; value: string; set(value: string): void; placeholder?: string; multiline?: boolean; error?: string; hint?: string;
-  action?: ReactNode; hideLabel?: boolean; sideLabel?: boolean; mono?: boolean; icon?: string; maxLength?: number;
+  action?: ReactNode; hideLabel?: boolean; sideLabel?: boolean; mono?: boolean; icon?: string; maxLength?: number; inputRef?: Ref<NativeTextInput>;
 }) {
   return <View style={sideLabel ? styles.sideField : styles.field}>
     {!hideLabel ? <Text style={[styles.label, sideLabel && styles.sideLabel, { color: colors.foregroundMuted }]}>{label}</Text> : null}
@@ -71,7 +71,7 @@ export function Field({ colors, label, value, set, placeholder, multiline, error
       <View style={styles.inline}>
         <View style={[styles.inputBox, { backgroundColor: colors.surface0, borderColor: error ? colors.statusDanger : colors.border }]}>
           {icon ? <Icon name={icon} size={14} color={colors.foregroundMuted} /> : null}
-          <TextInput accessibilityLabel={label} onChangeText={set} value={value} placeholder={placeholder} placeholderTextColor={colors.foregroundMuted}
+          <TextInput ref={inputRef} accessibilityLabel={label} onChangeText={set} value={value} placeholder={placeholder} placeholderTextColor={colors.foregroundMuted}
             autoCapitalize="none" autoCorrect={false} multiline={multiline} maxLength={maxLength}
             style={[styles.input, mono && styles.mono, multiline ? styles.multiline : styles.singleLine, { color: colors.foreground }]} />
         </View>

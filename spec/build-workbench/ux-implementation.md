@@ -34,4 +34,13 @@
 
 本地截图：原型 `/tmp/zeonest-r2-before-8427.png`；宽屏 `/tmp/zeonest-r2-cargo-wide.png`；compact `/tmp/zeonest-r2-compact-dark.png`；窄屏 `/tmp/zeonest-r2-tools-320.png` 和 `/tmp/zeonest-r2-field-error-320.png`。再次通过 `npm run check`（522 通过、3 跳过、0 失败）和 `npm pack --dry-run --ignore-scripts`（11 个打包文件）；主动 LSP 检查 4 个修改文件，无诊断。
 
-两轮均未安装、启用或重载 Zeonest，也未修改 daemon 配置。本地预览按 SDK 0.15.4 的接口使用宿主替身；真实 Paseo 的面板入口、宽屏与 compact、明暗主题和异常状态仍待授权后验收。
+## 输出与常用选项（0.2.2）
+
+- 「输出」页签顶部的「命令预览」默认折叠。展开后显示当次运行实际记录的命令、工作目录和准备步骤；长命令在独立区域滚动，不挤走日志。日志默认跟随底部，向上滚动后保持阅读位置，点「回到底部」恢复跟随。切换记录或产物页签时，每条记录保留自己的折叠状态与阅读位置。暂停期间如果旧日志退出服务端缓冲区，仍可阅读当前内容；恢复跟随后使用最新可用日志。
+- 「常用选项」与命令输入框等高，使用 Paseo 原生弹窗，按技术栈和探测／构建场景显示选项。可勾选多项并追加到原草稿末尾，应用后焦点回到输入框，取消不改草稿。CMake 不预填原型示例机器上的 `fmt` 路径。
+
+使用 `agent-browser` 对照原型，检查了正式面板源码的 1400×850 浅色宽屏及 390×740、320×700 深色 compact 预览。注入连续日志后，验证了新运行默认折叠并跟随底部、上滚暂停、跨历史和页签恢复位置、手动回到底部，以及失败摘要和截断提示。验证了弹窗取消不写入、勾选多项时按列表顺序追加。隔离目录中通过常用选项插入 Cargo `--release --offline` 后直接构建，退出码为 `0`，产物页显示 `target/release/workbench-demo`；本次工具链报过 `rust-objcopy` 缺少 `libLLVM.dylib` 的警告，运行仍成功。
+
+本地截图：宽屏 `/tmp/zeonest-r4-cargo-wide.png`，compact 暂停状态 `/tmp/zeonest-r4-product-paused-390.png`，窄屏弹窗 `/tmp/zeonest-r4-product-options-320.png` 和失败状态 `/tmp/zeonest-r4-product-error-320.png`。`npm run check` 通过（527 通过、3 跳过、0 失败），`npm pack --dry-run --ignore-scripts` 通过（11 个打包文件），主动 LSP 检查 8 个修改文件，无诊断。
+
+各轮均未安装、启用或重载 Zeonest，也未修改 daemon 配置。本地预览按 SDK 0.15.4 的接口使用宿主替身；真实 Paseo 的面板入口、宽屏与 compact、明暗主题和异常状态仍待授权后验收。

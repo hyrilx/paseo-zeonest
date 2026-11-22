@@ -4,9 +4,11 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/ui";
 import * as rpc from "../shared/contracts";
 import type { Log, Run } from "../shared/contracts";
-import { Badge, Button, Caption, Choice, Code, CommandPreview, Heading, PaneHead, Region, Tab, Tabs, errorMessage, labels, styles } from "./panel-ui.tsx";
+import { Badge, Button, Caption, Choice, Code, Heading, PaneHead, Region, Tab, Tabs, errorMessage, labels, styles } from "./panel-ui.tsx";
 import type { Colors } from "./panel-ui.tsx";
 import { limitDock } from "./workbench-state";
+import { RunOutput } from "./run-output.tsx";
+import type { OutputView } from "./output-state";
 
 export type DetailTab = "output" | "artifacts";
 const assetLabels = { new: "新增", changed: "变化", existing: "已有", missing: "缺失", removed: "已移除", unavailable: "无法观察" };
@@ -59,6 +61,11 @@ export function RunDock({ colors, workspaceId, height, navWidth, tight, runs, id
   setTab(tab: DetailTab): void; update: number; connection: string; busy: boolean; retry(): void; stop(): void;
 }) {
   const current = runs.find((run) => run.id === id);
+  const views = useRef(new Map<string, OutputView>());
+  useEffect(() => {
+    const kept = new Set(runs.map((run) => run.id));
+    for (const key of views.current.keys()) if (!kept.has(key)) views.current.delete(key);
+  }, [runs]);
   return <View style={[local.dock, { height }]}>
     <View style={[styles.frame, { width: navWidth, borderColor: colors.border, backgroundColor: colors.surface1 }]}>
       <PaneHead colors={colors} bar><View style={styles.inline}><Heading colors={colors}>运行记录</Heading><Badge colors={colors}>{runs.length}</Badge></View></PaneHead>
@@ -77,7 +84,7 @@ export function RunDock({ colors, workspaceId, height, navWidth, tight, runs, id
         </Choice>)}
       </Region>
     </View>
-    {current ? <RunDetail key={current.id} run={current} {...{ colors, workspaceId, tight, update, busy, retry, stop, tab, setTab }} />
+    {current ? <RunDetail key={current.id} run={current} {...{ colors, workspaceId, height, tight, update, busy, retry, stop, tab, setTab }} views={views.current} />
       : <View style={styles.pane}><PaneHead colors={colors} bar><DetailTabs {...{ colors, tight, tab, setTab }} /></PaneHead>
         <Region label="运行详情"><Caption colors={colors}>运行后，在左侧选择记录查看详情。</Caption></Region></View>}
   </View>;
@@ -90,10 +97,13 @@ function DetailTabs({ colors, tight, tab, setTab }: { colors: Colors; tight: boo
   </Tabs>;
 }
 
-function RunDetail({ colors, workspaceId, tight, run: current, update, busy, retry, stop, tab, setTab }: {
-  colors: Colors; workspaceId: string; tight: boolean; run: Run; update: number; busy: boolean; retry(): void; stop(): void; tab: DetailTab; setTab(tab: DetailTab): void;
+function RunDetail({ colors, workspaceId, height, tight, run: current, update, busy, retry, stop, tab, setTab, views }: {
+  colors: Colors; workspaceId: string; height: number; tight: boolean; run: Run; update: number; busy: boolean; retry(): void; stop(): void; tab: DetailTab; setTab(tab: DetailTab): void;
+  views: Map<string, OutputView>;
 }) {
   const { id } = current;
+  const [view] = useState<OutputView>(() => views.get(id) ?? { open: false });
+  useEffect(() => { views.set(id, view); }, [views, id, view]);
   const read = useRpc(rpc.detail);
   const [snapshot, setSnapshot] = useState<Awaited<ReturnType<typeof read>>>();
   const [rows, setRows] = useState<Log[]>([]);
@@ -130,22 +140,14 @@ function RunDetail({ colors, workspaceId, tight, run: current, update, busy, ret
         {!tight ? <Badge colors={colors} tone={statusTone(run)}>{run.operation === "probe" ? "探测" : "构建"} · {labels[run.status]}</Badge> : null}
       </View>
     </PaneHead>
-    <Region key={tab} label={tab === "output" ? "运行输出" : "运行产物"}>
+    {tab === "output" ? <RunOutput {...{ colors, run, rows, failure, trimmed, height, tight, view }} /> : <Region label="运行产物">
       {failure ? <Caption colors={colors} tone="warning">详情刷新失败，保留上次结果：{failure}</Caption> : null}
       {run.result ? <Caption colors={colors} tone={run.status === "failed" ? "danger" : undefined}>{run.result}</Caption> : null}
-      {tab === "output" ? <>
-        {trimmed ? <Caption colors={colors} tone="warning">较早的输出已截断。</Caption> : null}
-        <Code colors={colors}>{rows.length ? rows.map((row) => <Text key={row.cursor} style={{ color: row.stream === "stderr" ? colors.foregroundMuted : colors.foreground }}>{row.text}</Text>)
-          : rpc.live(run.status) ? "等待输出" : "没有输出"}</Code>
-        {run.confirmedTargets?.length ? <Caption colors={colors}>{run.confirmedTargetsLimited ? "已确认（部分）" : "已确认"}：{run.confirmedTargets.join("、")}</Caption> : null}
-        <CommandPreview plan={run.command} colors={colors} />
-      </> : <>
-        <Caption colors={colors}>观察路径比较运行前后的状态。文件存在不代表由本次运行产生。</Caption>
-        {snapshot?.artifactsLimited ? <Caption colors={colors} tone="warning">已达到扫描上限，仅显示部分结果。</Caption> : null}
-        {snapshot?.artifacts.length ? snapshot.artifacts.map((a) => <Code key={a.path} colors={colors}>{a.origin === "hint" ? "线索" : a.origin === "native" ? "工具报告" : assetLabels[a.state]} · {a.path}</Code>)
-          : <Caption colors={colors}>{rpc.live(run.status) ? "运行结束后查看产物" : snapshot ? "没有可展示的产物记录" : "正在读取产物"}</Caption>}
-      </>}
-    </Region>
+      <Caption colors={colors}>观察路径比较运行前后的状态。文件存在不代表由本次运行产生。</Caption>
+      {snapshot?.artifactsLimited ? <Caption colors={colors} tone="warning">已达到扫描上限，仅显示部分结果。</Caption> : null}
+      {snapshot?.artifacts.length ? snapshot.artifacts.map((a) => <Code key={a.path} colors={colors}>{a.origin === "hint" ? "线索" : a.origin === "native" ? "工具报告" : assetLabels[a.state]} · {a.path}</Code>)
+        : <Caption colors={colors}>{rpc.live(run.status) ? "运行结束后查看产物" : snapshot ? "没有可展示的产物记录" : "正在读取产物"}</Caption>}
+    </Region>}
   </View>;
 }
 
