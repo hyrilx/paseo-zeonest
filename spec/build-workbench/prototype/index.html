@@ -28,7 +28,7 @@
   </svg>
   <header class="mast">
     <div class="identity"><span class="mark"><svg class="icon"><use href="#box"/></svg></span><h1>构建工作台</h1></div>
-    <div class="scenario"><label for="scenario">演示工作区</label><select id="scenario"><option value="vofa">vofa_bridge</option><option value="alkaa">alkaa</option></select></div>
+    <div class="scenario"><label for="scenario">演示工作区</label><select id="scenario"><option value="vofa">vofa_bridge</option><option value="alkaa">alkaa</option><option value="cargo">hello-rust · Cargo</option></select></div>
     <div class="mast-end"><span class="prototype-tag"><i></i>交互原型</span><button id="theme" class="icon-btn" aria-label="切换亮色主题" title="切换亮色主题"><svg class="icon"><use href="#sun"/></svg></button></div>
   </header>
   <div class="toolbar">
@@ -41,7 +41,7 @@
   </nav>
   <div id="work-area" class="work-area" data-pane="editor">
     <aside class="pane navigator" aria-label="构建导航">
-      <div class="rail-head"><div class="tabs" aria-label="导航内容"><button data-nav="targets" aria-pressed="true">目标 <span id="target-count" class="count"></span></button><button data-nav="saved" aria-pressed="false">已保存</button></div><button class="icon-btn" id="refresh" aria-label="刷新目标" title="刷新目标"><svg class="icon"><use href="#refresh"/></svg></button></div>
+      <div class="rail-head"><div class="tabs" aria-label="导航内容"><button data-nav="targets" aria-pressed="true">目标 <span id="target-count" class="count"></span></button><button data-nav="saved" aria-pressed="false">已保存</button></div><button class="icon-btn" id="refresh-targets" aria-label="刷新目标" title="刷新目标"><svg class="icon"><use href="#refresh"/></svg></button></div>
       <label id="search-box" class="search-box"><svg class="icon"><use href="#search"/></svg><input id="target-search" type="search" aria-label="搜索任务或路径" placeholder="搜索任务或路径"></label>
       <div id="target-list" class="pane-scroll nav-list"></div>
     </aside>
@@ -53,7 +53,7 @@
         <div class="fields">
           <label for="arguments">命令选项</label><div class="field-row"><input id="arguments" class="mono" autocomplete="off" spellcheck="false" placeholder="留空使用项目默认值"><button id="example" class="secondary">填入示例</button></div>
           <span></span><div id="field-note" class="muted"></div>
-          <label for="config-name">配置名称</label><div class="field-row"><input id="config-name" placeholder="如：本地 Release" maxlength="70"><button id="save" class="secondary" disabled><svg class="icon"><use href="#save"/></svg>保存</button></div>
+          <label for="config-name">配置名称</label><div class="field-row"><input id="config-name" placeholder="如：本地 Release" maxlength="70"><button id="save-config" class="secondary" disabled><svg class="icon"><use href="#save"/></svg>保存</button></div>
         </div>
         <details class="extra"><summary>附加产物路径 <span class="muted">可选</span></summary><label for="extra-paths" class="muted">每行一个工作区相对路径</label><textarea id="extra-paths" rows="2" placeholder="dist/"></textarea></details>
         <section class="command" aria-labelledby="command-title"><div class="command-head"><h4 id="command-title"><svg class="icon"><use href="#terminal"/></svg>命令预览</h4><span class="muted">工作目录 <code id="working-dir"></code></span></div><pre id="command"></pre></section>
@@ -68,9 +68,16 @@
       </div>
     </aside>
   </div>
-  <section class="dock" aria-label="运行面板">
-    <div class="dock-head"><div class="tabs dock-tabs" aria-label="运行面板内容"><button data-dock="output" aria-pressed="true"><svg class="icon"><use href="#terminal"/></svg>输出</button><button data-dock="history" aria-pressed="false">记录 <span id="run-count" class="count"></span></button><button data-dock="artifacts" aria-pressed="false">产物</button></div><button id="stop-run" class="secondary" hidden><svg class="icon"><use href="#stop"/></svg>停止</button><span id="run-status" class="badge"></span></div>
-    <div id="dock-body" class="dock-body"></div>
+  <div id="dock-resize" class="dock-resize" role="separator" tabindex="0" aria-orientation="horizontal" aria-controls="run-dock" aria-label="调整运行区高度" title="拖动或用方向键调整运行区高度"></div>
+  <section id="run-dock" class="dock" aria-label="运行面板">
+    <section class="dock-pane dock-history" aria-labelledby="history-title">
+      <div class="dock-head"><h2 id="history-title">运行记录 <span id="run-count" class="count"></span></h2></div>
+      <div id="run-history" class="dock-body"></div>
+    </section>
+    <section class="dock-pane" aria-label="所选运行的输出与产物">
+      <div class="dock-head"><div class="tabs dock-tabs" aria-label="运行详情"><button data-dock="output" aria-pressed="true"><svg class="icon"><use href="#terminal"/></svg>输出</button><button data-dock="artifacts" aria-pressed="false">产物</button></div><button id="stop-run" class="secondary" hidden><svg class="icon"><use href="#stop"/></svg>停止</button><div id="run-context" class="run-context" hidden><span id="run-ref" class="mono"></span><span id="run-status" class="badge"></span></div></div>
+      <div id="dock-body" class="dock-body"></div>
+    </section>
   </section>
   <footer><span><i></i>本地演示 · 不执行命令</span><span id="footer-context"></span></footer>
   <dialog id="confirm"><div class="dialog-body"><h2>确认 Gradle 任务</h2><p>核对任务、工作目录和启动工具后再开始构建。</p><pre id="confirm-command"></pre><p id="confirm-context"></p><form method="dialog"><button class="secondary" value="cancel">取消</button><button class="primary" value="build">确认构建</button></form></div></dialog>

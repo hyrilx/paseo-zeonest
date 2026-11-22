@@ -42,10 +42,17 @@ const projects = {
       { id: ':shared:allTests', desc: '运行公共测试', group: ':shared' },
     ],
   },
+  cargo: {
+    label: 'hello-rust', family: 'Cargo', root: '~/work/hello-rust', probe: null,
+    toolLabel: 'Cargo + rustc', toolExplanation: '此示例的工具链已检查，目标可以直接从 Cargo.toml 发现。',
+    tools: [{ id: 'rust', name: 'Rust stable · Cargo', origin: 'rustup', path: '~/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo' }],
+    targets: [{ id: 'hello-rust', desc: '编译命令行程序', group: 'Cargo 包' }],
+  },
 };
 const states = Object.fromEntries(Object.entries(projects).map(([key, p]) => [key, {
-  pane: 'editor', nav: 'targets', dock: 'output', query: '', target: p.probe,
-  selected: key === 'vofa' ? 'mise' : '', verified: new Set(), runs: [], view: null,
+  pane: 'editor', nav: 'targets', dock: 'output', query: '', target: p.probe ?? p.targets[0].id,
+  selected: key === 'alkaa' ? '' : p.tools[0].id,
+  verified: new Set(key === 'cargo' ? [p.tools[0].id] : []), runs: [], view: null,
   discovery: /** @type {{ tool: string, args: string, consumed: boolean } | null} */ (null),
   showNew: false, saved: [], drafts: new Map(),
 }]));
@@ -73,6 +80,7 @@ function fieldError() {
 function command() {
   const args = draft().args.trim();
   if (workspace === 'alkaa') return `./gradlew ${state().target}${args ? ` ${args}` : ''}`;
+  if (workspace === 'cargo') return `${selectedTool()?.path ?? 'cargo'} build --package ${state().target} --message-format=json-render-diagnostics${args ? ` ${args}` : ''}`;
   const cmake = selectedTool()?.path || 'cmake';
   if (isProbe()) return `${cmake} -S . -B .zeonest-build/release${args ? ` ${args}` : ''}`;
   return `${cmake} --build .zeonest-build/release --target ${state().target}${args ? ` ${args}` : ''}`;
@@ -82,7 +90,7 @@ function canRun() {
   return !!t && !t.blocked && state().verified.has(t.id) && !busyRun() && !fieldError() && !contextError();
 }
 function contextError() {
-  if (isProbe()) return '';
+  if (!project().probe || isProbe()) return '';
   const found = state().discovery;
   if (found?.tool !== state().selected) return '工具与上次探测不同，请用当前工具重新探测。';
   if (workspace === 'alkaa' && found?.consumed) return '此项目的探测结果只供一次构建，已使用。请重新探测。';
@@ -109,10 +117,10 @@ function pane(name) {
 function renderNav() {
   const s = state();
   const p = project();
-  const items = s.discovery ? p.targets : [];
-  $('target-count').textContent = items.length + 1;
+  const items = s.discovery || !p.probe ? p.targets : [];
+  $('target-count').textContent = items.length + Number(!!p.probe);
   $('search-box').hidden = s.nav === 'saved';
-  $('refresh').hidden = s.nav === 'saved';
+  $('refresh-targets').hidden = s.nav === 'saved';
   $('target-search').value = s.query;
   choices('[data-nav]', 'nav', s.nav);
   if (s.nav === 'saved') {
@@ -120,14 +128,14 @@ function renderNav() {
     return;
   }
   const groups = new Map();
-  const probe = { id: p.probe, desc: workspace === 'vofa' ? '生成构建目录并读取目标' : '读取项目中的可执行任务', group: '发现目标' };
+  const probe = p.probe && { id: p.probe, desc: workspace === 'vofa' ? '生成构建目录并读取目标' : '读取项目中的可执行任务', group: '发现目标' };
   const q = s.query.trim().toLowerCase();
-  for (const t of [probe, ...items]) {
+  for (const t of probe ? [probe, ...items] : items) {
     if (q && !`${t.id} ${t.desc} ${t.group}`.toLowerCase().includes(q)) continue;
     if (!groups.has(t.group)) groups.set(t.group, []);
     groups.get(t.group).push(t);
   }
-  const hint = !s.discovery ? '先执行探测，构建目标会显示在这里。' : workspace === 'alkaa' ? '本例只展示部分任务；每次探测最多保留 256 项。' : '';
+  const hint = !p.probe ? '' : !s.discovery ? '先执行探测，构建目标会显示在这里。' : workspace === 'alkaa' ? '本例只展示部分任务；每次探测最多保留 256 项。' : '';
   $('target-list').innerHTML = [...groups].map(([group, list]) => `<p class="group-label">${esc(group)}</p>${list.map((t) => `<button class="nav-row" data-target="${esc(t.id)}" aria-pressed="${t.id === s.target}">${icon(t === probe ? 'probe' : 'box')}<span><strong class="mono">${esc(t.id)}</strong><small>${esc(t.desc)}</small></span>${s.showNew && t !== probe ? '<span class="badge good">新</span>' : ''}</button>`).join('')}`).join('') + (groups.size ? '' : '<p class="nav-hint">没有匹配的目标。</p>') + (hint ? `<p class="nav-hint">${hint}</p>` : '');
 }
 function renderNotice() {
@@ -144,6 +152,7 @@ function renderNotice() {
   else if (last?.status === '失败') notice = ['error', '上次运行失败', '查看输出中的错误，修改配置后可以重试。', '查看输出', 'output'];
   else if (newTargetsReady()) notice = ['good', '探测完成，目标已刷新', workspace === 'vofa' ? '新增 example 和 player。选择其中一个才能开始构建。' : '已有可选 Gradle 任务。选择任务后再确认运行。', '再次探测', 'repeat'];
   else if (isProbe()) notice = ['', '可以执行探测', '探测用于获取目标，不会开始构建。'];
+  else if (!project().probe) notice = ['good', '可以直接构建', '目标已从 Cargo.toml 发现，工具链已检查。'];
   else notice = ['good', '工具链已就绪', workspace === 'alkaa' ? '构建前会再次展示命令、工作目录和启动工具。' : '检查命令后，点击顶部「构建目标」即可开始。'];
   const [tone, title, body, label, action] = notice;
   const status = busyRun() ? '运行中' : fieldError() ? '修正选项' : t?.blocked ? '工具不兼容' : !t ? '待选工具' : !s.verified.has(t.id) ? '待检查工具' : contextError() ? '需要重新探测' : newTargetsReady() ? '目标已刷新' : '可运行';
@@ -170,7 +179,7 @@ function renderFields() {
   $('field-note').textContent = error || (d.inherited ? '已带入本次探测的选项，可编辑。' : isProbe() ? '只应用于本次探测。' : '只应用于当前目标。');
   $('arguments').setAttribute('aria-invalid', String(!!error));
   $('arguments').setAttribute('aria-describedby', 'field-note');
-  $('save').disabled = !d.name.trim() || !!error;
+  $('save-config').disabled = !d.name.trim() || !!error;
   $('command').textContent = command();
   renderNotice();
 }
@@ -181,7 +190,7 @@ function renderEditor() {
   $('current-target').textContent = s.target;
   $('editor-title').textContent = s.target;
   $('editor-icon').innerHTML = `<use href="#${isProbe() ? 'probe' : 'box'}"/>`;
-  $('source').textContent = isProbe() ? (workspace === 'vofa' ? 'CMakeLists.txt · CMake File API' : 'gradle/wrapper/gradle-wrapper.properties') : (workspace === 'vofa' ? `File API · ${p.targets.find((t) => t.id === s.target).desc}` : '本次探测结果 · Gradle Wrapper');
+  $('source').textContent = workspace === 'cargo' ? 'Cargo.toml · 包' : isProbe() ? (workspace === 'vofa' ? 'CMakeLists.txt · CMake File API' : 'gradle/wrapper/gradle-wrapper.properties') : (workspace === 'vofa' ? `File API · ${p.targets.find((t) => t.id === s.target).desc}` : '本次探测结果 · Gradle Wrapper');
   $('target-type').textContent = isProbe() ? '探测' : '构建';
   $('working-dir').textContent = p.root;
   ['arguments', 'config-name', 'extra-paths'].forEach((id, i) => { $(id).value = draft()[['args', 'name', 'paths'][i]]; });
@@ -205,19 +214,27 @@ function renderTools() {
 function renderDock() {
   const s = state();
   choices('[data-dock]', 'dock', s.dock);
-  $('stop-run').hidden = !busyRun();
   $('run-count').textContent = s.runs.length;
   const r = s.runs.find((run) => run.id === s.view);
   const tone = (run) => run?.status === '成功' ? 'good' : run?.status === '失败' ? 'error' : '';
-  $('run-status').textContent = r ? `${r.kind} · ${r.status}` : '尚未运行';
+  $('stop-run').hidden = r?.status !== '运行中';
+  $('run-context').hidden = !r;
+  $('run-ref').textContent = r ? `#${r.id}` : '';
+  $('run-status').textContent = r ? `${r.kind} · ${r.status}` : '';
   $('run-status').className = `badge ${tone(r)}`;
-  if (s.dock === 'history') {
-    $('dock-body').innerHTML = s.runs.length ? s.runs.map((item) => `<button class="history-row" data-run="${item.id}"><span><strong class="mono">${esc(item.target)}</strong> <small>${item.kind} · #${item.id}</small></span><span class="badge ${tone(item)}">${item.status}</span></button>`).join('') : '<span class="muted">此工作区还没有运行记录。</span>';
-  } else if (s.dock === 'artifacts') {
-    $('dock-body').innerHTML = r?.artifacts.length ? `<ul class="artifact-list">${r.artifacts.map((path) => `<li><code>${esc(path)}</code></li>`).join('')}</ul>` : '<span class="muted">这次运行没有产物。</span>';
-  } else {
-    $('dock-body').innerHTML = r ? r.lines.map(([label, line]) => `<div class="log-line"><span class="log-label">${label}</span><span class="${label === '失败' ? 'error' : label === '完成' ? 'good' : ''}">${esc(line)}</span></div>`).join('') : '<span class="muted">执行探测或构建后，输出会保留在这里。</span>';
-  }
+  const history = $('run-history');
+  const focused = history.contains(document.activeElement) ? document.activeElement.getAttribute('data-run') : null;
+  history.innerHTML = s.runs.length ? s.runs.map((item) => `<button class="history-row" data-run="${item.id}" aria-pressed="${item === r}">${icon(item.kind === '探测' ? 'probe' : 'box')}<span class="history-main"><strong class="mono">${esc(item.target)}</strong> <small>#${item.id} · ${item.kind}</small></span><span class="badge ${tone(item)}">${item.status}</span></button>`).join('') : '<p class="history-empty muted">还没有运行记录。</p>';
+  if (focused) history.querySelector(`[data-run="${focused}"]`)?.focus({ preventScroll: true });
+  const detail = $('dock-body');
+  let content;
+  if (!r) content = '<span class="muted">运行后，在左侧选择记录查看详情。</span>';
+  else if (s.dock === 'artifacts') content = r.artifacts.length ? `<ul class="artifact-list">${r.artifacts.map((path) => `<li><code>${esc(path)}</code></li>`).join('')}</ul>` : '<span class="muted">这次运行没有产物。</span>';
+  else content = r.lines.map(([label, line]) => `<div class="log-line"><span class="log-label">${label}</span><span class="${label === '失败' ? 'error' : label === '完成' ? 'good' : ''}">${esc(line)}</span></div>`).join('');
+  detail.innerHTML = content;
+  const detailKey = `${workspace}:${r?.id ?? ''}:${s.dock}`;
+  if (detail.dataset.view !== detailKey) detail.scrollTop = 0;
+  detail.dataset.view = detailKey;
 }
 function render() {
   pane(state().pane);
@@ -252,6 +269,7 @@ function startRun() {
   s.dock = 'output';
   s.pane = 'editor';
   render();
+  $('run-history').scrollTop = 0;
   setTimeout(() => {
     if (r.status !== '运行中') return;
     if (key === 'vofa' && probe && args.includes('--preset missing')) {
@@ -266,10 +284,15 @@ function startRun() {
         r.lines.push(['stdout', key === 'vofa' ? 'Configuring done · Generating done' : 'BUILD SUCCESSFUL · tasks --all'], ['完成', fresh ? `目标已刷新 · 新增 ${projects[key].targets.length} 项${key === 'alkaa' ? '（演示节选）' : ''}` : '目标已刷新 · 没有新增项']);
       } else {
         if (key === 'vofa') r.artifacts = [`.zeonest-build/release/${r.target}`];
+        if (key === 'cargo') {
+          const profile = args.split(/\s+/).includes('--release') ? 'release' : 'debug';
+          r.artifacts = [`target/${profile}/${r.target}`];
+          r.lines.push(['stdout', `Compiling ${r.target}`], ['stdout', `Finished \`${profile === 'debug' ? 'dev' : 'release'}\` profile`]);
+        } else r.lines.push(['stdout', key === 'vofa' ? `Built target ${r.target}` : 'BUILD SUCCESSFUL']);
         if (r.target === ':app:assembleDebug') r.artifacts = ['app/build/outputs/apk/debug/app-debug.apk'];
         if (r.target === ':desktop-app:createDistributable') r.artifacts = ['desktop-app/build/compose/binaries/main/app/'];
         r.artifacts = [...new Set([...r.artifacts, ...paths])];
-        r.lines.push(['stdout', key === 'vofa' ? `Built target ${r.target}` : 'BUILD SUCCESSFUL'], ['完成', `退出码 0 · ${r.artifacts.length} 个产物`]);
+        r.lines.push(['完成', `退出码 0 · ${r.artifacts.length} 个产物`]);
       }
     }
     if (workspace === key) {
@@ -287,10 +310,61 @@ function applyTheme() {
   $('theme').title = label;
   $('theme').innerHTML = icon(theme === 'dark' ? 'sun' : 'moon');
 }
+const divider = $('dock-resize');
+const runDock = $('run-dock');
+let preferredHeight;
+let drag;
+function dockBounds() {
+  const available = $('work-area').offsetHeight + runDock.offsetHeight;
+  const min = Math.min(104, Math.floor(available * .45));
+  const max = Math.max(min, Math.min(Math.floor(available * .62), available - 156));
+  return { min, max };
+}
+function resizeDock(height) {
+  const { min, max } = dockBounds();
+  const current = Math.min(max, Math.max(min, Math.round(height)));
+  runDock.style.setProperty('--dock-height', `${current}px`);
+  divider.setAttribute('aria-valuemin', min);
+  divider.setAttribute('aria-valuemax', max);
+  divider.setAttribute('aria-valuenow', current);
+  divider.setAttribute('aria-valuetext', `${current} 像素`);
+}
+function layoutDock() {
+  if (preferredHeight === undefined) runDock.style.removeProperty('--dock-height');
+  resizeDock(preferredHeight ?? runDock.offsetHeight);
+}
+function setDockHeight(height) {
+  resizeDock(height);
+  preferredHeight = runDock.offsetHeight;
+}
+divider.addEventListener('pointerdown', (e) => {
+  if (!e.isPrimary || e.button !== 0) return;
+  e.preventDefault();
+  divider.focus();
+  divider.setPointerCapture(e.pointerId);
+  drag = { id: e.pointerId, y: e.clientY, height: runDock.offsetHeight };
+  divider.dataset.dragging = '';
+});
+divider.addEventListener('pointermove', (e) => {
+  if (drag?.id === e.pointerId) setDockHeight(drag.height + drag.y - e.clientY);
+});
+divider.addEventListener('lostpointercapture', (e) => {
+  if (drag?.id !== e.pointerId) return;
+  drag = undefined;
+  delete divider.dataset.dragging;
+});
+divider.addEventListener('keydown', (e) => {
+  if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) return;
+  e.preventDefault();
+  const { min, max } = dockBounds();
+  const step = e.shiftKey ? 64 : 16;
+  setDockHeight(e.key === 'Home' ? min : e.key === 'End' ? max : runDock.offsetHeight + (e.key === 'ArrowUp' ? step : -step));
+});
+window.addEventListener('resize', layoutDock);
 $('theme').addEventListener('click', () => { theme = theme === 'dark' ? 'light' : 'dark'; applyTheme(); });
 $('scenario').addEventListener('change', (e) => { workspace = e.target.value; render(); });
 $('target-search').addEventListener('input', (e) => { state().query = e.target.value; renderNav(); });
-$('refresh').addEventListener('click', () => {
+$('refresh-targets').addEventListener('click', () => {
   state().query = '';
   renderNav();
   $('target-search').focus();
@@ -304,7 +378,7 @@ $('notice').addEventListener('click', (e) => {
   }
   if (action === 'probe') { selectTarget(project().probe); $('editor-title').focus(); }
   if (action === 'repeat') startRun();
-  if (action === 'output') { state().dock = 'output'; renderDock(); document.querySelector('[data-dock="output"]').focus(); }
+  if (action === 'output') { state().view = state().runs[0]?.id ?? null; state().dock = 'output'; renderDock(); document.querySelector('[data-dock="output"]').focus(); }
 });
 $('verify').addEventListener('click', () => {
   if ($('verify').disabled) return;
@@ -314,7 +388,7 @@ $('verify').addEventListener('click', () => {
   if (canRun()) $('primary').focus();
 });
 $('example').addEventListener('click', () => {
-  draft().args = workspace === 'alkaa' ? '--offline' : isProbe() ? '-DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/homebrew/opt/fmt' : '--parallel 4';
+  draft().args = workspace === 'cargo' ? '--release' : workspace === 'alkaa' ? '--offline' : isProbe() ? '-DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/homebrew/opt/fmt' : '--parallel 4';
   draft().inherited = false;
   renderEditor();
 });
@@ -325,7 +399,7 @@ $('example').addEventListener('click', () => {
     renderFields();
   });
 });
-$('save').addEventListener('click', () => {
+$('save-config').addEventListener('click', () => {
   const s = state();
   const snapshot = { ...draft(), name: draft().name.trim(), target: s.target, tool: s.selected };
   const existing = s.saved.findIndex((item) => item.name === snapshot.name && item.target === snapshot.target);
@@ -348,7 +422,7 @@ $('primary').addEventListener('click', () => {
 $('confirm').addEventListener('close', () => { if ($('confirm').returnValue === 'build') startRun(); });
 $('stop-run').addEventListener('click', () => {
   const r = busyRun();
-  if (!r) return;
+  if (!r || r.id !== state().view) return;
   r.status = '已停止';
   r.lines.push(['状态', '用户停止了本次运行。']);
   state().view = r.id;
@@ -376,8 +450,9 @@ document.addEventListener('click', (e) => {
     $('tool-list').querySelector(`[data-tool="${tool}"]`).focus();
   }
   if (dock) { state().dock = dock; renderDock(); }
-  if (run) { state().view = Number(run); state().dock = 'output'; renderDock(); document.querySelector('[data-dock="output"]').focus(); }
+  if (run) { state().view = Number(run); renderDock(); }
 });
 $('editor-title').tabIndex = -1;
 applyTheme();
 render();
+layoutDock();
