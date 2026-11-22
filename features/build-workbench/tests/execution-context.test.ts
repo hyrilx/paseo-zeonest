@@ -136,7 +136,10 @@ test("npm/pnpm refuse out-of-scope installation roots and scope-changing switche
     rmSync(join(workspace.root, ".npmrc"));
     if (manager === "npm") assert.throws(() => envOnly.preview(workspace, selected), /宿主环境.*NPM_CONFIG_WORKSPACE/u);
     else {
-      put(".npmrc", "prefix=~/global\n");
+      put(".npmrc", 'prefix=${HOME}/.npm-global\n');
+      assert.equal(w.preview(workspace, selected).command.cwd, "packages/alpha");
+      await w.verify(workspace, selected);
+      put(`${mono}/.npmrc`, "prefix=../not-the-workspace\n");
       assert.throws(() => w.preview(workspace, selected), /\.npmrc.*prefix.*pnpm/u);
       rmSync(join(root, ".npmrc"));
     }
@@ -144,6 +147,76 @@ test("npm/pnpm refuse out-of-scope installation roots and scope-changing switche
   put("npm-mono/standalone/package.json", { name: "standalone", scripts });
   const standalone = { id: "standalone", root: join(root, "npm-mono/standalone") };
   assert.equal(w.discover(standalone).targets.find(({ name }) => name === "build")?.project, ".");
+});
+
+test("pnpm accepts local lock layouts and checks effective settings at the managed install and script boundaries", { skip: process.platform === "win32" }, async (t) => {
+  const { root, put } = fixture(t);
+  const workspace = { id: "mono", root: join(root, "mono") };
+  const makeWorkspace = (settings = "") => put("mono/pnpm-workspace.yaml", `packages: ['packages/*']\n${settings}\n`);
+  const manager = put("bin/pnpm", `
+const fs = require('node:fs');
+const mode = process.argv[2];
+if (mode === '--version') console.log('12.21.0');
+else fs.writeFileSync(mode === 'install' ? 'prepared' : 'built', process.cwd());`, true);
+  put("mono/package.json", { name: "root", packageManager: "pnpm@12.21.0", scripts: { build: "fixture" } });
+  for (const name of ["app", "lib"]) put(`mono/packages/${name}/package.json`, { name, scripts: { build: "fixture" } });
+  const env = { HOME: join(root, "home"), PATH: [dirname(manager), dirname(process.execPath)].join(delimiter), XDG_CONFIG_HOME: join(root, "config") };
+  put("home/.npmrc", 'prefix=${HOME}/.npm-global\n');
+  const open = (id: string, extra: NodeJS.ProcessEnv = {}) => {
+    const w = new Workbench(join(root, `state-${id}`), { ...env, ...extra });
+    t.after(() => w.close());
+    return w;
+  };
+  const w = open("default");
+  const select = (owner: Workbench, project = "packages/app") => {
+    const target = { adapter: "pnpm", project, name: "build" } as const;
+    return config(owner, workspace, target, owner.tools(workspace, target).candidates.find(({ paths }) => paths[1] === manager)?.id);
+  };
+  for (const shared of [true, false]) {
+    makeWorkspace(`sharedWorkspaceLockfile: ${shared}\nrecursiveInstall: true\nenableGlobalVirtualStore: false`);
+    const c = select(w);
+    const { command } = w.preview(workspace, c);
+    assert.equal(command.cwd, "packages/app");
+    assert.deepEqual(command.preparation?.map(({ cwd }) => cwd), ["."]);
+    await w.verify(workspace, c);
+    assert.equal((await finish(w, workspace, submit(w, workspace, c).id)).run.status, "success");
+  }
+  assert.equal(readFileSync(join(workspace.root, "prepared"), "utf8"), workspace.root);
+  assert.equal(readFileSync(join(workspace.root, "packages/app/built"), "utf8"), join(workspace.root, "packages/app"));
+  assert.throws(() => readFileSync(join(workspace.root, "packages/lib/built")), /ENOENT/u);
+
+  makeWorkspace("recursiveInstall: false");
+  assert.equal(w.preview(workspace, select(w, ".")).command.cwd, ".");
+  assert.throws(() => w.preview(workspace, select(w)), /recursiveInstall.*可能跳过所选成员/u);
+  await assert.rejects(() => w.verify(workspace, select(w)), /recursiveInstall.*可能跳过所选成员/u);
+  const override = open("recursive", { PNPM_CONFIG_RECURSIVE_INSTALL: "true", pnpm_config_global: "false" });
+  assert.doesNotThrow(() => override.preview(workspace, select(override)));
+  await override.verify(workspace, select(override));
+  makeWorkspace(`lockfileDir: ${JSON.stringify(workspace.root)}\nvirtualStoreType: project`);
+  assert.doesNotThrow(() => w.preview(workspace, select(w)));
+  put("config/pnpm/config.yaml", "recursiveInstall: false\n");
+  makeWorkspace("recursiveInstall: true");
+  assert.doesNotThrow(() => w.preview(workspace, select(w)));
+
+  const outside = join(root, "outside");
+  for (const [settings, error] of [
+    ["global: true", /global.*执行范围/u],
+    [`lockfileDir: ${JSON.stringify(outside)}`, /lockfileDir.*原生依赖布局/u],
+    ["enableGlobalVirtualStore: true", /enableGlobalVirtualStore.*执行范围/u],
+    ["virtualStoreType: global", /virtualStoreType.*项目内/u],
+    ["sharedWorkspaceLockfile: false\npackageConfigs:\n  app:\n    modulesDir: ../outside", /packageConfigs.*modulesDir/u],
+    ["sharedWorkspaceLockfile: false\npackageConfigs:\n  - match: [app]\n    modulesDir: ../outside", /packageConfigs.*modulesDir/u],
+    ["include:\n  ./settings.yaml: [lockfileDir]", /include.*暂不支持/u],
+  ] as const) {
+    makeWorkspace(settings);
+    assert.throws(() => w.preview(workspace, select(w)), error);
+  }
+  makeWorkspace();
+  const scope = open("scope", { NPM_CONFIG_WORKSPACE_DIR: outside });
+  assert.throws(() => scope.preview(workspace, select(scope)), /NPM_CONFIG_WORKSPACE_DIR/u);
+  const redirect = open("redirect", { pnpm_config_lockfile_dir: outside, pnpm_config_verify_deps_before_run: "install" });
+  await assert.rejects(() => redirect.verify(workspace, select(redirect)), /pnpm_config_lockfile_dir/u);
+  assert.throws(() => readFileSync(join(outside, "pnpm-lock.yaml")), /ENOENT/u);
 });
 
 test("pnpm normalizes native configuration, pins the verified manager and rechecks script scope after install", { skip: process.platform === "win32" }, async (t) => {

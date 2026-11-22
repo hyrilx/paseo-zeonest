@@ -14,7 +14,7 @@ import { cmakeBuildDir } from "./cmake";
 import { object, tauriConfig, type ProjectTarget } from "./projects";
 import { resolveTauriCli, type TauriCliRequest } from "./tauri-cli";
 
-export type Tool = { candidate: Candidate; signature: string; executable: string; env: NodeJS.ProcessEnv; bindings?: Bindings; overrides?: string[]; tauriCargoCli?: string; gradlePersistent?: boolean };
+export type Tool = { candidate: Candidate; signature: string; executable: string; env: NodeJS.ProcessEnv; bindings?: Bindings; overrides?: string[]; tauriCargoCli?: string; gradlePersistent?: boolean; pnpmMajor?: number };
 type VerifiedTool = { version: string; pnpmMajor?: number };
 export type Checks = Map<string, VerifiedTool>;
 
@@ -43,7 +43,7 @@ function makeTool(t: ProjectTarget, checked: Checks, paths: string[], executable
     ...[...new Set([...paths, ...Object.values(bindings ?? {})])].map(identity)]));
   const check = checked.get(signature);
   const runEnv = check?.pnpmMajor === undefined ? env : fixedPnpmEnvironment(env, check.pnpmMajor);
-  return { candidate: { id, paths, label, requirement: requirement(t), version: check?.version }, executable, env: runEnv, signature, bindings, overrides };
+  return { candidate: { id, paths, label, requirement: requirement(t), version: check?.version }, executable, env: runEnv, signature, bindings, overrides, pnpmMajor: check?.pnpmMajor };
 }
 
 function rustPairs(t: ProjectTarget, env: NodeJS.ProcessEnv) {
@@ -274,32 +274,154 @@ const envOption = (name: string, nativePnpm: boolean) => {
   if (nativePnpm && key.startsWith("pnpm_config_")) return key.slice("pnpm_config_".length);
 };
 const runtimeSetting = (name: string) => /^(?:usenodeversion|nodeversionforrun|nodeoptionsforrun)$/u.test(configKey(name));
+const pnpmSelectors = /^(?:workspace|workspaceroot|workspacedir|workspaceprefix|workspacepackages|dir|filter|filterprod|prefix)$/u;
+const pnpmLayout = /^(?:lockfiledir|modulesdir|virtualstoredir|globalvirtualstoredir)$/u;
+const pnpmYamlSwitch = /^(?:global|ignoreWorkspace|recursive|lockfileOnly|recursiveInstall|sharedWorkspaceLockfile|enableGlobalVirtualStore|virtualStoreType)$/u;
+const pnpmSwitch = /^(?:global|ignoreworkspace|recursive|lockfileonly|recursiveinstall|sharedworkspacelockfile|enableglobalvirtualstore|virtualstoretype)$/u;
+const pnpmYamlLayout = /^(?:lockfileDir|modulesDir|virtualStoreDir|globalVirtualStoreDir)$/u;
+const pnpmNativeEnv = /^(?:pnpm_config_[a-z0-9]+(?:_[a-z0-9]+)*|PNPM_CONFIG_[A-Z0-9]+(?:_[A-Z0-9]+)*)$/u;
+
+function managerFile(cwd: string, file: string) {
+  try { return readBounded(realpathSync(resolve(cwd, file)), 512 * 1024); }
+  catch (error) { if (!missing(error)) throw new Error(`无法验证包管理器配置：${file}`, { cause: error }); }
+}
+
+function* npmrcEntries(cwd: string, file: string) {
+  for (const line of managerFile(cwd, file)?.split(/\r?\n/u) ?? []) {
+    const entry = /^\s*([\w-]+(?:\[\])?)\s*=\s*(.*?)\s*$/u.exec(line);
+    if (entry?.[1] !== undefined && entry[2] !== undefined) yield [entry[1], entry[2]] as const;
+  }
+}
+
+function assertPnpmConfig(root: string, t: ProjectTarget, tool: Tool, phase: "install" | "script", cwd: string, userHome: string, config: Map<string, string | undefined>) {
+  const install = resolveWithin(root, t.install?.cwd ?? t.cwd);
+  const modern = tool.pnpmMajor === undefined || tool.pnpmMajor >= 11;
+  const skipMember = phase === "install" && t.install?.workspace && install !== resolveWithin(root, t.cwd);
+  const reject = (source: string, label: string, reason: string) => {
+    throw new Error(`${source} 的 ${label} 可改变 pnpm 执行范围；${reason}`);
+  };
+  const check = (name: string, source: string, label = name) => {
+    if (runtimeSetting(name)) throw new Error(`${source} 可能替换脚本 Node，无法验证所选运行时`);
+    if (pnpmSelectors.test(configKey(name))) reject(source, label, "请移除目标或目录覆盖后重试");
+  };
+  type Setting = { source: string; label: string; value: unknown };
+  const effective = new Map<string, Setting>();
+  const iniBoolean = (value: string) => value === "true" ? true : value === "false" ? false : value;
+  const checkSwitch = (key: string, { source, label, value }: Setting) => {
+    if (key === "virtualstoretype") {
+      if (value !== "project") reject(source, label, "只支持项目内的虚拟存储");
+      return;
+    }
+    if (typeof value !== "boolean") reject(source, label, "请使用明确的布尔值 true 或 false");
+    if (key === "sharedworkspacelockfile" || (key === "recursiveinstall" && (!skipMember || value === true))) return;
+    if (key === "recursiveinstall") reject(source, label, "从根目录准备依赖可能跳过所选成员，请启用递归安装");
+    if (value === true) reject(source, label, "请使用本地工作区及默认安装范围");
+  };
+  const scan = (file: string, user = false) => {
+    for (const [name, value] of npmrcEntries(cwd, file)) {
+      const key = configKey(name);
+      // A user npm prefix is for global npm installs. Modern pnpm doesn't
+      // read it, and it doesn't select the local install root in legacy mode.
+      if (user && key === "prefix") continue;
+      check(name, file);
+      if (pnpmLayout.test(key)) reject(file, name, "无法确认兼容配置指定的依赖布局");
+      if (!pnpmSwitch.test(key)) continue;
+      const setting = { source: file, label: name, value: iniBoolean(value) };
+      if (!modern) effective.set(key, setting);
+      else if (key !== "recursiveinstall" && key !== "sharedworkspacelockfile") checkSwitch(key, setting);
+    }
+  };
+  const configDir = tool.env.XDG_CONFIG_HOME ? join(tool.env.XDG_CONFIG_HOME, "pnpm") :
+    join(userHome, process.platform === "darwin" ? "Library/Preferences/pnpm" : ".config/pnpm");
+  const global = readYaml(managerFile(cwd, join(configDir, "config.yaml")), "全局 pnpm config.yaml");
+  const project = readYaml(readText(root, at(t.install?.cwd ?? t.cwd, "pnpm-workspace.yaml")), "pnpm-workspace.yaml");
+  function readYaml(text: string | undefined, source: string) {
+    try { return text === undefined ? {} : object(yaml(text, { maxAliasCount: 0 })); }
+    catch { throw new Error(`无法读取 ${source} 的 pnpm 配置`); }
+  }
+  function record(doc: Record<string, unknown>, source: string) {
+    for (const [name, value] of Object.entries(doc)) {
+      const key = configKey(name);
+      check(name, source);
+      // Native YAML settings are camelCase. An ignored spelling must not mask
+      // a value from the other YAML file or from the environment.
+      if (pnpmYamlSwitch.test(name) || pnpmYamlLayout.test(name)) effective.set(key, { source, label: name, value });
+    }
+  }
+  record(global, "全局 pnpm config.yaml");
+  scan(config.get("npm_config_globalconfig") ?? join(dirname(dirname(tool.executable)), "etc/npmrc"));
+  scan(join(configDir, "rc"));
+  scan(config.get("npm_config_userconfig") ?? join(userHome, ".npmrc"), true);
+  if (config.get("pnpm_config_userconfig")) scan(config.get("pnpm_config_userconfig")!, true);
+  if (config.get("pnpm_config_globalconfig")) scan(config.get("pnpm_config_globalconfig")!);
+  scan(join(install, ".npmrc"));
+  if (cwd !== install) scan(join(cwd, ".npmrc"));
+  record(project, "pnpm-workspace.yaml");
+  if (tool.pnpmMajor === undefined || tool.pnpmMajor >= 12) {
+    for (const authorized of Object.values(object(project.include))) {
+      if (authorized === "*" || (Array.isArray(authorized) && authorized.some((name: unknown) => typeof name === "string" &&
+        (name === "packages" || name === "packageConfigs" || pnpmSelectors.test(configKey(name)) || pnpmLayout.test(configKey(name)) || pnpmSwitch.test(configKey(name)) || runtimeSetting(name))))) {
+        reject("pnpm-workspace.yaml", "include", "暂不支持从其他文件或配置依赖委托工作区成员或安装范围");
+      }
+    }
+  }
+  const environment = new Map<string, Setting>();
+  for (const [label, value] of Object.entries(tool.env)) if (value !== undefined) {
+    const option = envOption(label, true);
+    if (!option) continue;
+    const key = configKey(option);
+    check(option, "宿主环境", label);
+    if (pnpmLayout.test(key) || pnpmSwitch.test(key)) {
+      const setting = { source: "宿主环境", label, value: iniBoolean(value) };
+      if (modern ? pnpmNativeEnv.test(label) : label.toLowerCase().startsWith("npm_config_")) {
+        const other = environment.get(key);
+        if (other && other.value !== setting.value) reject(setting.source, label, "同一选项有多个不一致的环境变量");
+        environment.set(key, setting);
+      } else if (pnpmLayout.test(key)) reject(setting.source, label, "无法确认兼容环境变量指定的依赖布局");
+      else if (key !== "recursiveinstall" && key !== "sharedworkspacelockfile") checkSwitch(key, setting);
+    }
+  }
+  for (const [key, setting] of environment) effective.set(key, setting);
+  const shared = effective.get("sharedworkspacelockfile")?.value !== false;
+  for (const [key, setting] of effective) {
+    if (pnpmSwitch.test(key)) checkSwitch(key, setting);
+    else if (!(key === "lockfiledir" && shared && setting.value === install)) {
+      reject(setting.source, setting.label, "只支持在已确认的安装根或其成员中使用原生依赖布局");
+    }
+  }
+  // Separate lockfiles activate per-package layout, including redirected
+  // modules directories. Do not turn this into a second membership resolver.
+  const memberSettings = project.packageConfigs ?? global.packageConfigs;
+  const memberEntries: unknown[] = Array.isArray(memberSettings) ? memberSettings : Object.values(object(memberSettings));
+  if (!shared) for (const entry of memberEntries) {
+    for (const [name, value] of Object.entries(object(entry))) {
+      const source = "pnpm-workspace.yaml packageConfigs";
+      check(name, source);
+      if (pnpmLayout.test(configKey(name))) reject(source, name, "无法确认成员使用自定义目录后的依赖布局");
+      if (pnpmSwitch.test(configKey(name))) checkSwitch(configKey(name), { source, label: name, value });
+    }
+  }
+}
+
 export function assertJsConfig(root: string, t: ProjectTarget, tool: Tool, phase: "install" | "script") {
   const { env } = tool;
   const cwd = resolveWithin(root, phase === "install" ? t.install?.cwd ?? t.cwd : t.cwd);
-  const manager = t.tauri?.manager ?? t.adapter;
   const config = new Map(Object.entries(env).map(([name, value]) => [name.toLowerCase(), value]));
-  const scopeSetting = (name: string) => (manager === "npm" ? /^(?:workspace|workspaces|includeworkspaceroot|prefix|global|location)$/u :
-    /^(?:workspace|workspaceroot|workspacedir|workspaceprefix|workspacepackages|ignoreworkspace|dir|filter|filterprod|recursive|recursiveinstall|lockfiledir|lockfileonly|sharedworkspacelockfile|modulesdir|virtualstoredir|enableglobalvirtualstore|globalvirtualstoredir|global|prefix)$/u).test(configKey(name));
+  const userHome = env.HOME || homedir();
+  if ((t.tauri?.manager ?? t.adapter) === "pnpm") return assertPnpmConfig(root, t, tool, phase, cwd, userHome, config);
   const check = (name: string, source: string, label = name) => {
     if (runtimeSetting(name)) throw new Error(`${source} 可能替换脚本 Node，无法验证所选运行时`);
-    if (scopeSetting(name)) throw new Error(`${source} 的 ${label} 可改变 ${manager} 执行范围；请在工作台选择目标，移除此覆盖后重试`);
+    if (/^(?:workspace|workspaces|includeworkspaceroot|prefix|global|location)$/u.test(configKey(name))) {
+      throw new Error(`${source} 的 ${label} 可改变 npm 执行范围；请在工作台选择目标，移除此覆盖后重试`);
+    }
   };
   for (const [label, value] of Object.entries(env)) if (value !== undefined) {
-    const option = envOption(label, manager === "pnpm");
+    const option = envOption(label, false);
     if (option) check(option, "宿主环境", label);
   }
-  const userHome = env.HOME || homedir();
   const scan = (file: string, npmUser = false) => {
-    let text: string;
-    try { text = readBounded(realpathSync(resolve(cwd, file)), 512 * 1024); }
-    catch (error) { if (missing(error)) return; throw new Error(`无法验证包管理器配置：${file}`, { cause: error }); }
     const locations = new Map<string, string>();
-    for (const line of text.split(/\r?\n/u)) {
-      const entry = /^\s*([\w-]+(?:\[\])?)\s*=\s*(.*?)\s*$/u.exec(line);
-      const name = entry?.[1];
-      const value = entry?.[2];
-      if (name === undefined || value === undefined) continue;
+    for (const [name, value] of npmrcEntries(cwd, file)) {
       if (npmUser && name === "prefix") locations.set(name, value);
       else check(name, file);
       if (name === "globalconfig" || name === "userconfig") locations.set(name, value);
@@ -309,31 +431,6 @@ export function assertJsConfig(root: string, t: ProjectTarget, tool: Tool, phase
   const projectFile = join(resolveWithin(root, t.install?.cwd ?? t.cwd), ".npmrc");
   const project = scan(projectFile);
   if (join(cwd, ".npmrc") !== projectFile) scan(join(cwd, ".npmrc"));
-  if (manager === "pnpm") {
-    scan(config.get("npm_config_userconfig") ?? join(userHome, ".npmrc"));
-    scan(config.get("npm_config_globalconfig") ?? join(dirname(dirname(tool.executable)), "etc/npmrc"));
-    for (const key of ["pnpm_config_userconfig", "pnpm_config_globalconfig"]) {
-      const file = config.get(key);
-      if (file) scan(file);
-    }
-    const configDir = env.XDG_CONFIG_HOME ? join(env.XDG_CONFIG_HOME, "pnpm") :
-      join(userHome, process.platform === "darwin" ? "Library/Preferences/pnpm" : ".config/pnpm");
-    scan(join(configDir, "rc"));
-    const checkYaml = (text: string, source: string) => {
-      let keys: string[];
-      try { keys = Object.keys(object(yaml(text, { maxAliasCount: 0 }))); }
-      catch { throw new Error(`无法读取 ${source} 的 pnpm 配置`); }
-      for (const name of keys) check(name, source);
-    };
-    const globalYaml = join(configDir, "config.yaml");
-    let globalText: string | undefined;
-    try { globalText = readBounded(realpathSync(globalYaml), 512 * 1024); }
-    catch (error) { if (!missing(error)) throw new Error("无法读取全局 pnpm config.yaml"); }
-    if (globalText !== undefined) checkYaml(globalText, "全局 pnpm config.yaml");
-    const text = readText(root, at(t.install?.cwd ?? t.cwd, "pnpm-workspace.yaml"));
-    if (text !== undefined) checkYaml(text, "pnpm-workspace.yaml");
-    return;
-  }
   // npm reads its local project before the user's config. A user prefix only
   // controls global installs and the location of the global npmrc in local mode.
   const expand = (value: string) => {
@@ -536,10 +633,12 @@ async function verifyJs(t: ProjectTarget, tool: Tool, owned: Set<OwnedProcess>, 
   const [node, manager] = tool.candidate.paths;
   if (!node || !manager || [node, manager].some(autoInstallRisk)) throw new Error("请选择已安装的 Node 和包管理器。");
   const common = { cwd: tmpdir(), env: tool.env, bindings: tool.bindings, args: ["--version"] };
-  if (root) {
-    assertJsConfig(root, t, tool, "script");
-    if (t.install && t.install.cwd !== t.cwd) assertJsConfig(root, t, tool, "install");
-  }
+  const scope = (selected: Tool) => {
+    if (!root) return;
+    assertJsConfig(root, t, selected, "script");
+    if (t.install && (t.install.workspace || t.install.required.length)) assertJsConfig(root, t, selected, "install");
+  };
+  scope(tool);
   const nv = await checkedCommand({ ...common, executable: node }, owned, accept);
   let mv: string;
   if (managerName === "npm") {
@@ -564,5 +663,8 @@ async function verifyJs(t: ProjectTarget, tool: Tool, owned: Set<OwnedProcess>, 
     throw new Error(`版本不满足依赖安装根 ${t.install?.cwd} 的 Node 或 ${managerName} 声明`);
   }
   const version = `Node ${nv} · ${managerName} ${mv}`;
-  return managerName === "pnpm" ? { version: version + "（脚本使用绑定的 Node）", pnpmMajor: Number(mv.replace(/^v/u, "").split(".")[0]) } : { version };
+  if (managerName !== "pnpm") return { version };
+  const pnpmMajor = Number(mv.replace(/^v/u, "").split(".")[0]);
+  scope({ ...tool, pnpmMajor });
+  return { version: version + "（脚本使用绑定的 Node）", pnpmMajor };
 }
