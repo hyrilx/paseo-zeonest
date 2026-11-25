@@ -8,6 +8,7 @@ import {
   createSamplePromptDraft,
   isPlaceholderActive,
   renderPrompt,
+  renderPromptSegments,
   type PlaceholderValueMap,
 } from "../shared/template";
 
@@ -220,4 +221,48 @@ test("convertPlaceholderType preserves label/description and sample draft render
   assert.equal(converted.type, "checkbox");
   assert.equal(converted.label, sample.placeholders[0]!.label);
   assert.equal(converted.description, sample.placeholders[0]!.description);
+});
+
+test("renderPromptSegments attributes expanded spans and optional lines accurately", () => {
+  const sample = createSamplePromptDraft();
+  const initial = createInitialValues(sample.placeholders);
+  const values: PlaceholderValueMap = {
+    ...initial,
+    target: { text: "auth.ts" },
+  };
+  const result = renderPromptSegments(sample.template, sample.placeholders, values);
+
+  assert.equal(result.text, renderPrompt(sample.template, sample.placeholders, values));
+  assert.equal(result.lines.length, 3);
+
+  // Line 0: literal + target + literal + focus + literal
+  assert.deepEqual(
+    result.lines[0]!.segments.map((seg) => [seg.placeholderKey, seg.text]),
+    [
+      [null, "请帮我审查 "],
+      ["target", "auth.ts"],
+      [null, " 的代码改动，重点关注 "],
+      ["focus", "逻辑正确性、边界条件"],
+      [null, "。"],
+    ],
+  );
+
+  // Line 1: checkbox expansion
+  assert.deepEqual(
+    result.lines[1]!.segments.map((seg) => seg.placeholderKey),
+    ["strict_mode"],
+  );
+
+  // Line 2: optional line include_tests with nested test_framework and test_cases
+  assert.deepEqual(result.lines[2]!.controllingOptionalKeys, ["include_tests"]);
+  assert.deepEqual(
+    result.lines[2]!.segments.map((seg) => [seg.placeholderKey, seg.text]),
+    [
+      [null, "请补充 "],
+      ["test_framework", "node:test"],
+      [null, " 单元测试，重点覆盖 "],
+      ["test_cases", "边界条件与异常路径"],
+      [null, "。"],
+    ],
+  );
 });

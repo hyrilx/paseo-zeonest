@@ -648,9 +648,11 @@ export function PromptManagerHub({
                 <Text style={[styles.emptyCopy, { color: colors.foregroundMuted }]}>
                   {query || activeTag
                     ? "请调整搜索关键词或标签筛选条件。"
-                    : "新建一个模板，使用 {{变量}} 和 {{?可选行}} 定义动态占位符，或一键导入完整示例体验。"}
+                    : layout.compact
+                      ? "新建一个模板，使用 {{变量}} 和 {{?可选行}} 定义动态占位符，或一键导入完整示例体验。"
+                      : "点击上方「新建」或右侧「导入示例模板」开始创建。"}
                 </Text>
-                {!query && !activeTag ? (
+                {!query && !activeTag && layout.compact ? (
                   <View style={styles.headerActions}>
                     <ActionButton
                       colors={colors}

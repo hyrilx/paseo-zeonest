@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Modal as NativeModal, Pressable, StyleSheet, Text, View } from "react-native";
 import type { PluginHostProps } from "@getpaseo/plugin/client";
-import { copyText, Icon, Modal, ScrollView, TextInput, useToast } from "@getpaseo/plugin/client/ui";
+import { copyText, Icon, Modal as PaseoModal, ScrollView, TextInput, useToast } from "@getpaseo/plugin/client/ui";
 import type { PlaceholderDefinition, PromptDraft, PromptRecord, SelectPlaceholder } from "../shared/contracts";
 import {
   analyzeTemplate,
@@ -9,21 +9,119 @@ import {
   isPlaceholderActive,
   placeholderDisplayName,
   renderPrompt,
+  renderPromptSegments,
   resolveSelectItems,
   type PlaceholderSelectValue,
   type PlaceholderValueMap,
+  type RenderedLine,
 } from "../shared/template";
 import type { PromptLibrary } from "./library";
-import { ActionButton, Chip, PlaceholderTypeBadge, SectionCard, ToggleRow, uiStyles, type ThemeColors } from "./ui";
+import {
+  ActionButton,
+  Chip,
+  getPlaceholderSwatch,
+  isDarkSurface,
+  PlaceholderTypeBadge,
+  ToggleRow,
+  uiStyles,
+  type PlaceholderSwatch,
+  type ThemeColors,
+} from "./ui";
 
 const styles = StyleSheet.create({
+  backdropRoot: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+  },
+  backdropScrim: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0, 0, 0, 0.54)",
+  },
+  wideDialog: {
+    width: "94%",
+    maxWidth: 980,
+    height: "84%",
+    maxHeight: 760,
+    borderRadius: 14,
+    borderWidth: 1,
+    overflow: "hidden",
+    elevation: 12,
+    shadowColor: "#000",
+    shadowOpacity: 0.28,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 10 },
+  },
+  pickerDialog: {
+    width: "92%",
+    maxWidth: 580,
+    height: "74%",
+    maxHeight: 620,
+    borderRadius: 14,
+    borderWidth: 1,
+    overflow: "hidden",
+    elevation: 12,
+    shadowColor: "#000",
+    shadowOpacity: 0.28,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 10 },
+  },
+  dialogHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    paddingHorizontal: 18,
+    paddingVertical: 13,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  dialogHeaderLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    flex: 1,
+    minWidth: 0,
+  },
+  dialogTitle: {
+    fontSize: 15,
+    lineHeight: 21,
+    fontWeight: "600",
+    flexShrink: 1,
+  },
   body: {
     flex: 1,
-    minHeight: 280,
-    maxHeight: 560,
+    minHeight: 0,
   },
-  bodyCompact: {
-    maxHeight: 500,
+  splitBody: {
+    flex: 1,
+    minHeight: 0,
+    flexDirection: "row",
+  },
+  configColumn: {
+    flex: 1.15,
+    minWidth: 0,
+    minHeight: 0,
+  },
+  previewColumn: {
+    flex: 0.95,
+    minWidth: 0,
+    minHeight: 0,
+    borderLeftWidth: StyleSheet.hairlineWidth,
+  },
+  columnHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  columnTitle: {
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: "600",
   },
   topBar: {
     flexDirection: "row",
@@ -106,6 +204,13 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 16,
   },
+  accentCard: {
+    borderWidth: 1,
+    borderLeftWidth: 3,
+    borderRadius: 10,
+    padding: 12,
+    gap: 10,
+  },
   cardHeader: {
     flexDirection: "row",
     alignItems: "center",
@@ -115,9 +220,15 @@ const styles = StyleSheet.create({
   cardTitleRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 7,
     flex: 1,
     minWidth: 0,
+  },
+  colorDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    flexShrink: 0,
   },
   cardTitle: {
     fontSize: 13,
@@ -125,10 +236,17 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     flexShrink: 1,
   },
+  keyBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 5,
+    borderWidth: 1,
+  },
   keyMono: {
     fontSize: 11,
     lineHeight: 15,
     fontFamily: "monospace",
+    fontWeight: "600",
   },
   customRow: {
     flexDirection: "row",
@@ -160,10 +278,33 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 8,
     borderWidth: 1,
+    borderLeftWidth: 3,
     borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 9,
-    opacity: 0.65,
+    opacity: 0.62,
+  },
+  legendWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  legendPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  legendText: {
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: "600",
   },
   previewBox: {
     borderWidth: 1,
@@ -177,15 +318,32 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 8,
   },
+  previewLines: {
+    gap: 6,
+  },
+  previewLine: {
+    paddingVertical: 1,
+  },
+  previewOptionalLine: {
+    borderLeftWidth: 3,
+    borderRadius: 4,
+    paddingLeft: 8,
+    paddingRight: 6,
+    paddingVertical: 3,
+  },
   previewText: {
-    fontSize: 13,
-    lineHeight: 20,
+    fontSize: 13.5,
+    lineHeight: 22,
+  },
+  highlightSpan: {
+    fontWeight: "600",
+    borderRadius: 4,
   },
   fallbackCopyInput: {
     borderWidth: 1,
     borderRadius: 8,
     padding: 10,
-    minHeight: 90,
+    minHeight: 100,
     fontSize: 12,
     lineHeight: 18,
     textAlignVertical: "top",
@@ -199,8 +357,15 @@ const styles = StyleSheet.create({
   footerRow: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "flex-end",
+    justifyContent: "space-between",
+    gap: 10,
+    flexWrap: "wrap",
+  },
+  footerButtons: {
+    flexDirection: "row",
+    alignItems: "center",
     gap: 8,
+    marginLeft: "auto",
   },
   emptyState: {
     alignItems: "center",
@@ -242,7 +407,16 @@ function summarizePromptPlaceholders(prompt: PromptDraft): string {
   if (count === 0) return "无占位符";
   const counts: Record<string, number> = {};
   for (const item of analysis.effectivePlaceholders) {
-    const label = item.type === "select" ? (item.multiple ? "多选" : "单选") : item.type === "text" ? "填空" : item.type === "checkbox" ? "勾选" : "可选行";
+    const label =
+      item.type === "select"
+        ? item.multiple
+          ? "多选"
+          : "单选"
+        : item.type === "text"
+          ? "填空"
+          : item.type === "checkbox"
+            ? "勾选"
+            : "可选行";
     counts[label] = (counts[label] ?? 0) + 1;
   }
   return Object.entries(counts)
@@ -393,6 +567,83 @@ function SelectField({
   );
 }
 
+function HighlightedPreviewBody({
+  colors,
+  lines,
+  plainText,
+  swatchMap,
+}: {
+  colors: ThemeColors;
+  lines: readonly RenderedLine[];
+  plainText: string;
+  swatchMap: ReadonlyMap<string, PlaceholderSwatch>;
+}) {
+  if (!plainText) {
+    return (
+      <Text testID="prompt-apply-preview-text" style={[styles.previewText, { color: colors.foregroundMuted }]}>
+        （当前渲染结果为空）
+      </Text>
+    );
+  }
+
+  return (
+    <View style={styles.previewLines} testID="prompt-apply-preview-text">
+      {lines.map((line) => {
+        const optKey = line.controllingOptionalKeys[0];
+        const optSwatch = optKey ? swatchMap.get(optKey) : undefined;
+        const isBlankLine = line.segments.length === 0;
+
+        return (
+          <View
+            key={line.lineIndex}
+            style={[
+              styles.previewLine,
+              optSwatch
+                ? [
+                    styles.previewOptionalLine,
+                    {
+                      borderLeftColor: optSwatch.solid,
+                      backgroundColor: optSwatch.lineBg,
+                    },
+                  ]
+                : null,
+            ]}
+          >
+            <Text selectable style={[styles.previewText, { color: colors.foreground }]}>
+              {isBlankLine
+                ? " "
+                : line.segments.map((segment, segIdx) => {
+                    if (!segment.placeholderKey) {
+                      return <Text key={segIdx}>{segment.text}</Text>;
+                    }
+                    const swatch = swatchMap.get(segment.placeholderKey);
+                    if (!swatch) {
+                      return <Text key={segIdx}>{segment.text}</Text>;
+                    }
+                    return (
+                      <Text
+                        key={segIdx}
+                        testID={`preview-highlight-${segment.placeholderKey}`}
+                        style={[
+                          styles.highlightSpan,
+                          {
+                            backgroundColor: swatch.bg,
+                            color: swatch.fg,
+                          },
+                        ]}
+                      >
+                        {segment.text}
+                      </Text>
+                    );
+                  })}
+            </Text>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
 export function PromptApplyModal({
   library,
   theme,
@@ -407,6 +658,7 @@ export function PromptApplyModal({
   onOpenManager?: () => void;
 }) {
   const { colors } = theme;
+  const dark = useMemo(() => isDarkSurface(colors.surface0), [colors.surface0]);
   const toast = useToast();
   const modalState = useSyncExternalStore(library.subscribeModal, library.getModalState, library.getModalState);
   const listState = useSyncExternalStore(library.subscribeList, library.getListState, library.getListState);
@@ -464,9 +716,18 @@ export function PromptApplyModal({
     return analyzeTemplate(selectedPrompt.template, selectedPrompt.placeholders);
   }, [selectedPrompt]);
 
-  const renderedOutput = useMemo(() => {
-    if (!selectedPrompt) return "";
-    return renderPrompt(selectedPrompt.template, selectedPrompt.placeholders, values);
+  const swatchMap = useMemo(() => {
+    const map = new Map<string, PlaceholderSwatch>();
+    if (!analysis) return map;
+    analysis.effectivePlaceholders.forEach((def, index) => {
+      map.set(def.key, getPlaceholderSwatch(index, dark));
+    });
+    return map;
+  }, [analysis, dark]);
+
+  const renderedResult = useMemo(() => {
+    if (!selectedPrompt) return { text: "", lines: [] as readonly RenderedLine[] };
+    return renderPromptSegments(selectedPrompt.template, selectedPrompt.placeholders, values);
   }, [selectedPrompt, values]);
 
   function selectPromptForApply(prompt: PromptRecord) {
@@ -505,404 +766,527 @@ export function PromptApplyModal({
   if (!open) return null;
 
   const title = selectedPrompt ? `配置 Prompt：${selectedPrompt.name}` : "插入 Prompt";
-  const activeCount = analysis
-    ? analysis.effectivePlaceholders.filter((def) => isPlaceholderActive(def.key, analysis, values)).length
-    : 0;
+  const activePlaceholders = analysis
+    ? analysis.effectivePlaceholders.filter((def) => isPlaceholderActive(def.key, analysis, values))
+    : [];
+  const activeCount = activePlaceholders.length;
+  const twoColumn = !layout.compact && selectedPrompt !== null;
 
-  return (
-    <Modal
-      open={open}
-      title={title}
-      onOpenChange={(nextOpen) => {
-        if (!nextOpen) library.closeApplyModal();
-      }}
-    >
-      <Modal.Content scrollable={false} style={{ backgroundColor: colors.surface0 }} contentContainerStyle={{ padding: 0, gap: 0 }}>
-        <View style={[styles.body, layout.compact && styles.bodyCompact]} testID="prompt-apply-modal-body">
-          {!selectedPrompt ? (
-            <>
-              <View style={[styles.topBar, { borderBottomColor: colors.border }]}>
-                <View style={[styles.searchBox, { backgroundColor: colors.surface1, borderColor: colors.border }]}>
-                  <Icon name="Search" size={15} color={colors.foregroundMuted} />
-                  <TextInput
-                    testID="prompt-apply-search"
-                    accessibilityLabel="搜索 Prompt"
-                    placeholder="搜索 Prompt 名称、标签或内容…"
-                    placeholderTextColor={colors.foregroundMuted}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    value={query}
-                    onChangeText={setQuery}
-                    style={[styles.searchInput, { color: colors.foreground }]}
-                  />
-                  {query ? (
+  const pickerBody = (
+    <>
+      <View style={[styles.topBar, { borderBottomColor: colors.border }]}>
+        <View style={[styles.searchBox, { backgroundColor: colors.surface1, borderColor: colors.border }]}>
+          <Icon name="Search" size={15} color={colors.foregroundMuted} />
+          <TextInput
+            testID="prompt-apply-search"
+            accessibilityLabel="搜索 Prompt"
+            placeholder="搜索 Prompt 名称、标签或内容…"
+            placeholderTextColor={colors.foregroundMuted}
+            autoCapitalize="none"
+            autoCorrect={false}
+            value={query}
+            onChangeText={setQuery}
+            style={[styles.searchInput, { color: colors.foreground }]}
+          />
+          {query ? (
+            <ActionButton
+              colors={colors}
+              variant="ghost"
+              small
+              iconOnly
+              icon="X"
+              accessibilityLabel="清除搜索"
+              onPress={() => setQuery("")}
+            />
+          ) : null}
+        </View>
+        <ActionButton
+          colors={colors}
+          variant="ghost"
+          iconOnly
+          icon="RefreshCw"
+          accessibilityLabel="刷新 Prompt 列表"
+          disabled={listState.status === "loading"}
+          onPress={() => { void library.refresh().catch(() => {}); }}
+        />
+      </View>
+
+      <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.scrollContent}>
+        {listState.status === "error" ? (
+          <View style={[styles.errorBanner, { backgroundColor: colors.surface1, borderColor: colors.statusDanger }]}>
+            <Text style={[styles.promptDesc, { color: colors.statusDanger, flex: 1 }]}>
+              {listState.error ?? "读取 Prompt 列表失败"}
+            </Text>
+            <ActionButton
+              colors={colors}
+              small
+              label="重试"
+              icon="RefreshCw"
+              onPress={() => { void library.refresh().catch(() => {}); }}
+            />
+          </View>
+        ) : null}
+
+        {listState.status === "loading" && listState.prompts.length === 0 ? (
+          <View style={styles.emptyState}>
+            <Text style={[styles.emptyHint, { color: colors.foregroundMuted }]}>正在读取 Prompt 模板…</Text>
+          </View>
+        ) : filteredPrompts.length === 0 ? (
+          <View style={styles.emptyState}>
+            <Text style={[styles.emptyTitle, { color: colors.foreground }]}>
+              {query ? "没有匹配的 Prompt" : "还没有可用的 Prompt 模板"}
+            </Text>
+            <Text style={[styles.emptyHint, { color: colors.foregroundMuted }]}>
+              {query ? "试试更换搜索关键词，或在管理器中新建模板。" : "可在侧边栏的「Prompt 管理器」中创建带占位符的模板。"}
+            </Text>
+            {onOpenManager ? (
+              <ActionButton
+                colors={colors}
+                variant="primary"
+                icon="Plus"
+                label="打开 Prompt 管理器"
+                onPress={() => {
+                  library.closeApplyModal();
+                  onOpenManager();
+                }}
+              />
+            ) : null}
+          </View>
+        ) : (
+          filteredPrompts.map((prompt) => {
+            const summary = summarizePromptPlaceholders(prompt);
+            const hasPlaceholders = summary !== "无占位符";
+            return (
+              <Pressable
+                key={prompt.id}
+                testID={`prompt-picker-item-${prompt.id}`}
+                accessibilityRole="button"
+                accessibilityLabel={`选择 Prompt：${prompt.name}`}
+                onPress={() => selectPromptForApply(prompt)}
+                style={({ pressed }) => [
+                  styles.promptRow,
+                  {
+                    backgroundColor: pressed ? colors.surface2 : colors.surface1,
+                    borderColor: colors.border,
+                  },
+                ]}
+              >
+                <View style={styles.promptRowHeader}>
+                  <Text numberOfLines={1} style={[styles.promptTitle, { color: colors.foreground }]}>
+                    {prompt.name}
+                  </Text>
+                  {!hasPlaceholders ? (
                     <ActionButton
                       colors={colors}
-                      variant="ghost"
                       small
-                      iconOnly
-                      icon="X"
-                      accessibilityLabel="清除搜索"
-                      onPress={() => setQuery("")}
+                      icon="Copy"
+                      label="直接复制"
+                      onPress={() => { void applyText(renderPrompt(prompt.template, prompt.placeholders, {})); }}
                     />
-                  ) : null}
-                </View>
-                <ActionButton
-                  colors={colors}
-                  variant="ghost"
-                  iconOnly
-                  icon="RefreshCw"
-                  accessibilityLabel="刷新 Prompt 列表"
-                  disabled={listState.status === "loading"}
-                  onPress={() => { void library.refresh().catch(() => {}); }}
-                />
-              </View>
-
-              <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.scrollContent}>
-                {listState.status === "error" ? (
-                  <View style={[styles.errorBanner, { backgroundColor: colors.surface1, borderColor: colors.statusDanger }]}>
-                    <Text style={[styles.promptDesc, { color: colors.statusDanger, flex: 1 }]}>
-                      {listState.error ?? "读取 Prompt 列表失败"}
-                    </Text>
-                    <ActionButton
-                      colors={colors}
-                      small
-                      label="重试"
-                      icon="RefreshCw"
-                      onPress={() => { void library.refresh().catch(() => {}); }}
-                    />
-                  </View>
-                ) : null}
-
-                {listState.status === "loading" && listState.prompts.length === 0 ? (
-                  <View style={styles.emptyState}>
-                    <Text style={[styles.emptyHint, { color: colors.foregroundMuted }]}>正在读取 Prompt 模板…</Text>
-                  </View>
-                ) : filteredPrompts.length === 0 ? (
-                  <View style={styles.emptyState}>
-                    <Text style={[styles.emptyTitle, { color: colors.foreground }]}>
-                      {query ? "没有匹配的 Prompt" : "还没有可用的 Prompt 模板"}
-                    </Text>
-                    <Text style={[styles.emptyHint, { color: colors.foregroundMuted }]}>
-                      {query ? "试试更换搜索关键词，或在管理器中新建模板。" : "可在侧边栏的「Prompt 管理器」中创建带占位符的模板。"}
-                    </Text>
-                    {onOpenManager ? (
-                      <ActionButton
-                        colors={colors}
-                        variant="primary"
-                        icon="Plus"
-                        label="打开 Prompt 管理器"
-                        onPress={() => {
-                          library.closeApplyModal();
-                          onOpenManager();
-                        }}
-                      />
-                    ) : null}
-                  </View>
-                ) : (
-                  filteredPrompts.map((prompt) => {
-                    const summary = summarizePromptPlaceholders(prompt);
-                    const hasPlaceholders = summary !== "无占位符";
-                    return (
-                      <Pressable
-                        key={prompt.id}
-                        testID={`prompt-picker-item-${prompt.id}`}
-                        accessibilityRole="button"
-                        accessibilityLabel={`选择 Prompt：${prompt.name}`}
-                        onPress={() => selectPromptForApply(prompt)}
-                        style={({ pressed }) => [
-                          styles.promptRow,
-                          {
-                            backgroundColor: pressed ? colors.surface2 : colors.surface1,
-                            borderColor: colors.border,
-                          },
-                        ]}
-                      >
-                        <View style={styles.promptRowHeader}>
-                          <Text numberOfLines={1} style={[styles.promptTitle, { color: colors.foreground }]}>
-                            {prompt.name}
-                          </Text>
-                          {!hasPlaceholders ? (
-                            <ActionButton
-                              colors={colors}
-                              small
-                              icon="Copy"
-                              label="直接复制"
-                              onPress={() => { void applyText(renderPrompt(prompt.template, prompt.placeholders, {})); }}
-                            />
-                          ) : (
-                            <Icon name="ChevronRight" size={16} color={colors.foregroundMuted} />
-                          )}
-                        </View>
-                        {prompt.description ? (
-                          <Text numberOfLines={2} style={[styles.promptDesc, { color: colors.foregroundMuted }]}>
-                            {prompt.description}
-                          </Text>
-                        ) : null}
-                        <View style={styles.tagWrap}>
-                          <View style={[uiStyles.badge, { backgroundColor: colors.surface2, borderColor: colors.border }]}>
-                            <Text style={[uiStyles.badgeText, { color: colors.foregroundMuted }]}>{summary}</Text>
-                          </View>
-                          {prompt.tags.map((tag) => (
-                            <View key={tag} style={[uiStyles.badge, { backgroundColor: colors.surface0, borderColor: colors.border }]}>
-                              <Text style={[uiStyles.badgeText, { color: colors.foregroundMuted }]}>#{tag}</Text>
-                            </View>
-                          ))}
-                        </View>
-                      </Pressable>
-                    );
-                  })
-                )}
-              </ScrollView>
-            </>
-          ) : (
-            <>
-              <View style={[styles.stepHeader, { borderBottomColor: colors.border }]}>
-                {cameFromPicker ? (
-                  <ActionButton
-                    colors={colors}
-                    variant="ghost"
-                    small
-                    icon="ChevronLeft"
-                    label="重选"
-                    testID="prompt-apply-back"
-                    onPress={() => {
-                      setSelectedPrompt(null);
-                      setCopyError(null);
-                    }}
-                  />
-                ) : null}
-                <View style={styles.stepTitleWrap}>
-                  <Text numberOfLines={1} style={[styles.stepTitle, { color: colors.foreground }]}>
-                    {selectedPrompt.name}
-                  </Text>
-                  <Text style={[styles.stepSub, { color: colors.foregroundMuted }]}>
-                    {analysis && analysis.effectivePlaceholders.length > 0
-                      ? `当前需配置 ${activeCount} / ${analysis.effectivePlaceholders.length} 个占位符`
-                      : "该 Prompt 不包含占位符，确认后可直接复制"}
-                  </Text>
-                </View>
-                {analysis && analysis.effectivePlaceholders.length > 0 ? (
-                  <ActionButton
-                    colors={colors}
-                    variant="ghost"
-                    small
-                    label="重置"
-                    onPress={resetToDefaults}
-                  />
-                ) : null}
-              </View>
-
-              <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.scrollContent}>
-                {analysis?.effectivePlaceholders.map((def: PlaceholderDefinition) => {
-                  const active = isPlaceholderActive(def.key, analysis, values);
-                  const displayName = placeholderDisplayName(def);
-                  const discovered = analysis.discovered.find((item) => item.key === def.key);
-
-                  if (!active) {
-                    return (
-                      <View
-                        key={def.key}
-                        testID={`apply-skipped-${def.key}`}
-                        style={[styles.skippedCard, { backgroundColor: colors.surface1, borderColor: colors.border }]}
-                      >
-                        <View style={styles.cardTitleRow}>
-                          <Text numberOfLines={1} style={[styles.cardTitle, { color: colors.foregroundMuted }]}>
-                            {displayName}
-                          </Text>
-                          <PlaceholderTypeBadge colors={colors} type={def.type} multiple={def.type === "select" ? def.multiple : undefined} />
-                        </View>
-                        <Text style={[styles.stepSub, { color: colors.foregroundMuted }]}>所属可选行已省略</Text>
-                      </View>
-                    );
-                  }
-
-                  return (
-                    <SectionCard key={def.key} colors={colors} testID={`apply-field-${def.key}`}>
-                      <View style={styles.cardHeader}>
-                        <View style={styles.cardTitleRow}>
-                          <Text numberOfLines={1} style={[styles.cardTitle, { color: colors.foreground }]}>
-                            {displayName}
-                          </Text>
-                          <Text style={[styles.keyMono, { color: colors.foregroundMuted }]}>
-                            {def.type === "optional-line" ? `{{?${def.key}}}` : `{{${def.key}}}`}
-                          </Text>
-                        </View>
-                        <PlaceholderTypeBadge
-                          colors={colors}
-                          type={def.type}
-                          multiple={def.type === "select" ? def.multiple : undefined}
-                        />
-                      </View>
-
-                      {def.description ? (
-                        <Text style={[styles.stepSub, { color: colors.foregroundMuted }]}>{def.description}</Text>
-                      ) : null}
-
-                      {def.type === "text" ? (
-                        <View style={{ gap: 6 }}>
-                          <View style={styles.customRow}>
-                            <TextInput
-                              testID={`apply-text-${def.key}`}
-                              accessibilityLabel={displayName}
-                              placeholder={def.placeholder || "输入内容（留空将置空）"}
-                              placeholderTextColor={colors.foregroundMuted}
-                              multiline={def.multiline}
-                              value={values[def.key] && "text" in values[def.key]! ? (values[def.key] as { text: string }).text : ""}
-                              onChangeText={(text) => setValues((prev) => ({ ...prev, [def.key]: { text } }))}
-                              style={[
-                                uiStyles.inputBox,
-                                styles.customInput,
-                                def.multiline ? { minHeight: 82, textAlignVertical: "top" } : null,
-                                { backgroundColor: colors.surface0, borderColor: colors.border, color: colors.foreground },
-                              ]}
-                            />
-                            {values[def.key] && "text" in values[def.key]! && (values[def.key] as { text: string }).text.length > 0 ? (
-                              <ActionButton
-                                colors={colors}
-                                variant="ghost"
-                                small
-                                iconOnly
-                                icon="X"
-                                accessibilityLabel={`清空 ${displayName}`}
-                                onPress={() => setValues((prev) => ({ ...prev, [def.key]: { text: "" } }))}
-                              />
-                            ) : null}
-                          </View>
-                        </View>
-                      ) : null}
-
-                      {def.type === "select" ? (
-                        <SelectField
-                          colors={colors}
-                          def={def}
-                          value={
-                            values[def.key] && "selected" in values[def.key]!
-                              ? (values[def.key] as PlaceholderSelectValue)
-                              : { selected: [], customItems: [], customText: "" }
-                          }
-                          onChange={(next) => setValues((prev) => ({ ...prev, [def.key]: next }))}
-                        />
-                      ) : null}
-
-                      {def.type === "checkbox" ? (
-                        <View style={{ gap: 8 }}>
-                          {(() => {
-                            const checked =
-                              values[def.key] && "checked" in values[def.key]!
-                                ? (values[def.key] as { checked: boolean }).checked
-                                : def.defaultChecked;
-                            return (
-                              <>
-                                <ToggleRow
-                                  colors={colors}
-                                  testID={`apply-checkbox-${def.key}`}
-                                  label={checked ? "已勾选（展开为勾选内容）" : "未勾选（展开为未勾选内容）"}
-                                  value={checked}
-                                  onValueChange={(next) => setValues((prev) => ({ ...prev, [def.key]: { checked: next } }))}
-                                />
-                                <View
-                                  style={[
-                                    styles.branchBox,
-                                    { backgroundColor: colors.surface0, borderColor: colors.border },
-                                  ]}
-                                >
-                                  <Text style={[styles.branchLabel, { color: colors.foregroundMuted }]}>
-                                    当前将展开为：
-                                  </Text>
-                                  <Text style={[styles.branchText, { color: colors.foreground }]}>
-                                    {(checked ? def.checkedText : def.uncheckedText) || "（空内容）"}
-                                  </Text>
-                                </View>
-                              </>
-                            );
-                          })()}
-                        </View>
-                      ) : null}
-
-                      {def.type === "optional-line" ? (
-                        <View style={{ gap: 6 }}>
-                          {(() => {
-                            const included =
-                              values[def.key] && "included" in values[def.key]!
-                                ? (values[def.key] as { included: boolean }).included
-                                : def.defaultIncluded;
-                            const linePreview = discovered?.controlledLinePreviews.join(" / ");
-                            const nestedSummary =
-                              discovered && discovered.nestedKeys.length > 0
-                                ? `行内占位符：${discovered.nestedKeys.map((k) => `{{${k}}}`).join("、")}`
-                                : undefined;
-                            return (
-                              <ToggleRow
-                                colors={colors}
-                                testID={`apply-optional-${def.key}`}
-                                label={included ? "保留此可选行" : "省略此可选行"}
-                                hint={[linePreview, nestedSummary].filter(Boolean).join(" · ") || undefined}
-                                value={included}
-                                onValueChange={(next) => setValues((prev) => ({ ...prev, [def.key]: { included: next } }))}
-                              />
-                            );
-                          })()}
-                        </View>
-                      ) : null}
-                    </SectionCard>
-                  );
-                })}
-
-                <View style={[styles.previewBox, { backgroundColor: colors.surface1, borderColor: colors.border }]} testID="prompt-apply-preview">
-                  <View style={styles.previewHeader}>
-                    <Text style={[styles.cardTitle, { color: colors.foreground }]}>最终 Prompt 预览</Text>
-                    <Text style={[styles.stepSub, { color: colors.foregroundMuted }]}>{renderedOutput.length} 字</Text>
-                  </View>
-                  {copyError ? (
-                    <>
-                      <Text accessibilityLiveRegion="polite" style={[styles.stepSub, { color: colors.statusDanger }]}>
-                        {copyError}
-                      </Text>
-                      <TextInput
-                        editable={false}
-                        multiline
-                        selectTextOnFocus
-                        value={renderedOutput}
-                        style={[
-                          styles.fallbackCopyInput,
-                          { backgroundColor: colors.surface0, borderColor: colors.statusDanger, color: colors.foreground },
-                        ]}
-                      />
-                    </>
                   ) : (
-                    <Text selectable testID="prompt-apply-preview-text" style={[styles.previewText, { color: renderedOutput ? colors.foreground : colors.foregroundMuted }]}>
-                      {renderedOutput || "（当前渲染结果为空）"}
-                    </Text>
+                    <Icon name="ChevronRight" size={16} color={colors.foregroundMuted} />
                   )}
                 </View>
-              </ScrollView>
-
-              <View style={[styles.footer, { borderTopColor: colors.border, backgroundColor: colors.surface0 }]}>
-                <Text style={[styles.stepSub, { color: colors.foregroundMuted }]}>
-                  Paseo 当前不提供直接写入输入框接口，完成后将自动复制到剪贴板，可直接粘贴到对话框。
-                </Text>
-                <View style={styles.footerRow}>
-                  <ActionButton
-                    colors={colors}
-                    label="取消"
-                    onPress={() => library.closeApplyModal()}
-                  />
-                  <ActionButton
-                    colors={colors}
-                    variant="primary"
-                    icon={copySucceeded ? "Check" : "Copy"}
-                    label={copying ? "正在复制…" : "复制到剪贴板"}
-                    disabled={copying}
-                    testID="prompt-apply-confirm"
-                    onPress={() => { void applyText(renderedOutput); }}
-                  />
+                {prompt.description ? (
+                  <Text numberOfLines={2} style={[styles.promptDesc, { color: colors.foregroundMuted }]}>
+                    {prompt.description}
+                  </Text>
+                ) : null}
+                <View style={styles.tagWrap}>
+                  <View style={[uiStyles.badge, { backgroundColor: colors.surface2, borderColor: colors.border }]}>
+                    <Text style={[uiStyles.badgeText, { color: colors.foregroundMuted }]}>{summary}</Text>
+                  </View>
+                  {prompt.tags.map((tag) => (
+                    <View key={tag} style={[uiStyles.badge, { backgroundColor: colors.surface0, borderColor: colors.border }]}>
+                      <Text style={[uiStyles.badgeText, { color: colors.foregroundMuted }]}>#{tag}</Text>
+                    </View>
+                  ))}
                 </View>
-              </View>
-            </>
-          )}
+              </Pressable>
+            );
+          })
+        )}
+      </ScrollView>
+    </>
+  );
+
+  const placeholderCards = analysis?.effectivePlaceholders.map((def: PlaceholderDefinition) => {
+    const active = isPlaceholderActive(def.key, analysis, values);
+    const displayName = placeholderDisplayName(def);
+    const discovered = analysis.discovered.find((item) => item.key === def.key);
+    const swatch = swatchMap.get(def.key) ?? getPlaceholderSwatch(0, dark);
+
+    if (!active) {
+      return (
+        <View
+          key={def.key}
+          testID={`apply-skipped-${def.key}`}
+          style={[
+            styles.skippedCard,
+            {
+              backgroundColor: colors.surface1,
+              borderColor: colors.border,
+              borderLeftColor: swatch.border,
+            },
+          ]}
+        >
+          <View style={styles.cardTitleRow}>
+            <View style={[styles.colorDot, { backgroundColor: swatch.solid }]} />
+            <Text numberOfLines={1} style={[styles.cardTitle, { color: colors.foregroundMuted }]}>
+              {displayName}
+            </Text>
+            <PlaceholderTypeBadge colors={colors} type={def.type} multiple={def.type === "select" ? def.multiple : undefined} />
+          </View>
+          <Text style={[styles.stepSub, { color: colors.foregroundMuted }]}>所属可选行已省略</Text>
         </View>
-      </Modal.Content>
-    </Modal>
+      );
+    }
+
+    return (
+      <View
+        key={def.key}
+        testID={`apply-field-${def.key}`}
+        style={[
+          styles.accentCard,
+          {
+            backgroundColor: colors.surface1,
+            borderColor: colors.border,
+            borderLeftColor: swatch.solid,
+          },
+        ]}
+      >
+        <View style={styles.cardHeader}>
+          <View style={styles.cardTitleRow}>
+            <View style={[styles.colorDot, { backgroundColor: swatch.solid }]} />
+            <Text numberOfLines={1} style={[styles.cardTitle, { color: colors.foreground }]}>
+              {displayName}
+            </Text>
+            <View style={[styles.keyBadge, { backgroundColor: swatch.bg, borderColor: swatch.border }]}>
+              <Text style={[styles.keyMono, { color: swatch.fg }]}>
+                {def.type === "optional-line" ? `{{?${def.key}}}` : `{{${def.key}}}`}
+              </Text>
+            </View>
+          </View>
+          <PlaceholderTypeBadge
+            colors={colors}
+            type={def.type}
+            multiple={def.type === "select" ? def.multiple : undefined}
+          />
+        </View>
+
+        {def.description ? (
+          <Text style={[styles.stepSub, { color: colors.foregroundMuted }]}>{def.description}</Text>
+        ) : null}
+
+        {def.type === "text" ? (
+          <View style={styles.customRow}>
+            <TextInput
+              testID={`apply-text-${def.key}`}
+              accessibilityLabel={displayName}
+              placeholder={def.placeholder || "输入内容（留空将置空）"}
+              placeholderTextColor={colors.foregroundMuted}
+              multiline={def.multiline}
+              value={values[def.key] && "text" in values[def.key]! ? (values[def.key] as { text: string }).text : ""}
+              onChangeText={(text) => setValues((prev) => ({ ...prev, [def.key]: { text } }))}
+              style={[
+                uiStyles.inputBox,
+                styles.customInput,
+                def.multiline ? { minHeight: 82, textAlignVertical: "top" } : null,
+                { backgroundColor: colors.surface0, borderColor: colors.border, color: colors.foreground },
+              ]}
+            />
+            {values[def.key] && "text" in values[def.key]! && (values[def.key] as { text: string }).text.length > 0 ? (
+              <ActionButton
+                colors={colors}
+                variant="ghost"
+                small
+                iconOnly
+                icon="X"
+                accessibilityLabel={`清空 ${displayName}`}
+                onPress={() => setValues((prev) => ({ ...prev, [def.key]: { text: "" } }))}
+              />
+            ) : null}
+          </View>
+        ) : null}
+
+        {def.type === "select" ? (
+          <SelectField
+            colors={colors}
+            def={def}
+            value={
+              values[def.key] && "selected" in values[def.key]!
+                ? (values[def.key] as PlaceholderSelectValue)
+                : { selected: [], customItems: [], customText: "" }
+            }
+            onChange={(next) => setValues((prev) => ({ ...prev, [def.key]: next }))}
+          />
+        ) : null}
+
+        {def.type === "checkbox" ? (
+          <View style={{ gap: 8 }}>
+            {(() => {
+              const checked =
+                values[def.key] && "checked" in values[def.key]!
+                  ? (values[def.key] as { checked: boolean }).checked
+                  : def.defaultChecked;
+              return (
+                <>
+                  <ToggleRow
+                    colors={colors}
+                    testID={`apply-checkbox-${def.key}`}
+                    label={checked ? "已勾选（展开为勾选内容）" : "未勾选（展开为未勾选内容）"}
+                    value={checked}
+                    onValueChange={(next) => setValues((prev) => ({ ...prev, [def.key]: { checked: next } }))}
+                  />
+                  <View style={[styles.branchBox, { backgroundColor: colors.surface0, borderColor: colors.border }]}>
+                    <Text style={[styles.branchLabel, { color: colors.foregroundMuted }]}>当前将展开为：</Text>
+                    <Text style={[styles.branchText, { color: colors.foreground }]}>
+                      {(checked ? def.checkedText : def.uncheckedText) || "（空内容）"}
+                    </Text>
+                  </View>
+                </>
+              );
+            })()}
+          </View>
+        ) : null}
+
+        {def.type === "optional-line" ? (
+          <View style={{ gap: 6 }}>
+            {(() => {
+              const included =
+                values[def.key] && "included" in values[def.key]!
+                  ? (values[def.key] as { included: boolean }).included
+                  : def.defaultIncluded;
+              const linePreview = discovered?.controlledLinePreviews.join(" / ");
+              const nestedSummary =
+                discovered && discovered.nestedKeys.length > 0
+                  ? `行内占位符：${discovered.nestedKeys.map((k) => `{{${k}}}`).join("、")}`
+                  : undefined;
+              return (
+                <ToggleRow
+                  colors={colors}
+                  testID={`apply-optional-${def.key}`}
+                  label={included ? "保留此可选行" : "省略此可选行"}
+                  hint={[linePreview, nestedSummary].filter(Boolean).join(" · ") || undefined}
+                  value={included}
+                  onValueChange={(next) => setValues((prev) => ({ ...prev, [def.key]: { included: next } }))}
+                />
+              );
+            })()}
+          </View>
+        ) : null}
+      </View>
+    );
+  });
+
+  const colorLegend =
+    activePlaceholders.length > 0 ? (
+      <View style={[styles.legendWrap, { borderBottomColor: colors.border }]} testID="prompt-apply-color-legend">
+        {activePlaceholders.map((def) => {
+          const swatch = swatchMap.get(def.key) ?? getPlaceholderSwatch(0, dark);
+          return (
+            <View key={def.key} style={[styles.legendPill, { backgroundColor: swatch.bg, borderColor: swatch.border }]}>
+              <View style={[styles.colorDot, { backgroundColor: swatch.solid }]} />
+              <Text style={[styles.legendText, { color: swatch.fg }]}>{placeholderDisplayName(def)}</Text>
+            </View>
+          );
+        })}
+      </View>
+    ) : null;
+
+  const previewContent = copyError ? (
+    <View style={{ gap: 8 }}>
+      <Text accessibilityLiveRegion="polite" style={[styles.stepSub, { color: colors.statusDanger }]}>
+        {copyError}
+      </Text>
+      <TextInput
+        editable={false}
+        multiline
+        selectTextOnFocus
+        value={renderedResult.text}
+        style={[
+          styles.fallbackCopyInput,
+          { backgroundColor: colors.surface0, borderColor: colors.statusDanger, color: colors.foreground },
+        ]}
+      />
+    </View>
+  ) : (
+    <HighlightedPreviewBody
+      colors={colors}
+      lines={renderedResult.lines}
+      plainText={renderedResult.text}
+      swatchMap={swatchMap}
+    />
+  );
+
+  const footer = (
+    <View style={[styles.footer, { borderTopColor: colors.border, backgroundColor: colors.surface0 }]}>
+      <View style={styles.footerRow}>
+        <Text style={[styles.stepSub, { color: colors.foregroundMuted, flexShrink: 1 }]}>
+          完成后自动复制到剪贴板，可直接粘贴到对话框。
+        </Text>
+        <View style={styles.footerButtons}>
+          <ActionButton colors={colors} label="取消" onPress={() => library.closeApplyModal()} />
+          <ActionButton
+            colors={colors}
+            variant="primary"
+            icon={copySucceeded ? "Check" : "Copy"}
+            label={copying ? "正在复制…" : "复制到剪贴板"}
+            disabled={copying}
+            testID="prompt-apply-confirm"
+            onPress={() => { void applyText(renderedResult.text); }}
+          />
+        </View>
+      </View>
+    </View>
+  );
+
+  const configureBody = selectedPrompt ? (
+    <>
+      <View style={[styles.stepHeader, { borderBottomColor: colors.border }]}>
+        {cameFromPicker ? (
+          <ActionButton
+            colors={colors}
+            variant="ghost"
+            small
+            icon="ChevronLeft"
+            label="重选"
+            testID="prompt-apply-back"
+            onPress={() => {
+              setSelectedPrompt(null);
+              setCopyError(null);
+            }}
+          />
+        ) : null}
+        <View style={styles.stepTitleWrap}>
+          <Text numberOfLines={1} style={[styles.stepTitle, { color: colors.foreground }]}>
+            {selectedPrompt.name}
+          </Text>
+          <Text style={[styles.stepSub, { color: colors.foregroundMuted }]}>
+            {analysis && analysis.effectivePlaceholders.length > 0
+              ? `当前需配置 ${activeCount} / ${analysis.effectivePlaceholders.length} 个占位符 · 右侧高亮颜色与各占位符一一对应`
+              : "该 Prompt 不包含占位符，确认后可直接复制"}
+          </Text>
+        </View>
+        {analysis && analysis.effectivePlaceholders.length > 0 ? (
+          <ActionButton colors={colors} variant="ghost" small label="重置" onPress={resetToDefaults} />
+        ) : null}
+      </View>
+
+      {twoColumn ? (
+        <View style={styles.splitBody} testID="prompt-apply-split">
+          <View style={styles.configColumn} testID="prompt-apply-config-column">
+            <View style={[styles.columnHeader, { borderBottomColor: colors.border, backgroundColor: colors.surface0 }]}>
+              <Text style={[styles.columnTitle, { color: colors.foreground }]}>占位符配置</Text>
+              <Text style={[styles.stepSub, { color: colors.foregroundMuted }]}>{activeCount} 项生效</Text>
+            </View>
+            <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.scrollContent}>
+              {placeholderCards && placeholderCards.length > 0 ? (
+                placeholderCards
+              ) : (
+                <Text style={[styles.stepSub, { color: colors.foregroundMuted }]}>
+                  该模板没有可配置的占位符。
+                </Text>
+              )}
+            </ScrollView>
+          </View>
+
+          <View
+            style={[styles.previewColumn, { borderLeftColor: colors.border, backgroundColor: colors.surface1 }]}
+            testID="prompt-apply-preview"
+          >
+            <View style={[styles.columnHeader, { borderBottomColor: colors.border, backgroundColor: colors.surface1 }]}>
+              <Text style={[styles.columnTitle, { color: colors.foreground }]}>最终结果预览</Text>
+              <Text style={[styles.stepSub, { color: colors.foregroundMuted }]}>{renderedResult.text.length} 字</Text>
+            </View>
+            {colorLegend}
+            <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.scrollContent}>
+              {previewContent}
+            </ScrollView>
+          </View>
+        </View>
+      ) : (
+        <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.scrollContent}>
+          {placeholderCards}
+          <View
+            style={[styles.previewBox, { backgroundColor: colors.surface1, borderColor: colors.border }]}
+            testID="prompt-apply-preview"
+          >
+            <View style={styles.previewHeader}>
+              <Text style={[styles.cardTitle, { color: colors.foreground }]}>最终 Prompt 预览</Text>
+              <Text style={[styles.stepSub, { color: colors.foregroundMuted }]}>{renderedResult.text.length} 字</Text>
+            </View>
+            {previewContent}
+          </View>
+        </ScrollView>
+      )}
+
+      {footer}
+    </>
+  ) : null;
+
+  // Compact layout uses Paseo's native sheet Modal; wide layout uses a centered two-column modal dialog.
+  if (layout.compact) {
+    return (
+      <PaseoModal
+        open={open}
+        title={title}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) library.closeApplyModal();
+        }}
+      >
+        <PaseoModal.Content scrollable={false} style={{ backgroundColor: colors.surface0 }} contentContainerStyle={{ padding: 0, gap: 0 }}>
+          <View style={styles.body} testID="prompt-apply-modal-body">
+            {selectedPrompt ? configureBody : pickerBody}
+          </View>
+        </PaseoModal.Content>
+      </PaseoModal>
+    );
+  }
+
+  return (
+    <NativeModal
+      visible={open}
+      transparent
+      animationType="fade"
+      onRequestClose={() => library.closeApplyModal()}
+    >
+      <View style={styles.backdropRoot} accessibilityViewIsModal>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="关闭弹窗"
+          onPress={() => library.closeApplyModal()}
+          style={styles.backdropScrim}
+        />
+        <View
+          accessibilityRole="none"
+          style={[
+            selectedPrompt ? styles.wideDialog : styles.pickerDialog,
+            { backgroundColor: colors.surface0, borderColor: colors.border },
+          ]}
+        >
+          <View style={[styles.dialogHeader, { borderBottomColor: colors.border }]}>
+            <View style={styles.dialogHeaderLeft}>
+              <Icon name="Sparkles" size={16} color={colors.accent} />
+              <Text numberOfLines={1} style={[styles.dialogTitle, { color: colors.foreground }]}>
+                {title}
+              </Text>
+            </View>
+            <ActionButton
+              colors={colors}
+              variant="ghost"
+              small
+              iconOnly
+              icon="X"
+              accessibilityLabel="关闭"
+              onPress={() => library.closeApplyModal()}
+            />
+          </View>
+          <View style={styles.body} testID="prompt-apply-modal-body">
+            {selectedPrompt ? configureBody : pickerBody}
+          </View>
+        </View>
+      </View>
+    </NativeModal>
   );
 }

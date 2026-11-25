@@ -6,6 +6,61 @@ import type { PlaceholderType } from "../shared/contracts";
 
 export type ThemeColors = PluginHostProps["theme"]["colors"];
 
+export interface PlaceholderSwatch {
+  solid: string;
+  fg: string;
+  bg: string;
+  lineBg: string;
+  border: string;
+}
+
+const DARK_SWATCHES: readonly PlaceholderSwatch[] = [
+  { solid: "#60a5fa", fg: "#93c5fd", bg: "rgba(59,130,246,0.22)", lineBg: "rgba(59,130,246,0.09)", border: "rgba(96,165,250,0.45)" },
+  { solid: "#34d399", fg: "#6ee7b7", bg: "rgba(16,185,129,0.22)", lineBg: "rgba(16,185,129,0.09)", border: "rgba(52,211,153,0.45)" },
+  { solid: "#fbbf24", fg: "#fde68a", bg: "rgba(245,158,11,0.22)", lineBg: "rgba(245,158,11,0.09)", border: "rgba(251,191,36,0.45)" },
+  { solid: "#c084fc", fg: "#d8b4fe", bg: "rgba(168,85,247,0.24)", lineBg: "rgba(168,85,247,0.10)", border: "rgba(192,132,252,0.45)" },
+  { solid: "#fb7185", fg: "#fda4af", bg: "rgba(244,63,94,0.22)", lineBg: "rgba(244,63,94,0.09)", border: "rgba(251,113,133,0.45)" },
+  { solid: "#2dd4bf", fg: "#5eead4", bg: "rgba(20,184,166,0.22)", lineBg: "rgba(20,184,166,0.09)", border: "rgba(45,212,191,0.45)" },
+  { solid: "#fb923c", fg: "#fdba74", bg: "rgba(249,115,22,0.22)", lineBg: "rgba(249,115,22,0.09)", border: "rgba(251,146,60,0.45)" },
+  { solid: "#818cf8", fg: "#a5b4fc", bg: "rgba(99,102,241,0.24)", lineBg: "rgba(99,102,241,0.10)", border: "rgba(129,140,248,0.45)" },
+];
+
+const LIGHT_SWATCHES: readonly PlaceholderSwatch[] = [
+  { solid: "#2563eb", fg: "#1d4ed8", bg: "rgba(37,99,235,0.13)", lineBg: "rgba(37,99,235,0.06)", border: "rgba(37,99,235,0.34)" },
+  { solid: "#059669", fg: "#047857", bg: "rgba(5,150,105,0.13)", lineBg: "rgba(5,150,105,0.06)", border: "rgba(5,150,105,0.34)" },
+  { solid: "#d97706", fg: "#b45309", bg: "rgba(217,119,6,0.14)", lineBg: "rgba(217,119,6,0.06)", border: "rgba(217,119,6,0.35)" },
+  { solid: "#7c3aed", fg: "#6d28d9", bg: "rgba(124,58,237,0.13)", lineBg: "rgba(124,58,237,0.06)", border: "rgba(124,58,237,0.34)" },
+  { solid: "#e11d48", fg: "#be123c", bg: "rgba(225,29,72,0.12)", lineBg: "rgba(225,29,72,0.05)", border: "rgba(225,29,72,0.32)" },
+  { solid: "#0d9488", fg: "#0f766e", bg: "rgba(13,148,136,0.13)", lineBg: "rgba(13,148,136,0.06)", border: "rgba(13,148,136,0.34)" },
+  { solid: "#ea580c", fg: "#c2410c", bg: "rgba(234,88,12,0.13)", lineBg: "rgba(234,88,12,0.06)", border: "rgba(234,88,12,0.34)" },
+  { solid: "#4f46e5", fg: "#4338ca", bg: "rgba(79,70,229,0.13)", lineBg: "rgba(79,70,229,0.06)", border: "rgba(79,70,229,0.34)" },
+];
+
+export function isDarkSurface(hexOrRgb: string): boolean {
+  const hex = hexOrRgb.trim().match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (hex) {
+    const raw = hex[1]!;
+    const full = raw.length === 3 ? raw.split("").map((c) => c + c).join("") : raw;
+    const r = Number.parseInt(full.slice(0, 2), 16);
+    const g = Number.parseInt(full.slice(2, 4), 16);
+    const b = Number.parseInt(full.slice(4, 6), 16);
+    return (0.299 * r + 0.587 * g + 0.114 * b) < 128;
+  }
+  const rgb = hexOrRgb.trim().match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+  if (rgb) {
+    const r = Number(rgb[1]);
+    const g = Number(rgb[2]);
+    const b = Number(rgb[3]);
+    return (0.299 * r + 0.587 * g + 0.114 * b) < 128;
+  }
+  return true;
+}
+
+export function getPlaceholderSwatch(index: number, dark: boolean): PlaceholderSwatch {
+  const palette = dark ? DARK_SWATCHES : LIGHT_SWATCHES;
+  return palette[((index % palette.length) + palette.length) % palette.length]!;
+}
+
 export const PLACEHOLDER_TYPE_META: Record<
   PlaceholderType,
   { label: string; shortLabel: string; icon: string; summary: string }

@@ -44,10 +44,10 @@ const nativeHostPlugin = {
         export const TextInput = React.forwardRef((props, ref) => React.createElement('TextInput', { ...props, ref }));
         export const Icon = make('Icon'), ScrollView = make('ScrollView'), SidebarRow = make('SidebarRow');
         export const Modal = Object.assign(
-          ({ open, children, ...props }) => open ? React.createElement('Modal', props, children) : null,
+          ({ open, visible, children, ...props }) => (open ?? visible) ? React.createElement('Modal', props, children) : null,
           { Content: make('ModalContent') },
         );
-        export const StyleSheet = { hairlineWidth: 1, create: styles => styles };
+        export const StyleSheet = { hairlineWidth: 1, absoluteFillObject: {}, create: styles => styles };
         export const copyText = async (text) => {
           if (globalThis.__promptMockHost.copyFailure) throw globalThis.__promptMockHost.copyFailure;
           globalThis.__promptMockHost.copied.push(text);
@@ -244,21 +244,23 @@ test("Command Center inserts prompt in-place via Sidebar Modal, guides placehold
     findByTestId(renderer, "apply-optional-include_tests").props.onPress();
   });
 
+  assert.ok(findByTestId(renderer, "prompt-apply-split"));
+  assert.ok(findByTestId(renderer, "prompt-apply-color-legend"));
   assert.ok(findByTestId(renderer, "apply-skipped-test_framework"));
   assert.ok(findByTestId(renderer, "apply-skipped-test_cases"));
+  assert.equal(textOf(findByTestId(renderer, "preview-highlight-target")), "store.ts");
+  assert.equal(textOf(findByTestId(renderer, "preview-highlight-focus")), "逻辑正确性");
+  assert.equal(textOf(findByTestId(renderer, "preview-highlight-strict_mode")), "请优先总结最关键的 2~3 个问题，保持简洁。");
 
-  const previewText = textOf(findByTestId(renderer, "prompt-apply-preview-text"));
-  assert.equal(
-    previewText,
-    "请帮我审查 store.ts 的代码改动，重点关注 逻辑正确性。\n请优先总结最关键的 2~3 个问题，保持简洁。",
-  );
+  const expectedText =
+    "请帮我审查 store.ts 的代码改动，重点关注 逻辑正确性。\n请优先总结最关键的 2~3 个问题，保持简洁。";
 
   // Confirm copy to clipboard
   await act(async () => {
     findByTestId(renderer, "prompt-apply-confirm").props.onPress();
   });
 
-  assert.deepEqual(mockHostState.copied, [previewText]);
+  assert.deepEqual(mockHostState.copied, [expectedText]);
   assert.ok(mockHostState.toasts.some((item) => item.kind === "show" && item.message.includes("剪贴板")));
   // Modal closes after successful copy
   assert.equal(renderer.root.findAllByType("Modal" as never).length, 0);

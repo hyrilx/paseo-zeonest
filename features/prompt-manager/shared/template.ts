@@ -360,14 +360,33 @@ export function renderPlaceholderValue(def: PlaceholderDefinition, value: Placeh
   }
 }
 
-export function renderPrompt(
+export interface RenderedSegment {
+  text: string;
+  /** Placeholder key that produced this text span, or null for literal template text. */
+  placeholderKey: string | null;
+  /** Optional-line placeholder keys controlling this line, if any. */
+  optionalLineKeys: readonly string[];
+}
+
+export interface RenderedLine {
+  lineIndex: number;
+  controllingOptionalKeys: readonly string[];
+  segments: readonly RenderedSegment[];
+}
+
+export interface RenderedPromptResult {
+  text: string;
+  lines: readonly RenderedLine[];
+}
+
+export function renderPromptSegments(
   template: string,
   placeholders: readonly PlaceholderDefinition[],
   values: PlaceholderValueMap,
-): string {
+): RenderedPromptResult {
   const analysis = analyzeTemplate(template, placeholders);
   const defMap = new Map(analysis.effectivePlaceholders.map((item) => [item.key, item]));
-  const outputLines: string[] = [];
+  const renderedLines: RenderedLine[] = [];
 
   for (const line of analysis.lines) {
     const included = line.controllingOptionalKeys.every((optKey) => {
@@ -377,11 +396,26 @@ export function renderPrompt(
     if (!included) continue;
 
     const tokens = scanLineTokens(line.raw);
-    let rendered = "";
+    const segments: RenderedSegment[] = [];
     let cursor = 0;
 
+    function pushLiteral(rawSlice: string) {
+      const unescaped = rawSlice.replace(/\\\{\{/g, "{{");
+      if (!unescaped) return;
+      const last = segments[segments.length - 1];
+      if (last && last.placeholderKey === null) {
+        last.text += unescaped;
+      } else {
+        segments.push({
+          text: unescaped,
+          placeholderKey: null,
+          optionalLineKeys: line.controllingOptionalKeys,
+        });
+      }
+    }
+
     for (const token of tokens) {
-      rendered += line.raw.slice(cursor, token.start).replace(/\\\{\{/g, "{{");
+      pushLiteral(line.raw.slice(cursor, token.start));
       cursor = token.end;
 
       if (token.kind === "optional-open" || token.kind === "optional-close") {
@@ -392,14 +426,38 @@ export function renderPrompt(
       if (!def || def.type === "optional-line") {
         continue;
       }
-      rendered += renderPlaceholderValue(def, values[token.key]);
+
+      const valueText = renderPlaceholderValue(def, values[token.key]);
+      if (valueText.length > 0) {
+        segments.push({
+          text: valueText,
+          placeholderKey: token.key,
+          optionalLineKeys: line.controllingOptionalKeys,
+        });
+      }
     }
 
-    rendered += line.raw.slice(cursor).replace(/\\\{\{/g, "{{");
-    outputLines.push(rendered);
+    pushLiteral(line.raw.slice(cursor));
+    renderedLines.push({
+      lineIndex: line.index,
+      controllingOptionalKeys: line.controllingOptionalKeys,
+      segments,
+    });
   }
 
-  return outputLines.join("\n");
+  const text = renderedLines
+    .map((line) => line.segments.map((segment) => segment.text).join(""))
+    .join("\n");
+
+  return { text, lines: renderedLines };
+}
+
+export function renderPrompt(
+  template: string,
+  placeholders: readonly PlaceholderDefinition[],
+  values: PlaceholderValueMap,
+): string {
+  return renderPromptSegments(template, placeholders, values).text;
 }
 
 export function createSamplePromptDraft(): PromptDraft {
