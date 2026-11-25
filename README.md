@@ -8,7 +8,7 @@ Zeonest 取自 Zeolite（沸石）+ Nest（巢），意为「沸石之巢」：�
 
 <!-- zeonest:features:start -->
 
-当前包含 **9** 个子功能，默认均关闭；点击名称查看使用说明。
+当前包含 **10** 个子功能，默认均关闭；点击名称查看使用说明。
 
 | 名称 / ID | 描述 | 版本 | 标签 | 作者 |
 | --- | --- | --- | --- | --- |
@@ -20,6 +20,7 @@ Zeonest 取自 Zeolite（沸石）+ Nest（巢），意为「沸石之巢」：�
 | [文件活动](features/file-activity/README.md)<br><code>file-activity</code> | 按轮查看当前会话的文件增删改查记录与差异 | 0.1.2 | <code>files</code> <code>conversation</code> | hyrilx |
 | [Pi 设置](features/pi-settings/README.md)<br><code>pi-settings</code> | 管理全局与项目的 Pi 模型、技能、插件和 MCP，应用前审阅配置 diff | 0.1.1 | <code>pi</code> <code>configuration</code> | hyrilx |
 | [Pi 状态桥接](features/pi-status-bridge/README.md)<br><code>pi-status-bridge</code> | 按会话汇总 Pi 插件状态，查看全文并调用映射的展开命令 | 0.2.0 | <code>pi</code> <code>status</code> | hyrilx |
+| [Prompt 管理器](features/prompt-manager/README.md)<br><code>prompt-manager</code> | 在侧边栏管理带占位符的 Prompt 模板，通过命令中心弹窗引导填充并复制到剪贴板。 | 0.1.0 | <code>效率</code> <code>Prompt</code> | hyrilx |
 | [会话统计](features/session-stats/README.md)<br><code>session-stats</code> | 通过聊天胶囊查看会话轮次、工具用时与估算输出速度。 | 0.2.0 | <code>效率</code> <code>统计</code> | hyrilx |
 
 <!-- zeonest:features:end -->

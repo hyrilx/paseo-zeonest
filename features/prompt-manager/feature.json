@@ -1,0 +1,11 @@
+{
+  "id": "prompt-manager",
+  "name": "Prompt 管理器",
+  "description": "在侧边栏管理带占位符的 Prompt 模板，通过命令中心弹窗引导填充并复制到剪贴板。",
+  "version": "0.1.0",
+  "tags": [
+    "效率",
+    "Prompt"
+  ],
+  "author": "hyrilx"
+}
