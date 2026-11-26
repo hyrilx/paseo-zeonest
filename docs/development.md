@@ -79,18 +79,46 @@ Paseo 0.15.4 支持 manifest `build` 的 argv 数组，准备命令与目录归�
 
 ## 真实 Paseo 验收
 
-仅在获准信任并安装插件后执行。不要擅自开启全局 pluginsEnabled，不重启 daemon。
+### 独立预览宿主（已获授权）
 
-1. 类型与测试通过，构建后安装或重载实际插件 ID，检查 running 与插件日志。
+worktree 开发模式下，已获长期授权在独立预览宿主上更新 `zeonest` 并在浏览器内完成端到端测试与视觉验收，无需合入 `main`、推送远端或触碰日常宿主：
+
+- 预览宿主目录（`--home`）：`~/.paseo-zeonest-preview`（`$HOME/.paseo-zeonest-preview`）
+- 监听地址与 Web UI：`http://127.0.0.1:6799`（Zeonest 设置页：`http://127.0.0.1:6799/settings/hosts/srv_ac1vmF5PAK5F/plugins/zeonest`）
+- 预期 `serverId`：`srv_ac1vmF5PAK5F`
+- 插件来源：本地 Git 仓库 `git:file:///Users/hyrilx/02-dev/paseo-zeonest`（Paseo 按 `--ref` 检出到预览宿主自身目录并独立构建，不绑定任务 worktree 路径）
+
+每轮在任务 worktree 本地提交后，先清理环境并核对宿主身份，再按完整 SHA 更新并检查运行态：
+
+```bash
+unset PASEO_HOME PASEO_HOST
+preview="$HOME/.paseo-zeonest-preview"
+ref="$(git rev-parse HEAD)"
+test "$(paseo daemon status --home "$preview" --json | jq -r .serverId)" = srv_ac1vmF5PAK5F
+paseo plugin update zeonest --ref "$ref" --home "$preview" --json
+paseo plugin ls zeonest --home "$preview" --json
+```
+
+确认输出中 `status == "running"` 且 `installation.currentRevision == "$ref"` 后，在浏览器打开预览宿主页面完成启停、重载、端到端与视觉验收；对照基线或回退时再次执行 `--ref <目标SHA>` 即可。
+
+安全边界：
+
+- 预览宿主未运行、`serverId` 或监听地址不匹配、或 `zeonest` 未按本地 Git 源安装时，**立即停止并报告阻塞**，不得回退到日常宿主。
+- 预览宿主只隔离 Paseo 会话与插件设置，不隔离同一操作系统用户的文件系统；验收涉及文件、Pi 配置或外部状态读写时，必须使用独立临时目录和样例数据。
+- 日常宿主（`~/.paseo`）不在上述许可范围内，未经额外授权不得安装、更新、启用或重载插件；不修改任何 daemon 的 `pluginsEnabled`，不启动或重启 daemon。
+
+### 验收检查项
+
+1. 类型与测试通过，在独立预览宿主更新到当前提交 SHA（或获准在目标宿主安装/重载）后，检查 `running` 状态、revision 与插件日志。
 2. 通过 Settings → Plugins 的 Zeonest 配置按钮或 Command Center 打开功能集。
 3. 宽屏、compact/mobile、明暗主题检查布局、长描述、可访问性、空列表。
-4. 保存开关显示待生效，整体重载前不改变行为；重载后两端同步更新。
+4. 保存开关显示待生效，整体重载前不改变行为；重载后两端同步更新，且自重载按钮只影响目标宿主。
 5. 重载前新连接客户端必须使用服务端本次运行快照，而非刚保存的开关。
 6. 关闭功能后仍能访问其配置页面与配置服务，配置生效方式遵循功能说明。
 7. 两客户端同时修改开关，过期 revision 不得覆盖新数据；可以重新读取重试。
 8. 检查断线、无效设置、初始化/清理失败提示，不将未知状态显示为成功。
 
-**本次未执行真实 Paseo 的宽屏/compact、明暗主题及出错状态验收。** 自动化状态/主题 token 测试不替代这些检查。
+自动化状态/主题 token 测试不替代真实 Paseo 的宽屏/compact、明暗主题及出错状态检查；未执行或受阻时须在交付说明中明确列出未验收项。
 
 ## 发布与维护
 
