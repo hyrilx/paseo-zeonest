@@ -57,9 +57,10 @@ git -C /absolute/path/to/worktrees/doc-git-workflow status --short --branch
 3. 提交前检查 `git diff --check`、完整 diff 和未跟踪文件。只用显式文件路径 `git add -- <本轮文件...>`，不使用 `git add .`、`git add -A` 或 `git commit -a`。发现不属于本轮的已暂存内容时先停下确认，不擅自取消暂存；同文件有他人改动时协调所有权或精确选择本轮 hunks，不整文件夹带提交。
 4. 检查 `git diff --cached --check`、`git diff --cached --stat` 和完整 staged diff，再创建本轮唯一提交。留意 pre-commit hook 可能按暂存元数据更新 README 功能目录；不得绕过 hook 掩盖失败，也不夹带 README 手写区的其他修改。
 5. 提交后用 `git show --stat --oneline HEAD`、`git show --format= --name-only HEAD` 和 `git status --short --branch` 核实实际文件与剩余改动。发现意外改动时停止后续合并/推送并报告，不用 reset 或 amend 掩盖。
-6. 本轮引入的检查失败先修复，再提交。受外部条件或既有问题阻塞、确需结束本轮时，仍可在任务分支保留一个提交，但须在提交正文及回复中写明 WIP、失败原因和未完成项；不得标成验证通过或合入 `main`。
+6. 需要进行端到端测试或视觉验收时，先创建本轮本地提交，再在已授权的独立预览宿主（`~/.paseo-zeonest-preview`，`127.0.0.1:6799`，`srv_ac1vmF5PAK5F`）执行 `paseo plugin update zeonest --ref "$(git rev-parse HEAD)" --home "$HOME/.paseo-zeonest-preview"`（清理 `PASEO_HOME`/`PASEO_HOST` 并核对 `serverId`），在浏览器内完成验收，无需合入 `main` 或推送远端。若同一轮内预览验收发现问题，在当前 worktree 修复并更新**本轮**未推送提交（严禁修改前一轮提交），随后再次按最终 `HEAD` SHA 更新预览宿主并复验。预览宿主检出到自身目录，后续合入主干并清理任务 worktree 不影响预览宿主。
+7. 本轮引入的检查失败先修复，再提交。受外部条件或既有问题阻塞、确需结束本轮时，仍可在任务分支保留一个提交，但须在提交正文及回复中写明 WIP、失败原因和未完成项；不得标成验证通过或合入 `main`。
 
-交付回复包含任务分支、worktree 路径、当前轮提交 SHA、验证结果，以及是否已合并/推送。没有提交时说明具体原因。
+交付回复包含任务分支、worktree 路径、当前轮提交 SHA、验证结果（含预览宿主验收的 SHA 与结果，如已执行），以及是否已合并/推送。没有提交时说明具体原因。
 
 ## 合并 main：一个任务保留一个节点
 
