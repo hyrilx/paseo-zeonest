@@ -11,6 +11,8 @@ import { FeatureManager, type ReloadState } from "./feature-manager";
 import { createRuntimeStore } from "./runtime-store";
 import { useSettingsViewport } from "./settings-viewport";
 
+const RELOAD_REFRESH_TIMEOUT_MS = 30_000;
+
 export function contributeShell(
   client: PluginClientContext,
   featureCatalog: readonly FeatureMetadata[],
@@ -30,25 +32,51 @@ export function contributeShell(
     const viewport = useSettingsViewport(props.layout.platform, settingsId);
     const reloading = useRef(false);
     const mounted = useRef(false);
+    const refreshTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+    function clearRefreshTimer() {
+      if (refreshTimer.current !== undefined) {
+        clearTimeout(refreshTimer.current);
+        refreshTimer.current = undefined;
+      }
+    }
     useEffect(() => {
       mounted.current = true;
-      return () => { mounted.current = false; };
+      return () => {
+        mounted.current = false;
+        clearRefreshTimer();
+      };
     }, []);
+    function awaitPageRefresh(reason?: string) {
+      clearRefreshTimer();
+      refreshTimer.current = setTimeout(() => {
+        refreshTimer.current = undefined;
+        if (!mounted.current || lifetime.closed) return;
+        reloading.current = false;
+        setReloadState({
+          status: "error",
+          message: reason
+            ? `等待页面刷新超时（${reason}），请检查插件状态后重试。`
+            : "等待页面刷新超时，请检查插件状态后重试。",
+        });
+      }, RELOAD_REFRESH_TIMEOUT_MS);
+    }
     async function reloadPlugin() {
       if (reloading.current || lifetime.closed) return;
       reloading.current = true;
-      setReloadState({ status: "running", message: "正在请求宿主重新加载，配置页可能暂时关闭。" });
+      clearRefreshTimer();
+      setReloadState({ status: "running", message: null });
       try {
         const result = await client.rpc(reloadRpc, {});
         if (!mounted.current || lifetime.closed) return;
-        setReloadState(result.error
-          ? { status: "error", message: result.error }
-          : { status: "unknown", message: "CLI 命令已结束。请重新打开 Zeonest 配置页，确认本次运行状态；加载错误请查看 Paseo 插件日志。" });
+        if (result.error) {
+          reloading.current = false;
+          setReloadState({ status: "error", message: result.error });
+        } else {
+          awaitPageRefresh();
+        }
       } catch (error) {
         if (!mounted.current || lifetime.closed) return;
-        setReloadState({ status: "unknown", message: `重载结果尚未确认：${errorMessage(error)}。自重载会中断连接，请查看 Paseo 插件状态；确认未完成后再重试。` });
-      } finally {
-        reloading.current = false;
+        awaitPageRefresh(errorMessage(error));
       }
     }
     const screen = Object.values(featureSettingsScreens).find((screen) => screen.id === settingsId);
