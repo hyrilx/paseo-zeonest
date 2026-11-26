@@ -30,5 +30,5 @@
 - 源码/Git 安装依赖 manifest 的显式准备命令，不只依赖 npm 生命周期脚本；预构建包的准备入口必须只使用随包携带的文件，不安装开发依赖或调用缺失工具。
 - 不提交演示功能、真实凭据或个人运行数据。新增子功能默认关闭。
 - 运行 `npm run check`（全类型/测试/源级边界/双端构建/产物边界）和 `npm pack --dry-run --ignore-scripts`；主动检查改变源码的 LSP，若不可用须报告，不能把空缓存当通过。
-- UI 还需在真实 Paseo 检查宽屏、compact、明暗主题及出错状态；未执行就明确说明。
-- 未获用户授权，不安装/启用插件，不修改 daemon 的 `pluginsEnabled`。不要重启 daemon 来加载源码。
+- UI 与端到端验收已获长期授权在独立预览宿主（`~/.paseo-zeonest-preview`、`127.0.0.1:6799`、`srv_ac1vmF5PAK5F`）执行：本地提交后清理 `PASEO_HOME`/`PASEO_HOST` 并核对 `serverId`，运行 `paseo plugin update zeonest --ref "<SHA>" --home "$HOME/.paseo-zeonest-preview"`，在浏览器内完成宽屏、compact、明暗主题、出错状态及功能端到端验证（详见 [开发与验证](docs/development.md#真实-paseo-验收) 及 `.agents/skills/`）；预览宿主不可用、未执行或受阻须明确说明。
+- 日常宿主（`~/.paseo`）未获额外授权，不安装、更新、启用或重载插件；不修改任何 daemon 的 `pluginsEnabled`，不启动或重启 daemon 来加载源码。

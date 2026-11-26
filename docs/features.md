@@ -122,7 +122,7 @@ export default {
 3. 在 `features/<id>/README.md` 说明行为、配置生效方式、数据访问和验证方法。
 4. 在 `features/<id>/tests/` 增加功能自身测试与 fixtures，不仅依赖壳测试。统一命令递归发现测试，无需维护清单。
 5. 运行 `npm run check`、`npm pack --dry-run --ignore-scripts`。
-6. 获准安装后在真实 Paseo 验证，保持新增功能默认关闭。
+6. 按[开发与验证](development.md#真实-paseo-验收)在已授权的独立预览宿主执行 `--ref` 更新并在浏览器完成端到端与视觉验收，保持新增功能默认关闭；日常宿主仍需另行授权。
 
 修改展示信息、增加/删除入口或删除整个功能后，统一构建会自动重新扫描。除新增第三方依赖等合理例外，正常新增功能的手写代码只修改 `features/<id>/`，不修改壳、原生入口、根测试或构建清单。根 README 的功能目录从 `feature.json` 自动生成，随功能一起提交；每次克隆后运行 `npm run hooks:install` 启用 pre-commit hook，由它根据暂存区元数据更新并暂存生成区，也可手动运行 `npm run docs:features`。不提交 bundle 或临时接线。删除功能只需移除该功能目录后重新验证，README 目录会同步移除该项。
 
