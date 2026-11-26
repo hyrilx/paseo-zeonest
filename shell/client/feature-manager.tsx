@@ -1,14 +1,21 @@
 import type { PluginSurfaceProps, PluginSettingsScreenContribution, SettingsState } from "@getpaseo/plugin/client";
 import { Icon, SettingsAction, SettingsCard, SettingsSection, TextInput } from "@getpaseo/plugin/client/ui";
-import { Pressable, Switch, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, Switch, Text, View } from "react-native";
 import type { FeatureMetadata } from "../shared/catalog";
 import { pendingFeatureIds } from "../shared/selection";
 import type { shellSettings } from "../shared/settings";
 import type { RuntimeState } from "./runtime-store";
 
 export interface ReloadState {
-  status: "idle" | "running" | "error" | "unknown";
+  status: "idle" | "running" | "error";
   message: string | null;
+}
+
+interface BannerState {
+  kind: "ready" | "warning" | "loading" | "error";
+  label: string;
+  hint: string;
+  accentButton: boolean;
 }
 
 interface Props extends PluginSurfaceProps {
@@ -33,7 +40,9 @@ export function FeatureManager({
 }: Props) {
   const colors = theme.colors;
   const reloading = reloadState.status === "running";
+  const loadingStatus = settings.status === "loading" || runtime.status === "loading";
   const toggleDisabled = settings.status !== "ready" || settings.saving || reloading;
+  const reloadDisabled = settings.saving || reloading || loadingStatus;
   const pending = settings.status === "ready" && runtime.status === "ready"
     ? pendingFeatureIds(featureCatalog, settings.values.enabled, runtime.enabledIds) : [];
   const pendingIds = new Set(pending);
@@ -44,6 +53,7 @@ export function FeatureManager({
   ) : featureCatalog;
   const twoColumns = !layout.compact && width >= MIN_CARD_WIDTH * 2 + CARD_GAP;
   const muted = { color: colors.foregroundMuted, fontSize: 13, lineHeight: 19 };
+  const banner = resolveBannerState({ reloading, loadingStatus, reloadState, runtime, pendingCount: pending.length });
 
   return (
     <View style={{ gap: 12, backgroundColor: colors.surface0 }}>
@@ -66,7 +76,79 @@ export function FeatureManager({
         )}
       </View>
 
-      {settings.status === "loading" && <Text style={muted}>正在读取已保存的开关…</Text>}
+      <SettingsCard testID="zeonest-status-banner">
+        <View style={{
+          flexDirection: "row", alignItems: "center", gap: 10,
+          paddingHorizontal: 14, paddingVertical: 10, minHeight: 58,
+        }}>
+          <View testID="zeonest-status-icon" style={{
+            width: 24, height: 24, alignItems: "center", justifyContent: "center", flexShrink: 0,
+          }}>
+            {banner.kind === "loading" ? (
+              <ActivityIndicator size="small" color={reloading ? colors.accent : colors.foregroundMuted} />
+            ) : (
+              <Icon
+                name={banner.kind === "ready" ? "CircleCheck" : banner.kind === "warning" ? "TriangleAlert" : "CircleAlert"}
+                size={18}
+                color={banner.kind === "ready" ? colors.statusSuccess : banner.kind === "warning" ? colors.statusWarning : colors.statusDanger}
+              />
+            )}
+          </View>
+          <View style={{ flex: 1, minWidth: 0, gap: 2 }} accessibilityLiveRegion="polite">
+            <Text
+              numberOfLines={banner.kind === "error" ? undefined : 1}
+              style={{
+                color: banner.kind === "error" ? colors.statusDanger : colors.foreground,
+                fontSize: 14, fontWeight: "600", lineHeight: 20,
+              }}
+            >
+              {banner.label}
+            </Text>
+            <Text
+              accessibilityRole={banner.kind === "error" ? "alert" : undefined}
+              numberOfLines={banner.kind === "error" ? undefined : 1}
+              style={{
+                color: banner.kind === "error" ? colors.statusDanger : colors.foregroundMuted,
+                fontSize: 12, lineHeight: 17,
+              }}
+            >
+              {banner.hint}
+            </Text>
+          </View>
+          <Pressable
+            testID="zeonest-reload-button"
+            accessibilityRole="button"
+            accessibilityLabel={reloading ? "正在重新加载" : "重新加载"}
+            accessibilityState={{ disabled: reloadDisabled, busy: reloading }}
+            disabled={reloadDisabled}
+            hitSlop={4}
+            onPress={() => { if (!reloadDisabled) reloadPlugin(); }}
+            style={({ pressed }) => ({
+              flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+              minHeight: layout.compact ? 40 : 36, paddingHorizontal: 12, borderRadius: 8, flexShrink: 0,
+              borderWidth: 1,
+              borderColor: banner.accentButton ? colors.accent : colors.border,
+              backgroundColor: banner.accentButton
+                ? colors.accent
+                : pressed ? colors.surface2 : colors.surface0,
+              opacity: reloadDisabled ? 0.5 : pressed ? 0.85 : 1,
+            })}
+          >
+            <Icon
+              name="RefreshCw"
+              size={14}
+              color={banner.accentButton ? colors.accentForeground : colors.foregroundMuted}
+            />
+            <Text style={{
+              color: banner.accentButton ? colors.accentForeground : colors.foreground,
+              fontSize: 13, fontWeight: "500", lineHeight: 18,
+            }}>
+              重新加载
+            </Text>
+          </Pressable>
+        </View>
+      </SettingsCard>
+
       {(settings.status === "error" || settings.status === "invalid") && (
         <SettingsSection title="无法读取开关">
           <SettingsCard>
@@ -83,24 +165,6 @@ export function FeatureManager({
           hint="保存未成功。重新读取后再操作，避免覆盖其他客户端的修改。"
           actionLabel="重新读取" onPress={() => { void settings.reload(); }} /></SettingsCard>
       )}
-      {runtime.status === "loading" && <Text style={muted}>正在读取本次运行状态…</Text>}
-      {runtime.status === "error" && (
-        <Text accessibilityRole="alert" style={{ ...muted, color: colors.statusDanger }}>
-          启动失败：{runtime.error}。请查看插件日志，修复后从 Paseo 插件菜单重新加载。
-        </Text>
-      )}
-      {(pending.length > 0 || reloading || reloadState.status === "error") && (
-        <SettingsCard>
-          <SettingsAction label={pending.length ? `${pending.length} 项开关已保存，等待生效` : "应用已保存的开关"}
-            hint="重新加载 Zeonest 后，变更将在所有连接的客户端生效。"
-            actionLabel={reloading ? "正在重新加载…" : "重新加载"}
-            disabled={settings.saving || reloading}
-            onPress={() => { if (!settings.saving && !reloading) reloadPlugin(); }} />
-        </SettingsCard>
-      )}
-      {reloadState.message && <Text accessibilityLiveRegion="polite" style={{ ...muted,
-        color: reloadState.status === "error" ? colors.statusDanger : colors.statusWarning,
-      }}>{reloadState.message}</Text>}
 
       {visible.length === 0 ? (
         <SettingsCard>
@@ -131,6 +195,31 @@ export function FeatureManager({
       )}
     </View>
   );
+}
+
+function resolveBannerState({ reloading, loadingStatus, reloadState, runtime, pendingCount }: {
+  reloading: boolean;
+  loadingStatus: boolean;
+  reloadState: ReloadState;
+  runtime: RuntimeState;
+  pendingCount: number;
+}): BannerState {
+  if (reloading) {
+    return { kind: "loading", label: "正在重新加载", hint: "完成后页面将自动刷新", accentButton: false };
+  }
+  if (reloadState.status === "error") {
+    return { kind: "error", label: "重新加载失败", hint: reloadState.message ?? "请检查插件状态后重试。", accentButton: false };
+  }
+  if (runtime.status === "error") {
+    return { kind: "error", label: "插件启动失败", hint: `启动失败：${runtime.error}。请查看插件日志，修复后重新加载。`, accentButton: false };
+  }
+  if (loadingStatus) {
+    return { kind: "loading", label: "正在读取运行状态", hint: "正在同步开关与本次运行状态", accentButton: false };
+  }
+  if (pendingCount > 0) {
+    return { kind: "warning", label: `${pendingCount} 项开关待生效`, hint: "点击重新加载后生效", accentButton: true };
+  }
+  return { kind: "ready", label: "运行正常", hint: "当前开关配置已生效", accentButton: false };
 }
 
 function renderFeatureCard({ feature, colors, width, running, pending, enabled, disabled, setEnabled, openSettings }: {

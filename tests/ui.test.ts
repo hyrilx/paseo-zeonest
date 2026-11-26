@@ -48,7 +48,7 @@ async function uiFixture(t: { after(fn: () => Promise<void>): void }, populated 
           contents: path === "@getpaseo/plugin/client"
             ? "let state; export function setSettingsState(next) { state = next; } export function useSettings() { return state; }"
             : path === "react-native"
-              ? 'export const View = "View", Text = "Text", Switch = "Switch", Pressable = "Pressable"; export const useWindowDimensions = () => ({ width: 1000, height: 800 });'
+              ? 'export const ActivityIndicator = "ActivityIndicator", View = "View", Text = "Text", Switch = "Switch", Pressable = "Pressable"; export const useWindowDimensions = () => ({ width: 1000, height: 800 });'
               : ["Icon", "TextInput", "ScrollView", "SettingsAction", "SettingsCard", "SettingsRow", "SettingsSection", "SettingsSwitch"]
                 .map((name) => "export const " + name + " = " + JSON.stringify(name) + ";").join("\n"),
           loader: "js",
@@ -105,11 +105,11 @@ test("feature UI displays all metadata, pending state and settings even while di
   let opened = "";
   const tree = ui.FeatureManager({ ...props, openSettings: (id: string) => { opened = id; } });
   const visible = text(tree);
-  assert.ok(nodes(tree).some((node) => node.props.label === "1 项开关已保存，等待生效"));
+  assert.match(visible, /1 项开关待生效/);
   assert.match(visible, /v1.2.3 · 测试作者 · 工具/);
   assert.match(visible, /未启用 · 待启用/);
   const all = nodes(tree);
-  const actions = all.filter((node) => node.type === "Pressable");
+  const actions = all.filter((node) => node.type === "Pressable" && node.props.testID !== "zeonest-reload-button");
   assert.deepEqual(actions.map((node) => node.props.accessibilityLabel), ["功能甲：打开配置"]);
   const [action] = actions;
   assert.ok(action);
@@ -333,7 +333,7 @@ test("child settings remain reachable while shell settings and startup are loadi
       const back = root.root.findByProps({ accessibilityLabel: "返回功能集" });
       await act(async () => back.props.onPress());
       assert.equal(root.root.findAllByType(ui.featureSettingsScreens.alpha.Component).length, 0);
-      assert.match(JSON.stringify(root.toJSON()), status === "loading" ? /正在读取本次运行状态/ : /startup failed/);
+      assert.match(JSON.stringify(root.toJSON()), status === "loading" ? /正在读取运行状态/ : /startup failed/);
       assert.deepEqual(fake.opened, []);
       assert.deepEqual(fake.screens, ["zeonest-features"]);
     } finally {
@@ -369,13 +369,31 @@ test("a late client snapshot after teardown cannot resurrect native contribution
   assert.deepEqual(fake.removed, ["zeonest-settings", "zeonest-features"]);
 });
 
-test("reload is contextual to pending switches and never runs while saving or reloading", async (t) => {
+test("status banner is permanent and transitions cleanly across normal, loading, pending, reloading and error states", async (t) => {
   const ui = await uiFixture(t);
-  let calls = 0;
-  for (const settings of [readySettings(), { status: "loading" }, readySettings({ status: "invalid", error: "invalid" })]) {
-    ui.setSettingsState(settings);
-    assert.equal(nodes(ui.FeatureManager(props)).some((node) => node.props.actionLabel === "重新加载"), false);
-  }
+  let calls: number = 0;
+  const statusIcon = (tree: unknown) => nodes(tree).find((node) => node.props.testID === "zeonest-status-icon")!;
+  const reloadButton = (tree: unknown) => nodes(tree).find((node) => node.props.testID === "zeonest-reload-button")!;
+
+  // Normal ready state: CircleCheck icon, enabled subtle reload button
+  ui.setSettingsState(readySettings());
+  const readyTree = ui.FeatureManager({ ...props, reloadPlugin: () => { calls++; } });
+  assert.ok(nodes(readyTree).some((node) => node.props.testID === "zeonest-status-banner"));
+  assert.match(text(readyTree), /运行正常/);
+  assert.equal(nodes(statusIcon(readyTree)).find((node) => node.type === "Icon")!.props.name, "CircleCheck");
+  assert.equal(reloadButton(readyTree).props.disabled, false);
+  reloadButton(readyTree).props.onPress();
+  assert.equal(calls, 1);
+
+  // Loading settings or runtime: ActivityIndicator, disabled reload button
+  ui.setSettingsState({ status: "loading" });
+  const loadingTree = ui.FeatureManager({ ...props, reloadPlugin: () => { calls++; } });
+  assert.ok(nodes(statusIcon(loadingTree)).some((node) => node.type === "ActivityIndicator"));
+  assert.equal(reloadButton(loadingTree).props.disabled, true);
+  reloadButton(loadingTree).props.onPress();
+  assert.equal(calls, 1);
+
+  // Pending switches & saving/reloading locks
   for (const saving of [false, true]) {
     for (const running of [false, true]) {
       ui.setSettingsState(readySettings({ values: { enabled: { alpha: true } }, saving }));
@@ -383,10 +401,18 @@ test("reload is contextual to pending switches and never runs while saving or re
         reloadState: { status: running ? "running" : "idle", message: null },
         reloadPlugin: () => { calls++; },
       });
-      const action = nodes(tree).find((node) => node.props.label === "1 项开关已保存，等待生效")!;
-      assert.equal(action.props.disabled, saving || running);
-      const before = calls;
-      action.props.onPress();
+      const iconBox = statusIcon(tree);
+      if (running) {
+        assert.ok(nodes(iconBox).some((node) => node.type === "ActivityIndicator"));
+        assert.match(text(tree), /正在重新加载/);
+      } else {
+        assert.equal(nodes(iconBox).find((node) => node.type === "Icon")!.props.name, "TriangleAlert");
+        assert.match(text(tree), /1 项开关待生效/);
+      }
+      const button = reloadButton(tree);
+      assert.equal(button.props.disabled, saving || running);
+      const before: number = calls;
+      button.props.onPress();
       assert.equal(calls, before + (saving || running ? 0 : 1));
     }
   }
@@ -405,44 +431,54 @@ async function mountShell(t: { after(fn: () => Promise<void>): void }, onReload:
     await act(async () => root.unmount());
     await cleanup();
   });
-  const action = () => root.root.findByProps({ label: "1 项开关已保存，等待生效" });
-  return { root, action, cleanup, ui };
+  const button = () => root.root.findByProps({ testID: "zeonest-reload-button" });
+  const statusIcon = () => root.root.findByProps({ testID: "zeonest-status-icon" });
+  return { root, button, statusIcon, cleanup, ui };
 }
 
 test("real settings hooks coalesce double clicks, lock switches and surface CLI errors for retry", async (t) => {
   let finish!: (value: { error: string | null }) => void;
-  let calls = 0;
-  const { root, action } = await mountShell(t, () => {
+  let calls: number = 0;
+  const { root, button, statusIcon } = await mountShell(t, () => {
     calls++;
     return new Promise((resolve) => { finish = resolve; });
   });
   await act(async () => {
-    const press = action().props.onPress;
+    const press = button().props.onPress;
     press(); press();
   });
   assert.equal(calls, 1);
-  assert.equal(action().props.disabled, true);
-  assert.equal(action().props.actionLabel, "正在重新加载…");
+  assert.equal(button().props.disabled, true);
+  assert.equal(statusIcon().findAll((node) => String(node.type) === "ActivityIndicator").length, 1);
+  assert.match(JSON.stringify(root.toJSON()), /正在重新加载/);
   assert.ok(root.root.findAll((node) => String(node.type) === "Switch").every((node) => node.props.disabled));
   await act(async () => { finish({ error: "CLI missing" }); });
   assert.match(JSON.stringify(root.toJSON()), /CLI missing/);
-  assert.equal(action().props.disabled, false);
+  assert.equal(statusIcon().find((node) => String(node.type) === "Icon").props.name, "CircleAlert");
+  assert.equal(button().props.disabled, false);
   assert.ok(root.root.findAll((node) => String(node.type) === "Switch").every((node) => !node.props.disabled));
-  await act(async () => { action().props.onPress(); finish({ error: null }); });
+  await act(async () => { button().props.onPress(); finish({ error: null }); });
   assert.equal(calls, 2);
-  assert.match(JSON.stringify(root.toJSON()), /确认本次运行状态/);
-  assert.doesNotMatch(JSON.stringify(root.toJSON()), /重载成功/);
+  assert.equal(statusIcon().findAll((node) => String(node.type) === "ActivityIndicator").length, 1);
+  assert.doesNotMatch(JSON.stringify(root.toJSON()), /重载结果尚未确认|确认本次运行状态/);
 });
 
-test("self-reload RPC interruption stays unconfirmed and late teardown results are ignored", async (t) => {
+test("self-reload RPC interruption stays in loading state until refresh, falls back on timeout and ignores teardown", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   let reject!: (error: Error) => void;
-  const { root, action, cleanup } = await mountShell(t, () => new Promise((_resolve, fail) => { reject = fail; }));
-  await act(async () => action().props.onPress());
+  const { root, button, statusIcon, cleanup } = await mountShell(t, () => new Promise((_resolve, fail) => { reject = fail; }));
+  await act(async () => button().props.onPress());
   await act(async () => reject(new Error("Plugin stopped: zeonest")));
-  assert.match(JSON.stringify(root.toJSON()), /重载结果尚未确认/);
-  assert.doesNotMatch(JSON.stringify(root.toJSON()), /重载成功/);
-  await act(async () => action().props.onPress());
+  assert.equal(statusIcon().findAll((node) => String(node.type) === "ActivityIndicator").length, 1);
+  assert.equal(button().props.disabled, true);
+  assert.ok(root.root.findAll((node) => String(node.type) === "Switch").every((node) => node.props.disabled));
+  assert.doesNotMatch(JSON.stringify(root.toJSON()), /重载结果尚未确认|重载成功/);
+  await act(async () => { t.mock.timers.tick(30_000); });
+  assert.match(JSON.stringify(root.toJSON()), /等待页面刷新超时/);
+  assert.equal(button().props.disabled, false);
+  await act(async () => button().props.onPress());
   await act(async () => { root.unmount(); await cleanup(); });
   await act(async () => reject(new Error("late disconnect")));
+  t.mock.timers.tick(30_000);
   assert.equal(root.toJSON(), null);
 });
